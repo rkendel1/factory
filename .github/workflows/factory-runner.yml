@@ -47,3 +47,21 @@ jobs:
           trap 'kill ${SERVER_PID}' EXIT
           sleep 2
           curl --fail http://127.0.0.1:3111/health
+
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: software-factory-runner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Fly CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy production
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: fly deploy --config fly.toml --remote-only --strategy rolling

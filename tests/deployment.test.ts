@@ -7,6 +7,7 @@ import { createHttpServer } from '../src/server.js';
 test('production deployment uses remote authority boundaries', async () => {
   const fly = await readFile(path.join(process.cwd(), 'fly.toml'), 'utf8');
   const dockerfile = await readFile(path.join(process.cwd(), 'Dockerfile'), 'utf8');
+  const workflow = await readFile(path.join(process.cwd(), '.github/workflows/factory-runner.yml'), 'utf8');
 
   assert.match(fly, /app = 'factory-idvhpa'/);
   assert.match(fly, /internal_port = 3000/);
@@ -20,6 +21,9 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.match(dockerfile, /npm ci --omit=dev/);
   assert.match(dockerfile, /pax --version/);
   assert.match(dockerfile, /USER node/);
+  assert.match(workflow, /fly deploy --config fly\.toml --remote-only --strategy rolling/);
+  assert.match(workflow, /FLY_API_TOKEN: \$\{\{ secrets\.FLY_API_TOKEN \}\}/);
+  assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
 });
 
 test('local runtime health exposes AppPort initialization and shutdown rejects admission', async () => {
