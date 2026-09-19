@@ -13,6 +13,7 @@ primary_region = 'iad'
   strategy = 'rolling'
 
 [env]
+  # These remote authority locations are deployment topology, not secrets.
   AUTHBOUNDRY_URL = 'https://authboundry.fly.dev'
   FACTORY_ENVIRONMENT_ID = 'production'
   FACTORY_FELTDB_MODE = 'remote'
