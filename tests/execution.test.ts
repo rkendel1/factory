@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { access, chmod, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { executeContract } from '../src/execution.js';
+import { withContractFingerprint } from '../src/contract.js';
+import { COLLECTIONS } from '../src/felt.js';
 import { createService, createRepository, createTempWorkspace, seedWork } from './helpers.js';
 
 test('authorized command executes and persists evidence', async () => {
@@ -61,17 +63,18 @@ test('missing PAX fails before project execution', async () => {
   const root = await createTempWorkspace('execution-pax-missing');
   const repositoryRoot = await createRepository(root, { 'package.json': '{}' });
   await assert.rejects(
-    executeContract({
+    executeContract(withContractFingerprint({
       runId: 'run_pax_missing',
       workId: 'work_123',
       principal: 'factory-service',
+      authorizationDecisionId: 'decision_run_pax_missing',
       repository: { provider: 'local', owner: 'rkendel1', name: 'factory', ref: 'main', path: repositoryRoot },
       operation: 'architecture-conformance',
       capabilities: ['repository.read'],
       execution: { mode: 'pax', operation: 'run', target: 'conformance', args: [] },
       limits: { timeoutMs: 1000 },
       evidence: { required: true },
-    }, { repositoryRoot, workspaceRoot: path.join(root, 'workspaces'), paxExecutable: path.join(root, 'missing-pax') }),
+    }), { repositoryRoot, workspaceRoot: path.join(root, 'workspaces'), paxExecutable: path.join(root, 'missing-pax') }),
     /PAX is required.*unavailable/i,
   );
 });
@@ -81,10 +84,11 @@ test('unauthorized shell command is rejected by executor boundary', async () => 
   const repositoryRoot = await createRepository(root, { 'README.md': '# test\n' });
 
   await assert.rejects(
-    executeContract({
+    executeContract(withContractFingerprint({
       runId: 'run_shell',
       workId: 'work_123',
       principal: 'factory-service',
+      authorizationDecisionId: 'decision_run_shell',
       repository: { provider: 'local', owner: 'rkendel1', name: 'factory', ref: 'main', path: repositoryRoot },
       operation: 'repo-echo',
       capabilities: ['repository.read'],
@@ -92,7 +96,33 @@ test('unauthorized shell command is rejected by executor boundary', async () => 
       command: ['bash', '-lc', 'echo unauthorized'],
       limits: { timeoutMs: 1000 },
       evidence: { required: true },
-    }, { repositoryRoot, workspaceRoot: path.join(root, 'workspaces') }),
+    }), { repositoryRoot, workspaceRoot: path.join(root, 'workspaces') }),
     /not authorized/i,
+  );
+});
+
+test('tampering with a persisted contract is rejected by fingerprint validation', async () => {
+  const root = await createTempWorkspace('execution-contract-integrity');
+  const repositoryRoot = await createRepository(root, { 'package.json': '{}' });
+  const service = await createService({ workingDirectory: root, namespace: 'execution-contract-integrity', repositoryRoot });
+  await seedWork(service);
+
+  const run = await service.startRun({
+    workId: 'work_123',
+    repository: { provider: 'local', owner: 'rkendel1', name: 'factory', ref: 'main' },
+    operation: 'repo-echo',
+  }, 'factory-service');
+  const db = (service as unknown as { db: import('@feltdb/core').StateFirstDB }).db;
+  const record = await db.collection(COLLECTIONS.executionContracts).get(run.id) as {
+    contract: Parameters<typeof executeContract>[0];
+  };
+  const tampered = {
+    ...record.contract,
+    command: ['node', '-e', 'console.log("tampered")'],
+  };
+
+  await assert.rejects(
+    executeContract(tampered, { repositoryRoot, workspaceRoot: path.join(root, 'workspaces') }),
+    /fingerprint validation failed/i,
   );
 });

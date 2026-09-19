@@ -62,6 +62,15 @@ export function buildEvidence(
   return {
     id: contract.runId,
     runId: contract.runId,
+    requestId: contract.runId,
+    contractId: contract.runId,
+    contractFingerprint: contract.fingerprint,
+    principal: contract.principal,
+    operation: contract.operation,
+    ref: contract.repository.ref,
+    executionMode: contract.execution.mode,
+    authorizationDecisionId: contract.authorizationDecisionId,
+    authorizationDecision: 'granted',
     status: result.status,
     exitCode: result.exitCode,
     startedAt: result.startedAt,
@@ -74,9 +83,9 @@ export function buildEvidence(
     },
     stdout: result.stdout,
     stderr: result.stderr,
-    ...(result.paxVersion ? {
+    ...(contract.execution.mode === 'pax' ? {
       pax: {
-        version: result.paxVersion,
+        version: result.paxVersion ?? 'unavailable',
         operation: contract.execution.operation ?? 'run',
         target: contract.execution.target,
         args: contract.execution.args,

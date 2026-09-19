@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createService, createTempWorkspace, seedWork } from './helpers.js';
+import { COLLECTIONS } from '../src/felt.js';
 
 const request = {
   workId: 'work_123',
@@ -50,4 +51,41 @@ test('unauthorized capability rejects execution', async () => {
   const run = await service.startRun({ ...request, operation: 'architecture-conformance' }, 'unlisted-principal');
   assert.equal(run.status, 'failed');
   assert.match(run.error ?? '', /does not own work|not delegated/i);
+});
+
+test('caller execution fields are rejected instead of becoming contract authority', async () => {
+  const service = await createService();
+  await seedWork(service);
+
+  await assert.rejects(
+    service.startRun({
+      ...request,
+      command: ['node', '-e', 'process.exit(0)'],
+      execution_mode: 'native',
+      timeoutMs: 999999999,
+      capabilities: ['secret.read'],
+      principal: 'attacker',
+    } as typeof request & Record<string, unknown>, 'factory-service'),
+    /not accepted/i,
+  );
+});
+
+test('authorized contract and evidence retain factory provenance', async () => {
+  const service = await createService();
+  await seedWork(service);
+
+  const run = await service.startRun(request, 'factory-service');
+  const db = (service as unknown as { db: import('@feltdb/core').StateFirstDB }).db;
+  const contract = await db.collection(COLLECTIONS.executionContracts).get(run.id) as {
+    fingerprint: string;
+    contract: { command?: string[]; fingerprint?: string; authorizationDecisionId?: string };
+  } | null;
+  const evidence = await service.getEvidence(run.id);
+
+  assert.ok(contract?.fingerprint);
+  assert.equal(contract?.fingerprint, contract?.contract.fingerprint);
+  assert.equal(contract?.contract.authorizationDecisionId, run.authorizationDecisionId);
+  assert.equal(evidence?.contractFingerprint, contract?.fingerprint);
+  assert.equal(evidence?.authorizationDecision, 'granted');
+  assert.deepEqual(contract?.contract.command, ['node', '-e', "console.log('authorized')"]);
 });

@@ -37,6 +37,11 @@ Authenticate requests with the `Authorization` header by sending the caller prin
 - FeltDB stores the durable run lifecycle, authorization decisions, execution contracts, and structured evidence.
 - PAX-backed contracts verify `pax --version`, invoke `pax --json run <target>`, and record PAX provenance separately from native execution evidence.
 - Native contracts execute only the command materialized into the execution contract; callers cannot select native execution.
+- `POST /v1/runs` accepts only untrusted operation intent (`workId`, operation, repository identity, and optional idempotency key). It never accepts a command, execution mode, PAX target, timeout, capabilities, environment, secret, artifact path, evidence destination, or principal.
+- Authorization is evaluated before a contract is created. The Factory derives an immutable, fingerprinted contract from `.flow` and the authorized FeltDB work record; the runner verifies that fingerprint before execution.
+- Execution contracts are service-owned artifacts. The current `.flow` policy grammar does not express a distinct service writer subject, so the service enforces create-once semantics and rejects mutations. There is intentionally no contract creation endpoint.
+- Evidence records the request, authorization decision, contract fingerprint, principal, operation, repository ref, execution mode, and PAX invocation needed to reconstruct the durable chain.
+- The Factory Runner never executes caller-supplied commands.
 - Remote FeltDB must be explicitly configured with `FELTDB_URL`; the server does not silently fall back to local storage for production authority.
 
 PAX is installed separately from the runner. Set `PAX_BIN` (or `paxExecutable` in an embedded service) when the executable is not on `PATH`. PAX availability is required only for capabilities declared with `execution_mode pax`; missing PAX fails that run without falling back to package-manager detection.

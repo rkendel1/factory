@@ -3,6 +3,7 @@ import type { Readable } from 'node:stream';
 import { buildEvidence } from './evidence.js';
 import { createWorkspace, destroyWorkspace, materializeRepository, type WorkspaceHandle } from './workspace.js';
 import type { ExecutionContract, StructuredEvidence } from './types.js';
+import { assertContractIntegrity } from './contract.js';
 
 async function checkPax(executable: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -71,6 +72,7 @@ export async function executeContract(
     paxExecutable?: string;
   } = {},
 ): Promise<ExecutionOutcome> {
+  assertContractIntegrity(contract);
   if (contract.execution.mode === 'native') {
     validateCommand(contract);
   }

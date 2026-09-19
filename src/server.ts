@@ -4,6 +4,7 @@ import { loadFactoryFlow, createFactoryDB, COLLECTIONS } from './felt.js';
 import { authorizeExecution } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
 import { executeContract, type ExecutionHandle } from './execution.js';
+import { assertContractIntegrity } from './contract.js';
 import type {
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -16,6 +17,37 @@ import type {
 
 function isTerminal(status: RunRecord['status']): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+const requestKeys = new Set(['workId', 'repository', 'operation', 'idempotencyKey']);
+const repositoryKeys = new Set(['provider', 'owner', 'name', 'ref']);
+const validTransitions: Record<RunRecord['status'], RunRecord['status'][]> = {
+  accepted: ['authorized', 'failed', 'cancelled'],
+  authorized: ['allocated', 'failed', 'cancelled'],
+  allocated: ['preparing', 'failed', 'cancelled'],
+  preparing: ['executing', 'failed', 'cancelled'],
+  executing: ['verifying', 'completed', 'failed', 'cancelled'],
+  verifying: ['completed', 'failed', 'cancelled'],
+  completed: [],
+  failed: [],
+  cancelled: [],
+};
+
+function validateRunRequest(request: RunRequest): void {
+  if (!request || typeof request !== 'object') {
+    throw new Error('Invalid run request');
+  }
+  const unexpected = Object.keys(request as object).filter((key) => !requestKeys.has(key));
+  if (unexpected.length > 0) {
+    throw new Error(`Execution fields are not accepted in a run request: ${unexpected.join(', ')}`);
+  }
+  if (typeof request.workId !== 'string' || typeof request.operation !== 'string' || !request.repository) {
+    throw new Error('Run request requires workId, operation, and repository');
+  }
+  const repositoryUnexpected = Object.keys(request.repository as object).filter((key) => !repositoryKeys.has(key));
+  if (repositoryUnexpected.length > 0) {
+    throw new Error(`Repository fields are not accepted in a run request: ${repositoryUnexpected.join(', ')}`);
+  }
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {
@@ -35,11 +67,13 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
 function parsePrincipal(request: IncomingMessage): string | null {
   const bearer = request.headers.authorization;
   if (bearer?.startsWith('Bearer ')) {
-    return bearer.slice('Bearer '.length).trim();
+    const principal = bearer.slice('Bearer '.length).trim();
+    return /^[A-Za-z0-9._-]{1,255}$/.test(principal) ? principal : null;
   }
 
   const principal = request.headers['x-factory-principal'];
-  return typeof principal === 'string' && principal.trim() ? principal.trim() : null;
+  const value = typeof principal === 'string' ? principal.trim() : '';
+  return /^[A-Za-z0-9._-]{1,255}$/.test(value) ? value : null;
 }
 
 export class FactoryService {
@@ -147,6 +181,10 @@ export class FactoryService {
   }
 
   async startRun(request: RunRequest, principal: string): Promise<RunRecord> {
+    validateRunRequest(request);
+    if (!principal.trim()) {
+      throw new Error('Authenticated principal is required');
+    }
     const fingerprint = this.fingerprint(request, principal);
     const idempotencyKey = request.idempotencyKey ?? fingerprint;
     const admission = await this.db.admitOperation({
@@ -325,6 +363,7 @@ export class FactoryService {
   }
 
   private async recordContract(contract: ExecutionContractRecord['contract']): Promise<void> {
+    assertContractIntegrity(contract);
     const record: ExecutionContractRecord = {
       id: contract.runId,
       runId: contract.runId,
@@ -332,9 +371,18 @@ export class FactoryService {
       operation: contract.operation,
       commandJson: JSON.stringify(contract.command ?? []),
       contract,
+      fingerprint: contract.fingerprint,
       createdAt: new Date().toISOString(),
     };
-    await this.db.collection<ExecutionContractRecord>(COLLECTIONS.executionContracts).put(record, record.id);
+    const contracts = this.db.collection<ExecutionContractRecord>(COLLECTIONS.executionContracts);
+    const existing = await contracts.get(record.id);
+    if (existing) {
+      if (existing.fingerprint !== record.fingerprint) {
+        throw new Error(`Execution contract ${record.id} is immutable`);
+      }
+      return;
+    }
+    await contracts.insert(record, record.id);
   }
 
   private async appendEvent(runId: string, status: RunRecord['status'], detail: string): Promise<void> {
@@ -353,6 +401,11 @@ export class FactoryService {
     const current = await runs.get(runId);
     if (!current) {
       throw new Error(`Run ${runId} does not exist`);
+    }
+
+    if (patch.status && patch.status !== current.status
+      && !validTransitions[current.status].includes(patch.status)) {
+      throw new Error(`Invalid run transition ${current.status} -> ${patch.status}`);
     }
 
     if (current.__version === undefined) {
@@ -442,7 +495,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`Software Factory Runner error: ${message}\n`);
-      writeJson(response, 500, { error: 'Internal server error' });
+      const clientError = /invalid run request|requires workId|not accepted in a run request|not accepted in a repository|authenticated principal is required|Execution fields/.test(message);
+      writeJson(response, clientError ? 400 : 500, { error: clientError ? message : 'Internal server error' });
     }
   });
 

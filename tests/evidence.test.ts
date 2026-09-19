@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEvidence } from '../src/evidence.js';
+import { withContractFingerprint } from '../src/contract.js';
 import type { ExecutionContract } from '../src/types.js';
 
-const contract: ExecutionContract = {
+const contract: ExecutionContract = withContractFingerprint({
   runId: 'run_123',
   workId: 'work_123',
   principal: 'factory-service',
+  authorizationDecisionId: 'decision_123',
   repository: { provider: 'github', owner: 'rkendel1', name: 'flow_db', ref: 'main', commit: 'abc123' },
   operation: 'architecture-conformance',
   capabilities: ['repository.read', 'evidence.write'],
@@ -14,7 +16,7 @@ const contract: ExecutionContract = {
   command: ['npm', 'run', 'conformance'],
   limits: { timeoutMs: 1000 },
   evidence: { required: true },
-};
+});
 
 test('success produces structured result', () => {
   const evidence = buildEvidence(contract, {

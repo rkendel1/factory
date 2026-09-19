@@ -55,6 +55,8 @@ export interface ExecutionContract {
   runId: string;
   workId: string;
   principal: string;
+  authorizationDecisionId: string;
+  fingerprint: string;
   repository: RepositoryRef;
   operation: string;
   capabilities: string[];
@@ -119,6 +121,7 @@ export interface ExecutionContractRecord {
   operation: string;
   commandJson: string;
   contract: ExecutionContract;
+  fingerprint: string;
   createdAt: string;
 }
 
@@ -144,6 +147,15 @@ export interface JevEvaluation {
 export interface StructuredEvidence {
   id: string;
   runId: string;
+  requestId?: string;
+  contractId?: string;
+  contractFingerprint: string;
+  principal?: string;
+  operation?: string;
+  ref?: string;
+  executionMode?: 'pax' | 'native';
+  authorizationDecisionId: string;
+  authorizationDecision: 'granted' | 'rejected';
   status: 'completed' | 'failed' | 'cancelled';
   exitCode: number | null;
   startedAt: string;
