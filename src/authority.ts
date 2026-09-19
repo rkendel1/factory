@@ -8,6 +8,7 @@ import type {
   WorkRecord,
 } from './types.js';
 import { withContractFingerprint } from './contract.js';
+import type { AuthenticatedContext } from './auth.js';
 
 interface OperationAuthority {
   name: string;
@@ -94,10 +95,11 @@ function repositoriesMatch(work: WorkRecord, repository: RepositoryRef): boolean
 export async function authorizeExecution(
   db: StateFirstDB,
   flowSpec: FlowSpec,
-  principal: string,
+  context: AuthenticatedContext,
   request: RunRequest,
   runId: string,
 ): Promise<AuthorizationResolution> {
+  const principal = context.principal;
   const decisionCollection = db.collection<AuthorizationDecisionRecord>(COLLECTIONS.authorizationDecisions);
   const workCollection = db.collection<WorkRecord>(COLLECTIONS.work);
   const createdAt = new Date().toISOString();
@@ -109,6 +111,9 @@ export async function authorizeExecution(
       id: runId,
       runId,
       principal,
+      tenantId: context.tenant,
+      authSession: context.session,
+      delegation: context.delegation,
       operation: request.operation,
       decision: 'rejected',
       reason,
@@ -131,6 +136,10 @@ export async function authorizeExecution(
     return reject(`work ${request.workId} is not active`);
   }
 
+  if (context.boundaryVerified && (!work.tenantId || work.tenantId !== context.tenant)) {
+    return reject(`tenant ${context.tenant} is not authorized for work ${request.workId}`);
+  }
+
   if (work.ownerPrincipal !== principal) {
     return reject(`principal ${principal} does not own work ${request.workId}`);
   }
@@ -151,6 +160,9 @@ export async function authorizeExecution(
     id: runId,
     runId,
     principal,
+    tenantId: context.tenant,
+    authSession: context.session,
+    delegation: context.delegation,
     operation: request.operation,
     decision: 'granted',
     reason: 'authorized by .flow capability and FeltDB work state',
@@ -162,6 +174,7 @@ export async function authorizeExecution(
       runId,
       workId: request.workId,
       principal,
+      tenantId: context.tenant,
       authorizationDecisionId: decision.id,
       repository: {
         provider: work.repositoryProvider,
