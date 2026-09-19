@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { factoryAppPortApplication } from '../src/appport.js';
+import { createFactoryAppPortApplication } from '../src/appport.js';
 import { createCanonicalApplicationContract } from '../src/application-contract.js';
 import { loadFactoryFlow } from '../src/felt.js';
 import { createService, createRepository, createTempWorkspace, seedWork } from './helpers.js';
 
 test('AppPort SDK is the canonical Factory protocol contract', () => {
-  const manifest = factoryAppPortApplication.manifest();
+  const factoryAppPortApplication = createFactoryAppPortApplication();
   const contract = createCanonicalApplicationContract(loadFactoryFlow());
+  const manifest = factoryAppPortApplication.manifest();
   assert.equal(manifest.application.id, 'software_factory');
   assert.deepEqual(manifest.provides.map((capability) => capability.name), [
     'softwarefactory.architectureconformance',

@@ -32,7 +32,9 @@ export class AppPortAdapterError extends Error {
   }
 }
 
-export const factoryAppPortApplication = createCanonicalApplicationContract(loadFactoryFlow()).appPort;
+export function createFactoryAppPortApplication(flowPath?: string): CanonicalApplicationContract['appPort'] {
+  return createCanonicalApplicationContract(loadFactoryFlow(flowPath)).appPort;
+}
 
 export interface AppPortAdapterOptions {
   namespace: string;
