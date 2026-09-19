@@ -7,6 +7,7 @@ import type {
   RunRequest,
   WorkRecord,
 } from './types.js';
+import { withContractFingerprint } from './contract.js';
 
 interface OperationAuthority {
   name: string;
@@ -157,15 +158,17 @@ export async function authorizeExecution(
   };
   await decisionCollection.put(decision, decision.id);
 
-  return {
-    allowed: true,
-    reason: decision.reason,
-    decision,
-    contract: {
+  const contract = {
       runId,
       workId: request.workId,
       principal,
-      repository: { ...request.repository },
+      authorizationDecisionId: decision.id,
+      repository: {
+        provider: work.repositoryProvider,
+        owner: work.repositoryOwner,
+        name: work.repositoryName,
+        ref: work.repositoryRef,
+      },
       operation: request.operation,
       capabilities: authority.capabilities,
       execution: {
@@ -177,6 +180,12 @@ export async function authorizeExecution(
       command: authority.command,
       limits: { timeoutMs: authority.timeoutMs },
       evidence: { required: true },
-    },
+    };
+
+  return {
+    allowed: true,
+    reason: decision.reason,
+    decision,
+    contract: withContractFingerprint(contract),
   };
 }
