@@ -21,6 +21,33 @@ npm test
 FACTORY_FELTDB_MODE=local npm run dev
 ```
 
+## Public FeltDB package
+
+Factory consumes the published `@feltdb/core` package through its public
+entrypoint. The current release is `0.11.4`; no workspace or repository-local
+FeltDB package is required.
+
+```bash
+npm install @feltdb/core
+```
+
+The smallest durable-state example is:
+
+```ts
+import { createFeltDB } from '@feltdb/core';
+
+const db = createFeltDB({
+  namespace: 'example',
+  authorityScope: { kind: 'tenant', tenantId: 'example', environmentId: 'local' },
+});
+await db.collection('records').put({ status: 'ready' }, 'record-1');
+```
+
+`@feltdb/core` is the public FeltDB release consumed by Factory. `@feltdb/webllm`
+is not a Factory runtime dependency and is published and consumed separately.
+The `test:external` check installs the registry artifact into a clean temporary
+project, compiles a public import, and executes a state operation.
+
 ## HTTP API
 
 - `POST /v1/runs`
