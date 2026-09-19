@@ -62,6 +62,16 @@ export interface ExecutionContract {
   tenantId?: string;
   authorizationDecisionId: string;
   fingerprint: string;
+  applicationContract?: {
+    id: string;
+    version: string;
+    fingerprint: string;
+  };
+  appBoundry?: {
+    contractFingerprint: string;
+    executionMode: 'pax' | 'native';
+    permissions: string[];
+  };
   repository: RepositoryRef;
   operation: string;
   capabilities: string[];
@@ -158,6 +168,7 @@ export interface StructuredEvidence {
   requestId?: string;
   contractId?: string;
   contractFingerprint: string;
+  applicationContractFingerprint?: string;
   principal?: string;
   tenantId?: string;
   operation?: string;

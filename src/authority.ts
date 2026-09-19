@@ -9,6 +9,7 @@ import type {
 } from './types.js';
 import { withContractFingerprint } from './contract.js';
 import type { AuthenticatedContext } from './auth.js';
+import { createCanonicalApplicationContract } from './application-contract.js';
 
 interface OperationAuthority {
   name: string;
@@ -114,6 +115,7 @@ export async function authorizeExecution(
   const createdAt = new Date().toISOString();
   const authorities = getOperationAuthorities(flowSpec);
   const authority = authorities.get(request.operation);
+  const application = createCanonicalApplicationContract(flowSpec);
 
   const reject = async (reason: string): Promise<AuthorizationResolution> => {
     const decision: AuthorizationDecisionRecord = {
@@ -185,6 +187,16 @@ export async function authorizeExecution(
       principal,
       tenantId: context.tenant,
       authorizationDecisionId: decision.id,
+      applicationContract: {
+        id: application.identity.id,
+        version: application.identity.version,
+        fingerprint: application.fingerprint,
+      },
+      appBoundry: {
+        contractFingerprint: application.appBoundry.contractFingerprint,
+        executionMode: authority.mode,
+        permissions: authority.capabilities,
+      },
       repository: {
         provider: work.repositoryProvider,
         owner: work.repositoryOwner,
@@ -195,6 +207,9 @@ export async function authorizeExecution(
       capabilities: authority.capabilities,
       appport: {
         protocol: 'appport' as const,
+        applicationId: application.identity.id,
+        applicationVersion: application.identity.version,
+        applicationFingerprint: application.fingerprint,
         operation: authority.appportOperation ?? request.operation,
         service: authority.appportService ?? 'execution',
         capability: authority.appportCapability ?? authority.capabilities[0] ?? 'execution.run',

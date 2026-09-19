@@ -7,6 +7,7 @@ import { executeContract, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
+import { createCanonicalApplicationContract } from './application-contract.js';
 import type {
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -80,6 +81,7 @@ export class FactoryService {
     this.appPort = createAppPortAdapter({
       namespace: config.namespace ?? 'software-factory',
       path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
+      application: createCanonicalApplicationContract(this.flowSpec),
     });
   }
 

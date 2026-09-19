@@ -57,13 +57,14 @@ Attn → Factory → AuthBoundry → .flow → FeltDB → ExecutionContract
      → JEV → FeltDB evidence
 ```
 
-AuthBoundry remains the authority boundary (who may act), `.flow` remains the
-Factory capability boundary (what may happen), and FeltDB remains the durable
-state boundary. AppPort is the protocol boundary; `@appport/sdk` supplies the
-canonical protocol contract and `@appport/services` supplies scoped service
-capabilities. The Factory adapter records only stable operation, service, and
-capability references in contracts and evidence. Secret values are never copied
-into process environments, contracts, events, evidence, or logs.
+AuthBoundry remains the authority boundary (who may act), and the application
+`.flow` is the single canonical application contract (what the application
+declares). AppPort exposes its projection, AppPort Services implements declared
+service requirements, and AppBoundry contains execution under the same
+contract identity and fingerprint. Factory only derives an immutable execution
+projection; it does not define a competing capability model. FeltDB remains the
+durable state boundary. Secret values are never copied into process
+environments, contracts, events, evidence, or logs.
 
 AppPort Services operations are downstream of Factory authorization. Webhooks
 and jobs may only be used through an explicitly granted capability, and their
