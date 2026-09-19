@@ -5,7 +5,7 @@ import { createWorkspace, destroyWorkspace, materializeRepository, type Workspac
 import type { ExecutionContract, StructuredEvidence } from './types.js';
 import { assertContractIntegrity } from './contract.js';
 
-async function checkPax(executable: string): Promise<string> {
+export async function verifyPax(executable = process.env.PAX_BIN ?? 'pax'): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
@@ -77,7 +77,7 @@ export async function executeContract(
     validateCommand(contract);
   }
   const paxVersion = contract.execution.mode === 'pax'
-    ? await checkPax(options.paxExecutable ?? process.env.PAX_BIN ?? 'pax')
+    ? await verifyPax(options.paxExecutable)
     : undefined;
   const workspace = await createWorkspace(contract.runId, options.workspaceRoot);
   let repositoryCommit: string | undefined;
