@@ -103,7 +103,8 @@ export class FactoryService {
 
   async getEvidence(runId: string, context?: AuthenticatedContext): Promise<StructuredEvidence | null> {
     const evidence = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
-    if (evidence && context && evidence.principal !== context.principal) {
+    if (evidence && context && (evidence.principal !== context.principal
+      || (evidence.tenantId && evidence.tenantId !== context.tenant))) {
       return null;
     }
     return evidence;
