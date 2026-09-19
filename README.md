@@ -47,3 +47,33 @@ Protected requests are authenticated and authorized by AuthBoundry. Configure it
 - Remote FeltDB must be explicitly configured with `FELTDB_URL`; the server does not silently fall back to local storage for production authority.
 
 PAX is installed separately from the runner. Set `PAX_BIN` (or `paxExecutable` in an embedded service) when the executable is not on `PATH`. PAX availability is required only for capabilities declared with `execution_mode pax`; missing PAX fails that run without falling back to package-manager detection.
+# Software Factory
+
+The Factory composes the execution stack without replacing any layer:
+
+```text
+Attn → Factory → AuthBoundry → .flow → FeltDB → ExecutionContract
+     → AppPort SDK → AppPort Services → AppBoundry/PAX → execution
+     → JEV → FeltDB evidence
+```
+
+AuthBoundry remains the authority boundary (who may act), `.flow` remains the
+Factory capability boundary (what may happen), and FeltDB remains the durable
+state boundary. AppPort is the protocol boundary; `@appport/sdk` supplies the
+canonical protocol contract and `@appport/services` supplies scoped service
+capabilities. The Factory adapter records only stable operation, service, and
+capability references in contracts and evidence. Secret values are never copied
+into process environments, contracts, events, evidence, or logs.
+
+AppPort Services operations are downstream of Factory authorization. Webhooks
+and jobs may only be used through an explicitly granted capability, and their
+tenant is taken from the authorized contract rather than caller input. Direct
+AppPort service calls cannot create a Factory run or bypass `.flow`.
+
+## Development
+
+```sh
+npm install
+npm run check
+npm ls @appport/sdk @appport/services
+```

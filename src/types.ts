@@ -65,6 +65,7 @@ export interface ExecutionContract {
   repository: RepositoryRef;
   operation: string;
   capabilities: string[];
+  appport?: import('./appport.js').AppPortContract;
   execution: {
     mode: 'pax' | 'native';
     operation?: string;
@@ -160,6 +161,7 @@ export interface StructuredEvidence {
   principal?: string;
   tenantId?: string;
   operation?: string;
+  appport?: import('./appport.js').AppPortContract;
   ref?: string;
   executionMode?: 'pax' | 'native';
   authorizationDecisionId: string;
@@ -208,4 +210,5 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   paxExecutable?: string;
   authBoundryUrl?: string;
   authenticator?: import('./auth.js').Authenticator;
+  appportPath?: string;
 }
