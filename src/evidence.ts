@@ -66,6 +66,7 @@ export function buildEvidence(
     contractId: contract.runId,
     contractFingerprint: contract.fingerprint,
     principal: contract.principal,
+    tenantId: contract.tenantId,
     operation: contract.operation,
     ref: contract.repository.ref,
     executionMode: contract.execution.mode,

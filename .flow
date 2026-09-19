@@ -3,6 +3,7 @@ flow_version 1
 app software_factory {
   collection Work {
     owner_principal: text
+    tenant_id: text
     operation: text
     repository_provider: text
     repository_owner: text
@@ -33,6 +34,7 @@ app software_factory {
   collection Run {
     work_id: text
     principal: text
+    tenant_id: text
     operation: text
     status: text
     created_at: datetime
@@ -70,6 +72,7 @@ app software_factory {
   collection AuthorizationDecision {
     run_id: text
     principal: text
+    tenant_id: text
     operation: text
     decision: text
     reason: text

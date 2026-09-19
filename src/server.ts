@@ -5,6 +5,7 @@ import { authorizeExecution } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
 import { executeContract, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
+import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
 import type {
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -64,18 +65,6 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.end(JSON.stringify(body, null, 2));
 }
 
-function parsePrincipal(request: IncomingMessage): string | null {
-  const bearer = request.headers.authorization;
-  if (bearer?.startsWith('Bearer ')) {
-    const principal = bearer.slice('Bearer '.length).trim();
-    return /^[A-Za-z0-9._-]{1,255}$/.test(principal) ? principal : null;
-  }
-
-  const principal = request.headers['x-factory-principal'];
-  const value = typeof principal === 'string' ? principal.trim() : '';
-  return /^[A-Za-z0-9._-]{1,255}$/.test(value) ? value : null;
-}
-
 export class FactoryService {
   private readonly flowSpec;
 
@@ -104,12 +93,21 @@ export class FactoryService {
     };
   }
 
-  async getRun(runId: string): Promise<RunRecord | null> {
-    return this.db.collection<RunRecord>(COLLECTIONS.runs).get(runId);
+  async getRun(runId: string, context?: AuthenticatedContext): Promise<RunRecord | null> {
+    const run = await this.db.collection<RunRecord>(COLLECTIONS.runs).get(runId);
+    if (run && context && (run.principal !== context.principal || (run.tenantId && run.tenantId !== context.tenant))) {
+      return null;
+    }
+    return run;
   }
 
-  async getEvidence(runId: string): Promise<StructuredEvidence | null> {
-    return this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
+  async getEvidence(runId: string, context?: AuthenticatedContext): Promise<StructuredEvidence | null> {
+    const evidence = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
+    if (evidence && context && (evidence.principal !== context.principal
+      || (evidence.tenantId && evidence.tenantId !== context.tenant))) {
+      return null;
+    }
+    return evidence;
   }
 
   async cancelRun(runId: string): Promise<RunRecord | null> {
@@ -180,8 +178,19 @@ export class FactoryService {
     }
   }
 
-  async startRun(request: RunRequest, principal: string): Promise<RunRecord> {
+  async startRun(request: RunRequest, principalOrContext: string | AuthenticatedContext): Promise<RunRecord> {
     validateRunRequest(request);
+    const context: AuthenticatedContext = typeof principalOrContext === 'string'
+      ? {
+        principal: principalOrContext,
+        tenant: this.config.tenantId ?? this.config.namespace ?? 'local',
+        claims: {},
+        session: null,
+        delegation: null,
+        boundaryVerified: false,
+      }
+      : principalOrContext;
+    const principal = context.principal;
     if (!principal.trim()) {
       throw new Error('Authenticated principal is required');
     }
@@ -204,6 +213,7 @@ export class FactoryService {
         operationVersion: admission.operation.version,
         workId: request.workId,
         principal,
+        ...(context.boundaryVerified ? { tenantId: context.tenant } : {}),
         operation: request.operation,
         status: 'accepted',
         idempotencyKey,
@@ -225,9 +235,9 @@ export class FactoryService {
       return run;
     }
 
-    await this.recordRequest(run.id, request, principal);
+    await this.recordRequest(run.id, request, principal, context.tenant);
 
-    const authorization = await authorizeExecution(this.db, this.flowSpec, principal, request, run.id);
+    const authorization = await authorizeExecution(this.db, this.flowSpec, context, request, run.id);
     run = await this.patchRun(run.id, { authorizationDecisionId: authorization.decision.id });
 
     if (!authorization.allowed || !authorization.contract) {
@@ -349,13 +359,14 @@ export class FactoryService {
       .digest('hex');
   }
 
-  private async recordRequest(runId: string, request: RunRequest, principal: string): Promise<void> {
+  private async recordRequest(runId: string, request: RunRequest, principal: string, tenantId?: string): Promise<void> {
     const record: ExecutionRequestRecord = {
       id: runId,
       runId,
       workId: request.workId,
       operation: request.operation,
       principal,
+      tenantId,
       request,
       createdAt: new Date().toISOString(),
     };
@@ -435,6 +446,7 @@ export class FactoryService {
 
 export async function createHttpServer(config: FactoryServiceConfig): Promise<{ service: FactoryService; server: Server; }> {
   const service = await FactoryService.create(config);
+  const authenticator = config.authenticator ?? createAuthBoundryAuthenticator(config);
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -445,48 +457,62 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/runs') {
-        const principal = parsePrincipal(request);
-        if (!principal) {
-          writeJson(response, 401, { error: 'Missing authenticated principal' });
+        let context;
+        try {
+          context = await authenticator.authenticate(request, 'factory.run');
+        } catch {
+          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
         }
         const payload = await readJson<RunRequest>(request);
-        const run = await service.startRun(payload, principal);
+        const run = await service.startRun(payload, context);
         writeJson(response, 201, run);
         return;
       }
 
       const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)$/);
       if (request.method === 'GET' && runMatch) {
-        const run = await service.getRun(runMatch[1]);
+        let context;
+        try {
+          context = await authenticator.authenticate(request, 'factory.run.read');
+        } catch {
+          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+          return;
+        }
+        const run = await service.getRun(runMatch[1], context);
         writeJson(response, run ? 200 : 404, run ?? { error: 'Run not found' });
         return;
       }
 
       const evidenceMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/evidence$/);
       if (request.method === 'GET' && evidenceMatch) {
-        const evidence = await service.getEvidence(evidenceMatch[1]);
+        let context;
+        try {
+          context = await authenticator.authenticate(request, 'factory.run.evidence');
+        } catch {
+          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+          return;
+        }
+        const evidence = await service.getEvidence(evidenceMatch[1], context);
         writeJson(response, evidence ? 200 : 404, evidence ?? { error: 'Evidence not found' });
         return;
       }
 
       const cancelMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/cancel$/);
       if (request.method === 'POST' && cancelMatch) {
-        const principal = parsePrincipal(request);
-        if (!principal) {
-          writeJson(response, 401, { error: 'Missing authenticated principal' });
+        let context;
+        try {
+          context = await authenticator.authenticate(request, 'factory.run.cancel');
+        } catch {
+          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
         }
-        const existing = await service.getRun(cancelMatch[1]);
+        const existing = await service.getRun(cancelMatch[1], context);
         if (!existing) {
           writeJson(response, 404, { error: 'Run not found' });
           return;
         }
-        if (existing.principal !== principal) {
-          writeJson(response, 403, { error: 'Forbidden' });
-          return;
-        }
-        const run = await service.cancelRunAs(cancelMatch[1], principal);
+        const run = await service.cancelRunAs(cancelMatch[1], context.principal);
         writeJson(response, 202, run);
         return;
       }

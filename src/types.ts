@@ -31,6 +31,7 @@ export interface RunRequest {
 export interface WorkRecord {
   id: string;
   ownerPrincipal: string;
+  tenantId?: string;
   operation: string;
   repositoryProvider: string;
   repositoryOwner: string;
@@ -44,6 +45,9 @@ export interface AuthorizationDecisionRecord {
   id: string;
   runId: string;
   principal: string;
+  tenantId?: string;
+  authSession?: Record<string, unknown> | null;
+  delegation?: Record<string, unknown> | null;
   operation: string;
   decision: 'granted' | 'rejected';
   reason: string;
@@ -55,6 +59,7 @@ export interface ExecutionContract {
   runId: string;
   workId: string;
   principal: string;
+  tenantId?: string;
   authorizationDecisionId: string;
   fingerprint: string;
   repository: RepositoryRef;
@@ -81,6 +86,7 @@ export interface RunRecord {
   operationVersion: number;
   workId: string;
   principal: string;
+  tenantId?: string;
   operation: string;
   status: RunStatus;
   idempotencyKey: string;
@@ -110,6 +116,7 @@ export interface ExecutionRequestRecord {
   workId: string;
   operation: string;
   principal: string;
+  tenantId?: string;
   request: RunRequest;
   createdAt: string;
 }
@@ -151,6 +158,7 @@ export interface StructuredEvidence {
   contractId?: string;
   contractFingerprint: string;
   principal?: string;
+  tenantId?: string;
   operation?: string;
   ref?: string;
   executionMode?: 'pax' | 'native';
@@ -198,4 +206,6 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   repositoryRoot?: string;
   workspaceRoot?: string;
   paxExecutable?: string;
+  authBoundryUrl?: string;
+  authenticator?: import('./auth.js').Authenticator;
 }
