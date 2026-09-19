@@ -14,6 +14,9 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.match(fly, /path = '\/health'/);
   assert.match(fly, /force_https = true/);
   assert.match(fly, /FACTORY_FELTDB_MODE = 'remote'/);
+  assert.match(fly, /AUTHBOUNDRY_URL = 'https:\/\/authboundry\.fly\.dev'/);
+  assert.match(fly, /FELTDB_URL = 'https:\/\/feltdb\.fly\.dev'/);
+  assert.doesNotMatch(fly, /appport.*(?:URL|url)/i);
   assert.match(dockerfile, /npm ci --omit=dev/);
   assert.match(dockerfile, /pax --version/);
   assert.match(dockerfile, /USER node/);
