@@ -152,7 +152,7 @@ export async function authorizeExecution(
     return reject('requested repository does not match authoritative work repository');
   }
 
-  if (!authority.principals.includes(principal)) {
+  if (!context.boundaryVerified && !authority.principals.includes(principal)) {
     return reject(`principal ${principal} is not delegated in .flow for operation ${request.operation}`);
   }
 
