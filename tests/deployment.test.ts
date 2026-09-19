@@ -3,7 +3,11 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createHttpServer } from '../src/server.js';
-import { resolveRemoteAuthorityBootstrap } from '../src/bootstrap.js';
+import {
+  formatDeploymentConfigDiagnostics,
+  resolveRemoteAuthorityBootstrap,
+  validateDeploymentConfig,
+} from '../src/bootstrap.js';
 
 test('production deployment uses remote authority boundaries', async () => {
   const fly = await readFile(path.join(process.cwd(), 'fly.toml'), 'utf8');
@@ -51,6 +55,47 @@ test('remote bootstrap fails closed when an authority endpoint is missing', () =
     }),
     /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
   );
+});
+
+test('deployment validation rejects a missing FeltDB URL', () => {
+  assert.throws(
+    () => validateDeploymentConfig({ authBoundryUrl: 'https://auth.example' }),
+    /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
+  );
+});
+
+test('deployment validation rejects a missing AuthBoundry URL', () => {
+  assert.throws(
+    () => validateDeploymentConfig({ feltDbUrl: 'https://feltdb.example' }),
+    /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
+  );
+});
+
+test('deployment validation trims topology and accepts the optional bootstrap secret', () => {
+  const config = validateDeploymentConfig({
+    feltDbUrl: ' https://feltdb.example ',
+    authBoundryUrl: ' https://auth.example ',
+    feltDbToken: ' infrastructure-token ',
+  });
+
+  assert.deepEqual(config, {
+    feltDbUrl: 'https://feltdb.example',
+    authBoundryUrl: 'https://auth.example',
+    feltDbToken: 'infrastructure-token',
+  });
+});
+
+test('startup diagnostics expose presence without secret values', () => {
+  const diagnostics = formatDeploymentConfigDiagnostics({
+    feltDbUrl: 'https://feltdb.example',
+    authBoundryUrl: 'https://auth.example',
+    feltDbToken: 'super-secret-token',
+  });
+
+  assert.match(diagnostics, /FELTDB_URL configured: true/);
+  assert.match(diagnostics, /AUTHBOUNDRY_URL configured: true/);
+  assert.match(diagnostics, /FELTDB_TOKEN configured: true/);
+  assert.doesNotMatch(diagnostics, /super-secret-token|feltdb\.example|auth\.example/);
 });
 
 test('local runtime health exposes AppPort initialization and shutdown rejects admission', async () => {
