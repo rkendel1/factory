@@ -1,6 +1,5 @@
 import { createFeltDB, parseFlowSpec, validateFlowSpec, type FlowSpec, type StateFirstDB } from '@feltdb/core';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { FactoryDBConfig } from './types.js';
 
@@ -17,21 +16,6 @@ export const COLLECTIONS = {
 
 const DEFAULT_NAMESPACE = 'software-factory';
 const DEFAULT_FLOW_PATH = path.resolve(process.cwd(), '.flow');
-
-function withWorkingDirectory<T>(workingDirectory: string | undefined, fn: () => T): T {
-  if (!workingDirectory) {
-    return fn();
-  }
-
-  mkdirSync(workingDirectory, { recursive: true });
-  const previous = process.cwd();
-  process.chdir(workingDirectory);
-  try {
-    return fn();
-  } finally {
-    process.chdir(previous);
-  }
-}
 
 export function loadFactoryFlow(flowPath = DEFAULT_FLOW_PATH): FlowSpec {
   if (!existsSync(flowPath)) {
@@ -70,8 +54,8 @@ export async function createFactoryDB(config: FactoryDBConfig = {}): Promise<Sta
     environmentId: config.environmentId ?? (mode === 'local' ? 'local' : 'production'),
   };
 
-  const db = withWorkingDirectory(config.workingDirectory, () => {
-    if (mode === 'remote') {
+  const db = mode === 'remote'
+    ? (() => {
       const serverUrl = config.serverUrl ?? process.env.FELTDB_URL;
       if (!serverUrl) {
         throw new Error('Remote FeltDB mode requires FELTDB_URL or serverUrl.');
@@ -86,10 +70,8 @@ export async function createFactoryDB(config: FactoryDBConfig = {}): Promise<Sta
           environment: authorityScope.environmentId,
         },
       });
-    }
-
-    return createFeltDB({ namespace, authorityScope });
-  });
+    })()
+    : createFeltDB({ namespace, authorityScope });
 
   await db.deployFlowSpec(loadFactoryFlow(config.flowPath));
   return db;

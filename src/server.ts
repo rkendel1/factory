@@ -208,10 +208,6 @@ export class FactoryService {
       contractId: run.id,
     });
     await this.appendEvent(run.id, 'authorized', authorization.reason);
-    run = await this.patchRun(run.id, { status: 'allocated' });
-    await this.appendEvent(run.id, 'allocated', 'Allocated ephemeral runner workspace');
-    run = await this.patchRun(run.id, { status: 'preparing' });
-    await this.appendEvent(run.id, 'preparing', 'Preparing repository workspace');
 
     const startedAt = new Date().toISOString();
     const operation = await this.db.transitionOperation({
@@ -220,8 +216,14 @@ export class FactoryService {
       to: 'executing',
     });
     run = await this.patchRun(run.id, {
-      status: 'executing',
+      status: 'allocated',
       operationVersion: operation.operation.version,
+    });
+    await this.appendEvent(run.id, 'allocated', 'Allocated ephemeral runner workspace');
+    run = await this.patchRun(run.id, { status: 'preparing' });
+    await this.appendEvent(run.id, 'preparing', 'Preparing repository workspace');
+    run = await this.patchRun(run.id, {
+      status: 'executing',
       startedAt,
     });
     const activeRunId = run.id;
@@ -427,7 +429,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           writeJson(response, 403, { error: 'Forbidden' });
           return;
         }
-        const run = await service.cancelRun(cancelMatch[1]);
+        const run = await service.cancelRunAs(cancelMatch[1], principal);
         writeJson(response, 202, run);
         return;
       }
