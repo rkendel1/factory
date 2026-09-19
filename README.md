@@ -47,6 +47,30 @@ Protected requests are authenticated and authorized by AuthBoundry. Configure it
 - Remote FeltDB must be explicitly configured with `FELTDB_URL`; the server does not silently fall back to local storage for production authority.
 
 PAX is installed separately from the runner. Set `PAX_BIN` (or `paxExecutable` in an embedded service) when the executable is not on `PATH`. PAX availability is required only for capabilities declared with `execution_mode pax`; missing PAX fails that run without falling back to package-manager detection.
+
+## Factory + FeltDB Studio
+
+The Factory uses FeltDB's existing Studio; it does not contain a Factory-specific
+Studio application or UI state store. Start Studio with `npx --package
+@feltdb/core feltdb studio` and connect it to the same scoped FeltDB authority.
+The authoritative `.flow` automatically discovers `Work`, `ExecutionRequest`,
+`ExecutionContract`, `Run`, `RunEvent`, `Artifact`, `Evidence`, and
+`AuthorizationDecision`, including their relationships and indexes.
+
+Factory owns orchestration and execution. FeltDB owns durable state and evidence.
+Studio provides human inspection and proposals, while AuthBoundry owns
+authorization and `.flow` owns application capability authority. Studio is
+observation-only for execution contracts and authorization decisions; proposals
+must return through the Factory/API authority path. Studio never invokes shell,
+PAX, AppBoundry, or AppPort directly, and secret values are not persisted in or
+displayed from Factory records.
+
+Run lifecycle and evidence are read from FeltDB's live collections, so a Studio
+refresh reconstructs the view from durable state rather than a Factory cache.
+The composition introduces no custom views, state models, adapter, or
+persistence layer: it reuses FeltDB Studio's collection discovery, schema,
+relationship, live-update, proposal, preview, and validation surfaces.
+
 # Software Factory
 
 The Factory composes the execution stack without replacing any layer:
