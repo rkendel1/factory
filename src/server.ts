@@ -8,7 +8,12 @@ import { assertContractIntegrity } from './contract.js';
 import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
-import { resolveRemoteAuthorityBootstrap } from './bootstrap.js';
+import {
+  formatDeploymentConfigDiagnostics,
+  readDeploymentConfig,
+  resolveRemoteAuthorityBootstrap,
+  validateDeploymentConfig,
+} from './bootstrap.js';
 import type {
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -579,7 +584,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const production = process.env.NODE_ENV === 'production';
   const port = Number(process.env.FACTORY_PORT ?? 3000);
-  const { service, server } = await createHttpServer({
+  const config: FactoryServiceConfig = {
     mode: production ? 'remote' : (process.env.FACTORY_FELTDB_MODE as 'local' | 'remote' | undefined) ?? 'local',
     flowPath: process.env.FACTORY_FLOW_PATH,
     repositoryRoot: process.env.FACTORY_REPOSITORY_ROOT,
@@ -589,11 +594,20 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     namespace: process.env.FACTORY_NAMESPACE,
     environmentId: process.env.FACTORY_ENVIRONMENT_ID,
     paxExecutable: process.env.PAX_BIN,
-  });
+  };
+  if (production) {
+    const deploymentConfig = readDeploymentConfig(config);
+    process.stdout.write(`${formatDeploymentConfigDiagnostics(deploymentConfig)}\n`);
+    validateDeploymentConfig(deploymentConfig);
+  }
+  const { service, server } = await createHttpServer(config);
   if (production) {
     await service.verifyRuntime();
   }
 
+  if (production) {
+    process.stdout.write('Factory starting...\n');
+  }
   server.listen(port, () => {
     process.stdout.write(`Software Factory Runner listening on ${port}\n`);
   });

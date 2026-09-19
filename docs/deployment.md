@@ -40,9 +40,18 @@ boundary and must not be added to Fly environment configuration.
 Deploy and verify:
 
 ```sh
-fly deploy
-curl --fail https://factory-runner.fly.dev/health
+fly deploy --config fly.toml --remote-only --strategy rolling
+fly status -a factory-idvhpa
+fly config show -a factory-idvhpa
+fly logs -a factory-idvhpa
+curl --fail https://factory-idvhpa.fly.dev/health
 ```
+
+Confirm `FELTDB_URL` and `AUTHBOUNDRY_URL` are present in the deployed
+configuration, without printing `FELTDB_TOKEN` or any other secret. Also confirm
+that `fly status` reports the image digest from the new deployment. Startup logs
+should show only `configured: true` or `configured: false` for each required
+setting, followed by `Factory starting...`.
 
 The health response contains only safe service, runtime, and PAX version
 metadata. It does not authenticate or execute a workload.
