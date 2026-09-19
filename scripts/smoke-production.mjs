@@ -12,6 +12,14 @@ if (!health.ok) {
   throw new Error(`health failed with HTTP ${health.status}`);
 }
 const headers = { authorization, 'content-type': 'application/json' };
+const unauthorized = await fetch(`${baseUrl}/v1/runs`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body,
+});
+if (unauthorized.status !== 401) {
+  throw new Error(`unauthorized request was not rejected: HTTP ${unauthorized.status}`);
+}
 const created = await fetch(`${baseUrl}/v1/runs`, {
   method: 'POST',
   headers,

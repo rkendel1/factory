@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import test from 'node:test';
 
 test('production deployment uses remote authority boundaries', async () => {
-  const fly = await readFile(new URL('../fly.toml', import.meta.url), 'utf8');
-  const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
+  const fly = await readFile(path.join(process.cwd(), 'fly.toml'), 'utf8');
+  const dockerfile = await readFile(path.join(process.cwd(), 'Dockerfile'), 'utf8');
 
   assert.match(fly, /app = "factory-runner"/);
   assert.match(fly, /path = "\/health"/);
