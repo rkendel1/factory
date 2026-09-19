@@ -32,6 +32,9 @@ jobs:
       - name: Run runner tests
         run: npm test
 
+      - name: Verify published FeltDB package boundary
+        run: npm run test:external
+
       - name: Start runner and check health
         env:
           FACTORY_FELTDB_MODE: local
