@@ -19,10 +19,10 @@ test('the canonical FlowSpec exposes Factory state and relationships to Studio',
   assert.equal(collection(flow, 'Evidence').fields.find((field) => field.name === 'runId')?.type, 'ref Run');
   assert.equal(collection(flow, 'AuthorizationDecision').fields.find((field) => field.name === 'runId')?.type, 'ref Run');
 
-  const contractPolicy = flow.policies.find((policy) => policy.name === 'ExecutionContract');
-  const authorizationPolicy = flow.policies.find((policy) => policy.name === 'AuthorizationDecision');
-  assert.ok(contractPolicy?.statements.includes('write: none'));
-  assert.ok(authorizationPolicy?.statements.includes('write: none'));
+  for (const name of Object.values(COLLECTIONS)) {
+    const policy = flow.policies.find((item) => item.name === name);
+    assert.ok(policy?.statements.some((statement) => statement.replace(/\s/g, '') === 'write:none'));
+  }
 });
 
 test('Studio can observe durable Factory run changes through FeltDB reactivity', async () => {
