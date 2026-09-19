@@ -3,19 +3,22 @@
 ## Baseline
 
 This audit measures commit `7848c83519fb36029cf18b945c18581bacedaa46` (the
-commit immediately before these audit artifacts). The locked runtime versions
+commit immediately before these audit artifacts), tree
+`6099b10f2f9671cfc9782b5c7e6a9533ef6f167b`. The audited tree was clean. The
+locked runtime versions
 are:
 
 | Boundary | Version |
 | --- | --- |
-| Factory | `7848c83519fb36029cf18b945c18581bacedaa46` |
+| Factory commit | `7848c83519fb36029cf18b945c18581bacedaa46` |
+| Factory tree | `6099b10f2f9671cfc9782b5c7e6a9533ef6f167b` |
 | FeltDB | `@feltdb/core@0.11.4` |
 | AuthBoundry | `@authboundry/core@1.15.1` |
 | AppPort | `@appport/sdk@1.1.18` |
 | AppPort Services | `@appport/services@0.4.0` |
 | AppBoundry | `@appport/appboundry@1.0.10` |
 | PAX | external executable, invoked as `pax`; no npm dependency |
-| JEV | not integrated |
+| JEV | not integrated; dependency/import/source/execution-path checks all false |
 
 The canonical `.flow` is `.flow`, SHA-256
 `64b90abf77644fb796340d7d711d9e596cb6c56599677c85f4815d27bf604903`. Its
@@ -72,6 +75,15 @@ The deduplicated integration set is
 adapter composes more than one boundary; it is therefore descriptive, not a
 second total.
 
+A line belongs to integration LOC when its primary purpose is translating,
+adapting, invoking, persisting across, or enforcing a boundary between Factory
+and another architectural component. Shared orchestration that merely calls a
+boundary is not integration unless it performs boundary-specific work.
+For `authority.ts`, integration LOC includes only the portion that resolves
+`.flow` capability authority and derives the external execution/application
+contract; generic authorization orchestration is excluded. These rules and the
+six-file integration set are recorded in the JSON artifact.
+
 | Source | Destination | LOC | Purpose | Data translated | Authority | Necessary? |
 | --- | --- | ---: | --- | --- | --- | --- |
 | `src/felt.ts` | FeltDB | 65 | Load/validate/deploy `.flow`, create scoped DB | Flow source to FeltDB spec | FeltDB | Yes |
@@ -103,8 +115,8 @@ the same script and exclusions; it is not a quality target.
 | Factory ↔ PAX | Serialization | `pax --version` and `pax --json run <target>` |
 | Factory ↔ Studio | Direct composition | Studio consumes the same FeltDB collections; custom code: 0 LOC |
 
-No duplicate model or authority duplication was found in the measured
-integration set. Serialization is required at the PAX process boundary; the
+No architectural authority duplication or independently authoritative
+application capability model was identified. Serialization is required at the PAX process boundary; the
 `.flow` to AppPort/AppBoundry projections preserve the application identity and
 fingerprint.
 
@@ -318,13 +330,16 @@ From the repository root:
 
 ```sh
 npm ci
-node scripts/audit-factory.mjs
+BASELINE_COMMIT="$(git rev-parse HEAD)" node scripts/audit-factory.mjs
 ```
 
-The script writes `docs/factory-composition-audit-pre-jev.json`. It counts
-non-empty physical lines, reads exact versions from `package-lock.json`,
-hashes `.flow`, and uses the baseline commit supplied in `BASELINE_COMMIT`
-(or the current commit when omitted). For this report, the script was run
-with `BASELINE_COMMIT=7848c83519fb36029cf18b945c18581bacedaa46`. It excludes
+The script writes `docs/factory-composition-audit-pre-jev.json`. When
+`BASELINE_COMMIT` is supplied, it must equal `HEAD`; the script also requires
+a clean working tree before measuring and records both the commit and
+`HEAD^{tree}`. It counts non-empty physical lines, reads exact versions and
+integrity values from `package-lock.json`, and hashes `.flow`. It excludes
 `node_modules`, `dist`, generated dependency code, lockfiles, and vendored
-code. JEV was not installed, added, or integrated.
+code. It asserts that JEV is absent from dependencies, imports, dedicated
+source files, and the execution path. Conceptual counts, authority findings,
+and friction are explicit manual-review classifications. JEV was not
+installed, added, or integrated.
