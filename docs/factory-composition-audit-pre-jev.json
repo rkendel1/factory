@@ -1,0 +1,269 @@
+{
+  "baseline": {
+    "commit": "a4144d36246f47d66e0a4021e8d950c712484bfe",
+    "tree": "d63f7246f2f0241d611d102b7a6be5f7fef111a8",
+    "clean": true,
+    "jevIntegrated": false,
+    "jevChecks": {
+      "dependency": false,
+      "imports": false,
+      "source": false,
+      "executionPath": false
+    },
+    "flowPath": ".flow",
+    "flowSha256": "64b90abf77644fb796340d7d711d9e596cb6c56599677c85f4815d27bf604903",
+    "dependencies": {
+      "@feltdb/core": {
+        "version": "0.11.4",
+        "integrity": "sha512-g0T/m66jdYYouarLdR8gxXYrbYP9pKoPtibNrpL3sUGdtyRKZ6CAoIIyHBBy8PQb5jxpXHYj0DJ4FrBcudt6zQ=="
+      },
+      "@authboundry/core": {
+        "version": "1.15.1",
+        "integrity": "sha512-O+sIQmWIpGNASiOt0sEQjQejlVKnBoUW/RLF/8JA6paj0EK14jGMCzIZqJai36pzSCww9NBnthuSCw6khTLkTw=="
+      },
+      "@appport/sdk": {
+        "version": "1.1.18",
+        "integrity": "sha512-U/izTgdwfp3lNW9dUFjLgaQGUG+ZzSnvr7R9oxNpu9YNOY0q2/UvSdB57kxDzY42+Msa+H3mv/xZFhOwJIGkvQ=="
+      },
+      "@appport/services": {
+        "version": "0.4.0",
+        "integrity": "sha512-szz8TBd8IUE7mKcL83sPLIRzzLPeISjGcN7KhTstAIroL4jsf5eMkA7dX9v61lOSAL/N93hwPMrPkvcK1YDLjQ=="
+      },
+      "@appport/appboundry": {
+        "version": "1.0.10",
+        "integrity": "sha512-Bx9mmb/ZBdZzo1855ayEMksH2wuqIXJP3OYU1QwlVTsQOG8Mlt9sTFU/MzHxlTH1LmjceCaDrTLMLkcEIsxhOQ=="
+      }
+    }
+  },
+  "methodology": {
+    "loc": "Non-empty physical lines in tracked TypeScript source/test files; blank lines excluded. Comments and type declarations count.",
+    "excluded": [
+      "node_modules",
+      "dist",
+      "generated code",
+      "lockfiles",
+      "vendored code"
+    ],
+    "integrationLoc": "A line belongs to integration LOC when its primary purpose is translating, adapting, invoking, persisting across, or enforcing a boundary between Factory and another architectural component. Shared orchestration that merely calls a boundary is not integration unless it performs boundary-specific work.",
+    "authorityTsRule": "authority.ts integration LOC includes only the portion that resolves .flow capability authority and derives the external execution/application contract; generic authorization orchestration is excluded.",
+    "classification": {
+      "loc": "mechanical",
+      "dependencyGraph": "mechanical_plus_review",
+      "conceptClassification": "manual_review",
+      "authorityAudit": "manual_review",
+      "friction": "manual_review"
+    }
+  },
+  "loc": {
+    "production": 1703,
+    "tests": 742,
+    "integration": 722,
+    "integrationFiles": 6,
+    "productionFiles": {
+      "src/application-contract.ts": 96,
+      "src/appport.ts": 106,
+      "src/auth.ts": 64,
+      "src/authority.ts": 208,
+      "src/contract.ts": 32,
+      "src/evidence.ts": 121,
+      "src/execution.ts": 183,
+      "src/felt.ts": 65,
+      "src/github.ts": 30,
+      "src/server.ts": 504,
+      "src/types.ts": 209,
+      "src/workspace.ts": 85
+    },
+    "testFiles": {
+      "tests/appport.test.ts": 62,
+      "tests/authboundry.test.ts": 88,
+      "tests/authority.test.ts": 86,
+      "tests/evidence.test.ts": 76,
+      "tests/execution.test.ts": 115,
+      "tests/failure.test.ts": 164,
+      "tests/helpers.ts": 48,
+      "tests/package-boundary.test.ts": 61,
+      "tests/studio.test.ts": 42
+    },
+    "categories": {
+      "factoryOrchestration": 504,
+      "domainModel": 209,
+      "httpApi": 504,
+      "persistenceIntegration": 65,
+      "contractProjection": 96,
+      "executionIntegration": 183,
+      "adapterGlue": 722
+    }
+  },
+  "integration": {
+    "total": 722,
+    "glueLoc": 722,
+    "glueRatio": 0.42395772166764534,
+    "files": {
+      "src/application-contract.ts": 96,
+      "src/appport.ts": 106,
+      "src/auth.ts": 64,
+      "src/authority.ts": 208,
+      "src/execution.ts": 183,
+      "src/felt.ts": 65
+    },
+    "direct": 3,
+    "thinAdapters": 2,
+    "projections": 2,
+    "serialization": 1,
+    "semanticTranslations": 0,
+    "classifications": {
+      "direct": 3,
+      "thinAdapters": 2,
+      "projections": 2,
+      "serialization": 1,
+      "semanticTranslations": 0,
+      "duplicateModels": 0,
+      "authorityDuplications": 0
+    }
+  },
+  "compositionInventory": [
+    {
+      "boundary": "Factory → FeltDB",
+      "classification": "direct",
+      "loc": 65,
+      "translation": false,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AuthBoundry",
+      "classification": "thinAdapter",
+      "loc": 64,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → .flow",
+      "classification": "projection",
+      "loc": 304,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AppPort",
+      "classification": "thinAdapter",
+      "loc": 106,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AppPort Services",
+      "classification": "direct",
+      "loc": 106,
+      "translation": false,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AppBoundry",
+      "classification": "projection",
+      "loc": 96,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → PAX",
+      "classification": "serialization",
+      "loc": 183,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → Studio",
+      "classification": "direct",
+      "loc": 0,
+      "translation": false,
+      "duplicateAuthority": false,
+      "shadowState": false
+    }
+  ],
+  "boundaries": {
+    "authorityViolations": 0,
+    "persistenceViolations": 0,
+    "shadowState": 0,
+    "integrations": {
+      "Factory ↔ FeltDB": {
+        "loc": 65,
+        "files": [
+          "src/felt.ts"
+        ],
+        "classification": "direct composition"
+      },
+      "Factory ↔ AuthBoundry": {
+        "loc": 64,
+        "files": [
+          "src/auth.ts"
+        ],
+        "classification": "thin adapter"
+      },
+      "Factory ↔ .flow": {
+        "loc": 304,
+        "files": [
+          "src/authority.ts",
+          "src/application-contract.ts"
+        ],
+        "classification": "projection"
+      },
+      "Factory ↔ AppPort": {
+        "loc": 106,
+        "files": [
+          "src/appport.ts"
+        ],
+        "classification": "thin adapter"
+      },
+      "Factory ↔ AppPort Services": {
+        "loc": 106,
+        "files": [
+          "src/appport.ts"
+        ],
+        "classification": "direct composition"
+      },
+      "Factory ↔ AppBoundry": {
+        "loc": 96,
+        "files": [
+          "src/application-contract.ts"
+        ],
+        "classification": "projection"
+      },
+      "Factory ↔ PAX": {
+        "loc": 183,
+        "files": [
+          "src/execution.ts"
+        ],
+        "classification": "serialization"
+      },
+      "Factory ↔ Studio": {
+        "loc": 0,
+        "files": [],
+        "classification": "direct composition"
+      }
+    }
+  },
+  "concepts": {
+    "canonical": 11,
+    "projected": 7,
+    "duplicated": 0,
+    "authorityDuplications": 0
+  },
+  "processState": {
+    "configuration": [
+      "process.env in src/felt.ts, src/auth.ts, src/execution.ts, src/server.ts"
+    ],
+    "ephemeralExecution": [
+      "child process handles and workspace paths in src/execution.ts and src/workspace.ts"
+    ],
+    "cache": [],
+    "authority": [],
+    "durableStateSubstitute": []
+  }
+}
