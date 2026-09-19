@@ -1,0 +1,37 @@
+name: factory-runner
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  software-factory-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run runner tests
+        run: npm test
+
+      - name: Start runner and check health
+        env:
+          FACTORY_FELTDB_MODE: local
+          FACTORY_PORT: 3111
+          FACTORY_REPOSITORY_ROOT: ${{ github.workspace }}
+        run: |
+          npm run build
+          node dist/src/server.js &
+          SERVER_PID=$!
+          trap 'kill ${SERVER_PID}' EXIT
+          sleep 2
+          curl --fail http://127.0.0.1:3111/health

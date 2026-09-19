@@ -1,0 +1,142 @@
+flow_version 1
+
+app software_factory {
+  collection Work {
+    owner_principal: text
+    operation: text
+    repository_provider: text
+    repository_owner: text
+    repository_name: text
+    repository_ref: text
+    status: text
+    index owner_principal using hash(owner_principal)
+  }
+
+  collection ExecutionRequest {
+    run_id: text
+    work_id: text
+    operation: text
+    principal: text
+    created_at: datetime
+    index run_id using hash(run_id)
+  }
+
+  collection ExecutionContract {
+    run_id: text
+    principal: text
+    operation: text
+    command_json: text
+    created_at: datetime
+    index run_id using hash(run_id)
+  }
+
+  collection Run {
+    work_id: text
+    principal: text
+    operation: text
+    status: text
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime
+    index work_id using hash(work_id)
+    index status using hash(status)
+  }
+
+  collection RunEvent {
+    run_id: text
+    status: text
+    detail: text
+    created_at: datetime
+    index run_id using hash(run_id)
+  }
+
+  collection Artifact {
+    run_id: text
+    path: text
+    kind: text
+    created_at: datetime
+    index run_id using hash(run_id)
+  }
+
+  collection Evidence {
+    run_id: text
+    status: text
+    deterministic_result: text
+    final_result: text
+    created_at: datetime
+    index run_id using hash(run_id)
+  }
+
+  collection AuthorizationDecision {
+    run_id: text
+    principal: text
+    operation: text
+    decision: text
+    reason: text
+    created_at: datetime
+    index run_id using hash(run_id)
+  }
+
+  capability ArchitectureConformanceExecution {
+    visibility internal
+    operation architecture-conformance
+    principal factory-service
+    command ["npm","run","conformance"]
+    timeoutMs 300000
+    grant repository.read
+    grant artifact.write
+    grant evidence.write
+    jev bounded
+  }
+
+  capability RepositoryEchoExecution {
+    visibility internal
+    operation repo-echo
+    principal factory-service
+    command ["node","-e","console.log('authorized')"]
+    timeoutMs 10000
+    grant repository.read
+    grant evidence.write
+    jev bounded
+  }
+
+  policy Work {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy ExecutionRequest {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy ExecutionContract {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy Run {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy RunEvent {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy Artifact {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy Evidence {
+    read: authenticated
+    write: authenticated
+  }
+
+  policy AuthorizationDecision {
+    read: authenticated
+    write: authenticated
+  }
+}
