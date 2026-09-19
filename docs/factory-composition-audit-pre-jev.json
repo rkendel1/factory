@@ -1,0 +1,164 @@
+{
+  "baseline": {
+    "factoryCommit": "7848c83519fb36029cf18b945c18581bacedaa46",
+    "jevIntegrated": false,
+    "flowPath": ".flow",
+    "flowSha256": "64b90abf77644fb796340d7d711d9e596cb6c56599677c85f4815d27bf604903",
+    "dependencies": {
+      "@feltdb/core": "0.11.4",
+      "@authboundry/core": "1.15.1",
+      "@appport/sdk": "1.1.18",
+      "@appport/services": "0.4.0",
+      "@appport/appboundry": "1.0.10"
+    }
+  },
+  "methodology": {
+    "loc": "Non-empty physical lines in tracked TypeScript source/test files; blank lines excluded. Comments and type declarations count.",
+    "excluded": [
+      "node_modules",
+      "dist",
+      "generated code",
+      "lockfiles",
+      "vendored code"
+    ],
+    "integrationLoc": "Deduplicated union of source files whose primary purpose is crossing a named architectural boundary."
+  },
+  "loc": {
+    "production": 1703,
+    "tests": 742,
+    "productionFiles": {
+      "src/application-contract.ts": 96,
+      "src/appport.ts": 106,
+      "src/auth.ts": 64,
+      "src/authority.ts": 208,
+      "src/contract.ts": 32,
+      "src/evidence.ts": 121,
+      "src/execution.ts": 183,
+      "src/felt.ts": 65,
+      "src/github.ts": 30,
+      "src/server.ts": 504,
+      "src/types.ts": 209,
+      "src/workspace.ts": 85
+    },
+    "testFiles": {
+      "tests/appport.test.ts": 62,
+      "tests/authboundry.test.ts": 88,
+      "tests/authority.test.ts": 86,
+      "tests/evidence.test.ts": 76,
+      "tests/execution.test.ts": 115,
+      "tests/failure.test.ts": 164,
+      "tests/helpers.ts": 48,
+      "tests/package-boundary.test.ts": 61,
+      "tests/studio.test.ts": 42
+    },
+    "categories": {
+      "factoryOrchestration": 504,
+      "domainModel": 209,
+      "httpApi": 504,
+      "persistenceIntegration": 65,
+      "contractProjection": 96,
+      "executionIntegration": 183,
+      "adapterGlue": 722
+    }
+  },
+  "integration": {
+    "glueLoc": 722,
+    "glueRatio": 0.42395772166764534,
+    "files": {
+      "src/application-contract.ts": 96,
+      "src/appport.ts": 106,
+      "src/auth.ts": 64,
+      "src/authority.ts": 208,
+      "src/execution.ts": 183,
+      "src/felt.ts": 65
+    },
+    "classifications": {
+      "direct": 3,
+      "thinAdapters": 2,
+      "projections": 2,
+      "serialization": 1,
+      "semanticTranslations": 0,
+      "duplicateModels": 0,
+      "authorityDuplications": 0
+    }
+  },
+  "boundaries": {
+    "authorityViolations": 0,
+    "persistenceViolations": 0,
+    "shadowState": 0,
+    "integrations": {
+      "Factory ↔ FeltDB": {
+        "loc": 65,
+        "files": [
+          "src/felt.ts"
+        ],
+        "classification": "direct composition"
+      },
+      "Factory ↔ AuthBoundry": {
+        "loc": 64,
+        "files": [
+          "src/auth.ts"
+        ],
+        "classification": "thin adapter"
+      },
+      "Factory ↔ .flow": {
+        "loc": 304,
+        "files": [
+          "src/authority.ts",
+          "src/application-contract.ts"
+        ],
+        "classification": "projection"
+      },
+      "Factory ↔ AppPort": {
+        "loc": 106,
+        "files": [
+          "src/appport.ts"
+        ],
+        "classification": "thin adapter"
+      },
+      "Factory ↔ AppPort Services": {
+        "loc": 106,
+        "files": [
+          "src/appport.ts"
+        ],
+        "classification": "direct composition"
+      },
+      "Factory ↔ AppBoundry": {
+        "loc": 96,
+        "files": [
+          "src/application-contract.ts"
+        ],
+        "classification": "projection"
+      },
+      "Factory ↔ PAX": {
+        "loc": 183,
+        "files": [
+          "src/execution.ts"
+        ],
+        "classification": "serialization"
+      },
+      "Factory ↔ Studio": {
+        "loc": 0,
+        "files": [],
+        "classification": "direct composition"
+      }
+    }
+  },
+  "concepts": {
+    "canonical": 11,
+    "projected": 7,
+    "duplicated": 0,
+    "authorityDuplications": 0
+  },
+  "processState": {
+    "configuration": [
+      "process.env in src/felt.ts, src/auth.ts, src/execution.ts, src/server.ts"
+    ],
+    "ephemeralExecution": [
+      "child process handles and workspace paths in src/execution.ts and src/workspace.ts"
+    ],
+    "cache": [],
+    "authority": [],
+    "durableStateSubstitute": []
+  }
+}
