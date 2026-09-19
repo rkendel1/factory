@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { loadFactoryFlow, createFactoryDB, COLLECTIONS } from './felt.js';
 import { authorizeExecution } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
-import { executeContract, type ExecutionHandle } from './execution.js';
+import { executeContract, verifyPax, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
@@ -72,6 +72,7 @@ export class FactoryService {
 
   private readonly activeExecutions = new Map<string, ExecutionHandle>();
   private readonly appPort: FactoryAppPortAdapter;
+  private paxVersion?: string;
 
   private constructor(
     private readonly config: FactoryServiceConfig,
@@ -92,10 +93,32 @@ export class FactoryService {
     return service;
   }
 
+  async verifyRuntime(): Promise<void> {
+    if (this.config.mode !== 'remote') {
+      return;
+    }
+    if (!this.config.authBoundryUrl && !process.env.AUTHBOUNDRY_URL) {
+      throw new Error('AuthBoundry URL is required in production');
+    }
+    if (!this.config.serverUrl && !process.env.FELTDB_URL) {
+      throw new Error('Remote FeltDB URL is required in production');
+    }
+    this.paxVersion = await verifyPax(this.config.paxExecutable);
+  }
+
+  async shutdown(): Promise<void> {
+    for (const execution of this.activeExecutions.values()) {
+      execution.cancel();
+    }
+    this.activeExecutions.clear();
+  }
+
   async health(): Promise<Record<string, unknown>> {
     const runtime = this.db.runtime();
     return {
       ok: true,
+      service: 'factory-runner',
+      pax: this.paxVersion ? { version: this.paxVersion } : { configured: false },
       runtime,
       authority: '.flow -> FeltDB',
     };
@@ -540,9 +563,13 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  const production = process.env.NODE_ENV === 'production';
+  if (production && (!process.env.FELTDB_URL || !process.env.AUTHBOUNDRY_URL)) {
+    throw new Error('Production startup requires FELTDB_URL and AUTHBOUNDRY_URL');
+  }
   const port = Number(process.env.FACTORY_PORT ?? 3000);
-  const { server } = await createHttpServer({
-    mode: (process.env.FACTORY_FELTDB_MODE as 'local' | 'remote' | undefined) ?? 'local',
+  const { service, server } = await createHttpServer({
+    mode: production ? 'remote' : (process.env.FACTORY_FELTDB_MODE as 'local' | 'remote' | undefined) ?? 'local',
     flowPath: process.env.FACTORY_FLOW_PATH,
     repositoryRoot: process.env.FACTORY_REPOSITORY_ROOT,
     workspaceRoot: process.env.FACTORY_WORKSPACE_ROOT,
@@ -550,9 +577,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     serverToken: process.env.FELTDB_TOKEN,
     namespace: process.env.FACTORY_NAMESPACE,
     environmentId: process.env.FACTORY_ENVIRONMENT_ID,
+    paxExecutable: process.env.PAX_BIN,
   });
+  if (production) {
+    await service.verifyRuntime();
+  }
 
   server.listen(port, () => {
     process.stdout.write(`Software Factory Runner listening on ${port}\n`);
   });
+
+  const shutdown = async () => {
+    await service.shutdown();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  };
+  process.once('SIGTERM', () => { void shutdown().finally(() => process.exit(0)); });
+  process.once('SIGINT', () => { void shutdown().finally(() => process.exit(0)); });
 }

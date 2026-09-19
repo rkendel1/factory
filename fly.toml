@@ -1,0 +1,40 @@
+app = "factory-runner"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  FACTORY_PORT = "3000"
+  FACTORY_FELTDB_MODE = "remote"
+  FACTORY_NAMESPACE = "software-factory"
+  FACTORY_ENVIRONMENT_ID = "production"
+  FACTORY_WORKSPACE_ROOT = "/tmp/software-factory"
+  PAX_BIN = "/usr/local/bin/pax"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[processes]
+  app = "node dist/src/server.js"
+
+[deploy]
+  strategy = "rolling"
