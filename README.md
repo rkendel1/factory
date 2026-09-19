@@ -35,5 +35,8 @@ Authenticate requests with the `Authorization` header by sending the caller prin
 
 - `.flow` declares the operation authority and authorized principals.
 - FeltDB stores the durable run lifecycle, authorization decisions, execution contracts, and structured evidence.
-- The runner executes only the command materialized into the execution contract.
+- PAX-backed contracts verify `pax --version`, invoke `pax --json run <target>`, and record PAX provenance separately from native execution evidence.
+- Native contracts execute only the command materialized into the execution contract; callers cannot select native execution.
 - Remote FeltDB must be explicitly configured with `FELTDB_URL`; the server does not silently fall back to local storage for production authority.
+
+PAX is installed separately from the runner. Set `PAX_BIN` (or `paxExecutable` in an embedded service) when the executable is not on `PATH`. PAX availability is required only for capabilities declared with `execution_mode pax`; missing PAX fails that run without falling back to package-manager detection.

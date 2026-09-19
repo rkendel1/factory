@@ -12,7 +12,10 @@ interface OperationAuthority {
   name: string;
   operation: string;
   principals: string[];
-  command: string[];
+  mode: 'pax' | 'native';
+  command?: string[];
+  paxOperation?: string;
+  paxTarget?: string;
   timeoutMs: number;
   capabilities: string[];
 }
@@ -38,17 +41,23 @@ function statementValues(block: FlowBlock, prefix: string): string[] {
 function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
   const operation = statementValue(block, 'operation ');
   const commandJson = statementValue(block, 'command ');
+  const mode = statementValue(block, 'execution_mode ') as OperationAuthority['mode'] | undefined;
+  const paxOperation = statementValue(block, 'pax_operation ');
+  const paxTarget = statementValue(block, 'pax_target ');
 
-  if (!operation || !commandJson) {
+  if (!operation || (!commandJson && mode !== 'pax') || (mode === 'pax' && (!paxOperation || !paxTarget))) {
     return null;
   }
 
-  const command = JSON.parse(commandJson) as string[];
+  const command = commandJson ? JSON.parse(commandJson) as string[] : undefined;
   return {
     name: block.name,
     operation,
     principals: statementValues(block, 'principal '),
+    mode: mode ?? 'native',
     command,
+    paxOperation,
+    paxTarget,
     timeoutMs: Number(statementValue(block, 'timeoutMs ') ?? 60000),
     capabilities: statementValues(block, 'grant '),
   };
@@ -159,6 +168,12 @@ export async function authorizeExecution(
       repository: { ...request.repository },
       operation: request.operation,
       capabilities: authority.capabilities,
+      execution: {
+        mode: authority.mode,
+        operation: authority.paxOperation,
+        target: authority.paxTarget,
+        args: [],
+      },
       command: authority.command,
       limits: { timeoutMs: authority.timeoutMs },
       evidence: { required: true },

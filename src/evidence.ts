@@ -8,6 +8,7 @@ interface RawExecutionResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  paxVersion?: string;
 }
 
 function matchField(label: string, text: string): string | undefined {
@@ -73,6 +74,21 @@ export function buildEvidence(
     },
     stdout: result.stdout,
     stderr: result.stderr,
+    ...(result.paxVersion ? {
+      pax: {
+        version: result.paxVersion,
+        operation: contract.execution.operation ?? 'run',
+        target: contract.execution.target,
+        args: contract.execution.args,
+        invocation: [
+          'pax',
+          '--json',
+          contract.execution.operation ?? 'run',
+          ...(contract.execution.target ? [contract.execution.target] : []),
+          ...contract.execution.args,
+        ],
+      },
+    } : {}),
     artifacts: [],
     deterministicResult,
     finalResult,

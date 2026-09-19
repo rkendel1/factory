@@ -30,6 +30,7 @@ export async function createService(config: Partial<FactoryServiceConfig> = {}):
     flowPath,
     repositoryRoot: config.repositoryRoot,
     workspaceRoot: config.workspaceRoot ?? path.join(workingDirectory, 'workspaces'),
+    paxExecutable: config.paxExecutable,
     environmentId: 'test',
   });
 }

@@ -81,7 +81,9 @@ app software_factory {
     visibility internal
     operation architecture-conformance
     principal factory-service
-    command ["npm","run","conformance"]
+    execution_mode pax
+    pax_operation run
+    pax_target conformance
     timeoutMs 300000
     grant repository.read
     grant artifact.write
@@ -93,6 +95,7 @@ app software_factory {
     visibility internal
     operation repo-echo
     principal factory-service
+    execution_mode native
     command ["node","-e","console.log('authorized')"]
     timeoutMs 10000
     grant repository.read

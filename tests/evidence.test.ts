@@ -10,6 +10,7 @@ const contract: ExecutionContract = {
   repository: { provider: 'github', owner: 'rkendel1', name: 'flow_db', ref: 'main', commit: 'abc123' },
   operation: 'architecture-conformance',
   capabilities: ['repository.read', 'evidence.write'],
+  execution: { mode: 'native', args: [] },
   command: ['npm', 'run', 'conformance'],
   limits: { timeoutMs: 1000 },
   evidence: { required: true },
