@@ -64,16 +64,11 @@ export function getOperationAuthorities(flowSpec: FlowSpec): Map<string, Operati
     }
 
     const existing = authorities.get(parsed.operation);
-    if (!existing) {
-      authorities.set(parsed.operation, parsed);
-      continue;
+    if (existing) {
+      throw new Error(`Duplicate .flow authority for operation ${parsed.operation} is not allowed`);
     }
 
-    authorities.set(parsed.operation, {
-      ...existing,
-      principals: [...new Set([...existing.principals, ...parsed.principals])],
-      capabilities: [...new Set([...existing.capabilities, ...parsed.capabilities])],
-    });
+    authorities.set(parsed.operation, parsed);
   }
 
   return authorities;

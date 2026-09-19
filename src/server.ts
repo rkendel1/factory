@@ -101,11 +101,21 @@ export class FactoryService {
       return run;
     }
 
-    return this.patchRun(runId, {
+    const transition = await this.db.transitionOperation({
+      operationId: run.operationId,
+      expectedVersion: run.operationVersion,
+      to: 'cancelled',
+      error: 'Run cancelled by caller',
+    });
+
+    const cancelledRun = await this.patchRun(runId, {
       status: 'cancelled',
       completedAt: new Date().toISOString(),
       error: 'Run cancelled by caller',
+      operationVersion: transition.operation.version,
     });
+    await this.appendEvent(runId, 'cancelled', 'Run cancelled by caller');
+    return cancelledRun;
   }
 
   async recoverInterruptedRuns(): Promise<void> {
@@ -150,7 +160,7 @@ export class FactoryService {
     let run = await runs.get(runId);
 
     if (!run) {
-      run = {
+      const initialRun: RunRecord = {
         id: runId,
         operationId: admission.operationId,
         operationVersion: admission.operation.version,
@@ -163,8 +173,16 @@ export class FactoryService {
         createdAt: new Date(admission.operation.createdAt).toISOString(),
         updatedAt: new Date(admission.operation.createdAt).toISOString(),
       };
-      await runs.put(run, run.id);
-      await this.appendEvent(run.id, 'accepted', 'Durably admitted run request');
+      try {
+        await runs.insert(initialRun, initialRun.id);
+        run = initialRun;
+        await this.appendEvent(run.id, 'accepted', 'Durably admitted run request');
+      } catch {
+        run = await runs.get(runId);
+        if (!run) {
+          throw new Error(`Run ${runId} could not be created after durable admission`);
+        }
+      }
     } else if (isTerminal(run.status) || run.status !== 'accepted' || this.activeExecutions.has(run.id)) {
       return run;
     }
@@ -228,18 +246,20 @@ export class FactoryService {
       await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(outcome.evidence, outcome.evidence.id);
 
       const terminalStatus = outcome.evidence.status === 'completed' ? 'completed' : outcome.evidence.status;
-      const transition = await this.db.transitionOperation({
-        operationId: run.operationId,
-        expectedVersion: run.operationVersion,
-        to: terminalStatus === 'completed' ? 'completed' : terminalStatus,
-        resultSnapshot: outcome.evidence,
-        error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
-      });
+      const transition = terminalStatus === 'cancelled' && run.status === 'cancelled'
+        ? null
+        : await this.db.transitionOperation({
+          operationId: run.operationId,
+          expectedVersion: run.operationVersion,
+          to: terminalStatus === 'completed' ? 'completed' : terminalStatus,
+          resultSnapshot: outcome.evidence,
+          error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
+        });
 
       run = await this.patchRun(activeRunId, {
         status: terminalStatus,
         completedAt: outcome.evidence.completedAt,
-        operationVersion: transition.operation.version,
+        operationVersion: transition?.operation.version ?? run.operationVersion,
         evidenceId: outcome.evidence.id,
         error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
       });
@@ -258,17 +278,19 @@ export class FactoryService {
         terminalStatus,
       );
       await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidence, evidence.id);
-      const transition = await this.db.transitionOperation({
-        operationId: run.operationId,
-        expectedVersion: run.operationVersion,
-        to: terminalStatus,
-        error: evidence.stderr,
-        resultSnapshot: evidence,
-      });
+      const transition = terminalStatus === 'cancelled' && persistedRun?.status === 'cancelled'
+        ? null
+        : await this.db.transitionOperation({
+          operationId: run.operationId,
+          expectedVersion: run.operationVersion,
+          to: terminalStatus,
+          error: evidence.stderr,
+          resultSnapshot: evidence,
+        });
       run = await this.patchRun(activeRunId, {
         status: terminalStatus,
         completedAt,
-        operationVersion: transition.operation.version,
+        operationVersion: transition?.operation.version ?? run.operationVersion,
         evidenceId: evidence.id,
         error: evidence.stderr,
       });
