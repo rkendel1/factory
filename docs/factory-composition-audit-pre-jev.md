@@ -4,14 +4,15 @@
 
 This audit measures commit `7848c83519fb36029cf18b945c18581bacedaa46` (the
 commit immediately before these audit artifacts), tree
-`6099b10f2f9671cfc9782b5c7e6a9533ef6f167b`. The audited tree was clean. The
+`d63f7246f2f0241d611d102b7a6be5f7fef111a8`. The audited source tree was clean.
+The
 locked runtime versions
 are:
 
 | Boundary | Version |
 | --- | --- |
-| Factory commit | `7848c83519fb36029cf18b945c18581bacedaa46` |
-| Factory tree | `6099b10f2f9671cfc9782b5c7e6a9533ef6f167b` |
+| Factory commit | `a4144d36246f47d66e0a4021e8d950c712484bfe` |
+| Factory tree | `d63f7246f2f0241d611d102b7a6be5f7fef111a8` |
 | FeltDB | `@feltdb/core@0.11.4` |
 | AuthBoundry | `@authboundry/core@1.15.1` |
 | AppPort | `@appport/sdk@1.1.18` |
@@ -330,13 +331,14 @@ From the repository root:
 
 ```sh
 npm ci
-BASELINE_COMMIT="$(git rev-parse HEAD)" node scripts/audit-factory.mjs
+BASELINE_COMMIT="a4144d36246f47d66e0a4021e8d950c712484bfe" node scripts/audit-factory.mjs
 ```
 
 The script writes `docs/factory-composition-audit-pre-jev.json`. When
 `BASELINE_COMMIT` is supplied, it must equal `HEAD`; the script also requires
-a clean working tree before measuring and records both the commit and
-`HEAD^{tree}`. It counts non-empty physical lines, reads exact versions and
+a clean source tree before measuring and records both the commit and
+`HEAD^{tree}` (the generated JSON report itself is the allowed output).
+It counts non-empty physical lines, reads exact versions and
 integrity values from `package-lock.json`, and hashes `.flow`. It excludes
 `node_modules`, `dist`, generated dependency code, lockfiles, and vendored
 code. It asserts that JEV is absent from dependencies, imports, dedicated
