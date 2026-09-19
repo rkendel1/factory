@@ -4,80 +4,153 @@ app software_factory {
   collection Work {
     owner_principal: text
     tenant_id: text
-    operation: text
     repository_provider: text
     repository_owner: text
     repository_name: text
     repository_ref: text
+    ownerPrincipal: text?
+    tenantId: text?
+    operation: text
+    repositoryProvider: text?
+    repositoryOwner: text?
+    repositoryName: text?
+    repositoryRef: text?
     status: text
     index owner_principal using hash(owner_principal)
+    index ownerPrincipal using hash(ownerPrincipal)
   }
 
   collection ExecutionRequest {
     run_id: text
     work_id: text
+    runId: ref Run?
+    workId: ref Work?
     operation: text
     principal: text
+    tenantId: text?
+    request: json?
     created_at: datetime
+    createdAt: datetime?
     index run_id using hash(run_id)
+    index runId using hash(runId)
   }
 
   collection ExecutionContract {
     run_id: text
+    runId: ref Run?
     principal: text
+    tenantId: text?
     operation: text
     command_json: text
+    commandJson: text?
+    contract: json?
+    fingerprint: text?
     created_at: datetime
+    createdAt: datetime?
     index run_id using hash(run_id)
+    index runId using hash(runId)
   }
 
   collection Run {
     work_id: text
+    operationId: text?
+    operationVersion: integer?
+    workId: ref Work?
     principal: text
     tenant_id: text
+    tenantId: text?
     operation: text
     status: text
+    idempotencyKey: text?
+    repository: json?
+    authorizationDecisionId: ref AuthorizationDecision?
+    contractId: ref ExecutionContract?
+    evidenceId: ref Evidence?
+    error: text?
+    startedAt: datetime?
+    completed_at: datetime
+    completedAt: datetime?
     created_at: datetime
     updated_at: datetime
-    completed_at: datetime
+    createdAt: datetime?
+    updatedAt: datetime?
     index work_id using hash(work_id)
+    index workId using hash(workId)
     index status using hash(status)
   }
 
   collection RunEvent {
     run_id: text
+    runId: ref Run?
     status: text
     detail: text
     created_at: datetime
+    createdAt: datetime?
     index run_id using hash(run_id)
+    index runId using hash(runId)
   }
 
   collection Artifact {
     run_id: text
+    runId: ref Run?
     path: text
     kind: text
     created_at: datetime
+    createdAt: datetime?
     index run_id using hash(run_id)
+    index runId using hash(runId)
   }
 
   collection Evidence {
     run_id: text
+    runId: ref Run?
+    requestId: ref ExecutionRequest?
+    contractId: ref ExecutionContract?
+    contractFingerprint: text?
+    applicationContractFingerprint: text?
+    principal: text?
+    tenantId: text?
+    operation: text?
+    appport: json?
+    ref: text?
+    executionMode: text?
+    authorizationDecisionId: ref AuthorizationDecision?
     status: text
+    exitCode: integer?
+    startedAt: datetime?
+    completedAt: datetime?
+    durationMs: integer?
+    repository: json?
+    stdout: text?
+    stderr: text?
+    pax: json?
+    artifacts: json?
+    deterministicResult: text?
+    finalResult: text?
+    invariant: json?
+    jev: json?
     deterministic_result: text
     final_result: text
     created_at: datetime
     index run_id using hash(run_id)
+    index runId using hash(runId)
   }
 
   collection AuthorizationDecision {
     run_id: text
+    runId: ref Run?
     principal: text
     tenant_id: text
+    tenantId: text?
+    authSession: json?
+    delegation: json?
     operation: text
     decision: text
     reason: text
     created_at: datetime
+    createdAt: datetime?
     index run_id using hash(run_id)
+    index runId using hash(runId)
   }
 
   capability ArchitectureConformanceExecution {
@@ -114,41 +187,41 @@ app software_factory {
 
   policy Work {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy ExecutionRequest {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy ExecutionContract {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy Run {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy RunEvent {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy Artifact {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy Evidence {
     read: authenticated
-    write: authenticated
+    write: none
   }
 
   policy AuthorizationDecision {
     read: authenticated
-    write: authenticated
+    write: none
   }
 }
