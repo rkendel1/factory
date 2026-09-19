@@ -20,6 +20,9 @@ interface OperationAuthority {
   paxTarget?: string;
   timeoutMs: number;
   capabilities: string[];
+  appportOperation?: string;
+  appportService?: string;
+  appportCapability?: string;
 }
 
 export interface AuthorizationResolution {
@@ -46,6 +49,9 @@ function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
   const mode = statementValue(block, 'execution_mode ') as OperationAuthority['mode'] | undefined;
   const paxOperation = statementValue(block, 'pax_operation ');
   const paxTarget = statementValue(block, 'pax_target ');
+  const appportOperation = statementValue(block, 'appport_operation ');
+  const appportService = statementValue(block, 'appport_service ');
+  const appportCapability = statementValue(block, 'appport_capability ');
 
   if (!operation || (!commandJson && mode !== 'pax') || (mode === 'pax' && (!paxOperation || !paxTarget))) {
     return null;
@@ -62,6 +68,9 @@ function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
     paxTarget,
     timeoutMs: Number(statementValue(block, 'timeoutMs ') ?? 60000),
     capabilities: statementValues(block, 'grant '),
+    appportOperation,
+    appportService,
+    appportCapability,
   };
 }
 
@@ -184,6 +193,12 @@ export async function authorizeExecution(
       },
       operation: request.operation,
       capabilities: authority.capabilities,
+      appport: {
+        protocol: 'appport' as const,
+        operation: authority.appportOperation ?? request.operation,
+        service: authority.appportService ?? 'execution',
+        capability: authority.appportCapability ?? authority.capabilities[0] ?? 'execution.run',
+      },
       execution: {
         mode: authority.mode,
         operation: authority.paxOperation,

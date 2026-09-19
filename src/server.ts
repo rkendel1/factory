@@ -6,6 +6,7 @@ import { buildFailureEvidence } from './evidence.js';
 import { executeContract, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
+import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import type {
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -69,12 +70,17 @@ export class FactoryService {
   private readonly flowSpec;
 
   private readonly activeExecutions = new Map<string, ExecutionHandle>();
+  private readonly appPort: FactoryAppPortAdapter;
 
   private constructor(
     private readonly config: FactoryServiceConfig,
     private readonly db: Awaited<ReturnType<typeof createFactoryDB>>,
   ) {
     this.flowSpec = loadFactoryFlow(config.flowPath);
+    this.appPort = createAppPortAdapter({
+      namespace: config.namespace ?? 'software-factory',
+      path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
+    });
   }
 
   static async create(config: FactoryServiceConfig): Promise<FactoryService> {
@@ -251,6 +257,7 @@ export class FactoryService {
     }
 
     await this.recordContract(authorization.contract);
+    this.appPort.bindContract(authorization.contract);
     run = await this.patchRun(run.id, {
       status: 'authorized',
       contractId: run.id,
@@ -446,7 +453,8 @@ export class FactoryService {
 
 export async function createHttpServer(config: FactoryServiceConfig): Promise<{ service: FactoryService; server: Server; }> {
   const service = await FactoryService.create(config);
-  const authenticator = config.authenticator ?? createAuthBoundryAuthenticator(config);
+  const authenticator = config.authenticator;
+  const getAuthenticator = () => authenticator ?? createAuthBoundryAuthenticator(config);
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -459,7 +467,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       if (request.method === 'POST' && url.pathname === '/v1/runs') {
         let context;
         try {
-          context = await authenticator.authenticate(request, 'factory.run');
+          context = await getAuthenticator().authenticate(request, 'factory.run');
         } catch {
           writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
@@ -474,7 +482,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       if (request.method === 'GET' && runMatch) {
         let context;
         try {
-          context = await authenticator.authenticate(request, 'factory.run.read');
+          context = await getAuthenticator().authenticate(request, 'factory.run.read');
         } catch {
           writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
@@ -488,7 +496,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       if (request.method === 'GET' && evidenceMatch) {
         let context;
         try {
-          context = await authenticator.authenticate(request, 'factory.run.evidence');
+          context = await getAuthenticator().authenticate(request, 'factory.run.evidence');
         } catch {
           writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
@@ -502,7 +510,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       if (request.method === 'POST' && cancelMatch) {
         let context;
         try {
-          context = await authenticator.authenticate(request, 'factory.run.cancel');
+          context = await getAuthenticator().authenticate(request, 'factory.run.cancel');
         } catch {
           writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;

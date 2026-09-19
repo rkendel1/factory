@@ -91,6 +91,9 @@ app software_factory {
     grant repository.read
     grant artifact.write
     grant evidence.write
+    appport_operation architecture-conformance
+    appport_service execution
+    appport_capability repository.read
     jev bounded
   }
 
@@ -103,6 +106,9 @@ app software_factory {
     timeoutMs 10000
     grant repository.read
     grant evidence.write
+    appport_operation repo-echo
+    appport_service execution
+    appport_capability repository.read
     jev bounded
   }
 

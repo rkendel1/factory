@@ -68,6 +68,7 @@ export function buildEvidence(
     principal: contract.principal,
     tenantId: contract.tenantId,
     operation: contract.operation,
+    ...(contract.appport ? { appport: contract.appport } : {}),
     ref: contract.repository.ref,
     executionMode: contract.execution.mode,
     authorizationDecisionId: contract.authorizationDecisionId,
