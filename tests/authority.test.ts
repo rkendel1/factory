@@ -78,13 +78,21 @@ test('authorized contract and evidence retain factory provenance', async () => {
   const db = (service as unknown as { db: import('@feltdb/core').StateFirstDB }).db;
   const contract = await db.collection(COLLECTIONS.executionContracts).get(run.id) as {
     fingerprint: string;
-    contract: { command?: string[]; fingerprint?: string; authorizationDecisionId?: string };
+    contract: {
+      command?: string[];
+      fingerprint?: string;
+      authorizationDecisionId?: string;
+      applicationContract?: { fingerprint: string };
+      appBoundry?: { contractFingerprint: string; permissions: string[] };
+    };
   } | null;
   const evidence = await service.getEvidence(run.id);
 
   assert.ok(contract?.fingerprint);
   assert.equal(contract?.fingerprint, contract?.contract.fingerprint);
   assert.equal(contract?.contract.authorizationDecisionId, run.authorizationDecisionId);
+  assert.equal(contract?.contract.applicationContract?.fingerprint, contract?.contract.appBoundry?.contractFingerprint);
+  assert.deepEqual(contract?.contract.appBoundry?.permissions, ['repository.read', 'evidence.write']);
   assert.equal(evidence?.contractFingerprint, contract?.fingerprint);
   assert.equal(evidence?.authorizationDecision, 'granted');
   assert.deepEqual(contract?.contract.command, ['node', '-e', "console.log('authorized')"]);

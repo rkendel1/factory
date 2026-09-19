@@ -22,6 +22,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@appport/appboundry": "^1.0.10",
     "@appport/sdk": "^1.1.18",
     "@appport/services": "^0.4.0",
     "@authboundry/core": "^1.15.1",

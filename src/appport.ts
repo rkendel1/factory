@@ -1,9 +1,13 @@
-import { defineApplication, defineCapability, s } from '@appport/sdk';
 import { createServices, type AppPortServices } from '@appport/services';
+import { createCanonicalApplicationContract, type CanonicalApplicationContract } from './application-contract.js';
+import { loadFactoryFlow } from './felt.js';
 import type { ExecutionContract, StructuredEvidence } from './types.js';
 
 export interface AppPortContract {
   protocol: 'appport';
+  applicationId: string;
+  applicationVersion: string;
+  applicationFingerprint: string;
   operation: string;
   service: string;
   capability: string;
@@ -28,29 +32,12 @@ export class AppPortAdapterError extends Error {
   }
 }
 
-const factoryRunCapability = defineCapability({
-  name: 'factory.execution.run',
-  version: 1,
-  input: s.object({
-    operation: s.string(),
-    service: s.string(),
-    capability: s.string(),
-  }),
-  output: s.object({ accepted: s.boolean() }),
-  authorization: ['factory.execution'],
-  handler: async () => ({ accepted: true }),
-});
-
-export const factoryAppPortApplication = defineApplication({
-  id: 'software-factory',
-  name: 'Software Factory',
-  version: '1.0.0',
-  provides: [factoryRunCapability],
-});
+export const factoryAppPortApplication = createCanonicalApplicationContract(loadFactoryFlow()).appPort;
 
 export interface AppPortAdapterOptions {
   namespace: string;
   path: string;
+  application: CanonicalApplicationContract;
 }
 
 export interface FactoryAppPortAdapter {
@@ -84,10 +71,13 @@ export function createAppPortAdapter(options: AppPortAdapterOptions): FactoryApp
 
   return {
     protocol: 'appport',
-    applicationFingerprint: factoryAppPortApplication.fingerprint(),
+    applicationFingerprint: options.application.fingerprint,
     bindContract(contract) {
       if (!contract.appport || contract.appport.protocol !== 'appport') {
         throw new AppPortAdapterError('Execution contract is missing its AppPort binding');
+      }
+      if (contract.appport.applicationFingerprint !== options.application.fingerprint) {
+        throw new AppPortAdapterError('Execution contract AppPort binding does not match the authoritative .flow');
       }
       if (contract.appport.operation !== contract.operation) {
         throw new AppPortAdapterError('Execution contract AppPort operation does not match the Factory operation');

@@ -65,6 +65,7 @@ export function buildEvidence(
     requestId: contract.runId,
     contractId: contract.runId,
     contractFingerprint: contract.fingerprint,
+    ...(contract.applicationContract ? { applicationContractFingerprint: contract.applicationContract.fingerprint } : {}),
     principal: contract.principal,
     tenantId: contract.tenantId,
     operation: contract.operation,
