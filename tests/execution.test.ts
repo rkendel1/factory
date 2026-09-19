@@ -20,7 +20,7 @@ test('authorized command executes and persists evidence', async () => {
     operation: 'repo-echo',
   }, 'factory-service');
 
-  assert.equal(run.status, 'completed');
+  assert.equal(run.status, 'completed', run.error ?? '');
   const evidence = await service.getEvidence(run.id);
   assert.ok(evidence);
   assert.equal(evidence?.finalResult, 'PASS');
@@ -38,7 +38,7 @@ test('authorized PAX operation invokes PAX and records provenance', async () => 
   });
   const service = await createService({
     workingDirectory: root,
-    namespace: 'execution-pax',
+    namespace: path.basename(root),
     repositoryRoot,
     paxExecutable: pax,
   });
@@ -50,11 +50,30 @@ test('authorized PAX operation invokes PAX and records provenance', async () => 
     operation: 'architecture-conformance',
   }, 'factory-service');
 
-  assert.equal(run.status, 'completed');
+  assert.equal(run.status, 'completed', run.error ?? '');
   const evidence = await service.getEvidence(run.id);
   assert.equal(evidence?.pax?.version, 'pax 0.1.0');
   assert.deepEqual(evidence?.pax?.invocation.slice(0, 4), ['pax', '--json', 'run', 'conformance']);
   assert.match(evidence?.stdout ?? '', /"status":"match"/);
+});
+
+test('missing PAX fails before project execution', async () => {
+  const root = await createTempWorkspace('execution-pax-missing');
+  const repositoryRoot = await createRepository(root, { 'package.json': '{}' });
+  await assert.rejects(
+    executeContract({
+      runId: 'run_pax_missing',
+      workId: 'work_123',
+      principal: 'factory-service',
+      repository: { provider: 'local', owner: 'rkendel1', name: 'factory', ref: 'main', path: repositoryRoot },
+      operation: 'architecture-conformance',
+      capabilities: ['repository.read'],
+      execution: { mode: 'pax', operation: 'run', target: 'conformance', args: [] },
+      limits: { timeoutMs: 1000 },
+      evidence: { required: true },
+    }, { repositoryRoot, workspaceRoot: path.join(root, 'workspaces'), paxExecutable: path.join(root, 'missing-pax') }),
+    /PAX is required.*unavailable/i,
+  );
 });
 
 test('unauthorized shell command is rejected by executor boundary', async () => {

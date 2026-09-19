@@ -171,6 +171,7 @@ async function runBoundedCommand(
         durationMs: completedAtMs - startedAtMs,
         stdout,
         stderr,
+        ...(paxVersion ? { paxVersion } : {}),
       };
 
       if (cancelled) {
@@ -191,7 +192,6 @@ async function runBoundedCommand(
       resolve({
         ...base,
         status: code === 0 ? 'completed' : 'failed',
-        ...(paxVersion ? { paxVersion } : {}),
       });
     });
   });

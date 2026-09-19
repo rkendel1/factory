@@ -330,7 +330,7 @@ export class FactoryService {
       runId: contract.runId,
       principal: contract.principal,
       operation: contract.operation,
-      commandJson: JSON.stringify(contract.command),
+      commandJson: JSON.stringify(contract.command ?? []),
       contract,
       createdAt: new Date().toISOString(),
     };

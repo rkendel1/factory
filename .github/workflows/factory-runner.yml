@@ -25,7 +25,7 @@ jobs:
 
       - name: Install PAX
         run: |
-          curl --fail --location --silent --show-error https://github.com/rkendel1/pax/releases/latest/download/pax-x86_64-unknown-linux-gnu.tar.gz \
+          curl --fail --location --silent --show-error https://github.com/rkendel1/pax/releases/download/v0.1.0/pax-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
