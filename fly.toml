@@ -13,11 +13,13 @@ primary_region = 'iad'
   strategy = 'rolling'
 
 [env]
+  AUTHBOUNDRY_URL = 'https://authboundry.fly.dev'
   FACTORY_ENVIRONMENT_ID = 'production'
   FACTORY_FELTDB_MODE = 'remote'
   FACTORY_NAMESPACE = 'software-factory'
   FACTORY_PORT = '3000'
   FACTORY_WORKSPACE_ROOT = '/tmp/software-factory'
+  FELTDB_URL = 'https://feltdb.fly.dev'
   NODE_ENV = 'production'
   PAX_BIN = '/usr/local/bin/pax'
 
