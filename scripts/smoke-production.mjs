@@ -11,6 +11,10 @@ const health = await fetch(`${baseUrl}/health`);
 if (!health.ok) {
   throw new Error(`health failed with HTTP ${health.status}`);
 }
+const healthBody = await health.json();
+if (healthBody.ok !== true || !healthBody.service || !healthBody.pax?.version || !healthBody.appport?.applicationFingerprint) {
+  throw new Error('health response is missing runtime initialization metadata');
+}
 const headers = { authorization, 'content-type': 'application/json' };
 const unauthorized = await fetch(`${baseUrl}/v1/runs`, {
   method: 'POST',
@@ -36,5 +40,12 @@ if (!retrieved.ok) {
 const evidence = await fetch(`${baseUrl}/v1/runs/${encodeURIComponent(run.id)}/evidence`, { headers });
 if (![200, 404].includes(evidence.status)) {
   throw new Error(`evidence retrieval failed with HTTP ${evidence.status}`);
+}
+console.log(`Restart Factory, then set FACTORY_RUN_ID=${run.id} and rerun this script to verify durability.`);
+if (process.env.FACTORY_RUN_ID) {
+  const durable = await fetch(`${baseUrl}/v1/runs/${encodeURIComponent(process.env.FACTORY_RUN_ID)}`, { headers });
+  if (!durable.ok) {
+    throw new Error(`durability retrieval failed with HTTP ${durable.status}`);
+  }
 }
 console.log(`Factory smoke test passed for run ${run.id}`);

@@ -3,7 +3,10 @@
 Factory Runner is deployed as the dedicated `factory-runner` Fly application.
 It owns execution orchestration only: FeltDB owns durable state, AuthBoundry
 owns identity and authorization, and `.flow` remains the application capability
-contract. No Factory database or Fly volume is required.
+contract. AppPort Services is composed locally in the Factory process; FeltDB
+and AuthBoundry are the only remote URLs because the current implementation
+accesses them through their published network clients. No Factory database or
+Fly volume is required.
 
 ## Prerequisites
 
@@ -50,8 +53,19 @@ node scripts/smoke-production.mjs
 ```
 
 The script creates a run, retrieves it, and retrieves its evidence endpoint.
-Run durability is verified by running the retrieval step again after
-`fly machine restart <machine-id>`.
+Restart the machine and run the retrieval check again:
+
+```sh
+fly machine restart <machine-id>
+FACTORY_URL=https://factory-runner.fly.dev \
+FACTORY_AUTHORIZATION="******" \
+FACTORY_RUN_ID="<created-run-id>" \
+FACTORY_RUN_BODY='{"workId":"...","repository":{"provider":"github","owner":"...","name":"...","ref":"main"},"operation":"..."}' \
+node scripts/smoke-production.mjs
+```
+
+The second invocation retrieves the pre-restart run from FeltDB, proving that
+Factory memory and the ephemeral filesystem are not the durable state store.
 
 ## Rollback and troubleshooting
 

@@ -73,6 +73,7 @@ export class FactoryService {
   private readonly activeExecutions = new Map<string, ExecutionHandle>();
   private readonly appPort: FactoryAppPortAdapter;
   private paxVersion?: string;
+  private shuttingDown = false;
 
   private constructor(
     private readonly config: FactoryServiceConfig,
@@ -103,14 +104,17 @@ export class FactoryService {
     if (!this.config.serverUrl && !process.env.FELTDB_URL) {
       throw new Error('Remote FeltDB URL is required in production');
     }
+    if (this.appPort.protocol !== 'appport' || !this.appPort.applicationFingerprint) {
+      throw new Error('AppPort Services failed to initialize');
+    }
     this.paxVersion = await verifyPax(this.config.paxExecutable);
   }
 
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
     for (const execution of this.activeExecutions.values()) {
       execution.cancel();
     }
-    this.activeExecutions.clear();
   }
 
   async health(): Promise<Record<string, unknown>> {
@@ -119,6 +123,10 @@ export class FactoryService {
       ok: true,
       service: 'factory-runner',
       pax: this.paxVersion ? { version: this.paxVersion } : { configured: false },
+      appport: {
+        protocol: this.appPort.protocol,
+        applicationFingerprint: this.appPort.applicationFingerprint,
+      },
       runtime,
       authority: '.flow -> FeltDB',
     };
@@ -210,6 +218,9 @@ export class FactoryService {
   }
 
   async startRun(request: RunRequest, principalOrContext: string | AuthenticatedContext): Promise<RunRecord> {
+    if (this.shuttingDown) {
+      throw new Error('Factory service is shutting down');
+    }
     validateRunRequest(request);
     const context: AuthenticatedContext = typeof principalOrContext === 'string'
       ? {
