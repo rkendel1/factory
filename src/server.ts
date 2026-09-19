@@ -165,9 +165,7 @@ export class FactoryService {
       };
       await runs.put(run, run.id);
       await this.appendEvent(run.id, 'accepted', 'Durably admitted run request');
-    } else if (isTerminal(run.status)) {
-      return run;
-    } else if (!admission.admitted && this.activeExecutions.has(run.id)) {
+    } else if (isTerminal(run.status) || run.status !== 'accepted' || this.activeExecutions.has(run.id)) {
       return run;
     }
 
@@ -329,7 +327,19 @@ export class FactoryService {
       throw new Error(`Run ${runId} does not exist`);
     }
 
-    const result = await runs.updateIfVersion(runId, current.__version ?? 1, {
+    if (current.__version === undefined) {
+      await runs.update(runId, {
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      });
+      const updated = await runs.get(runId);
+      if (!updated) {
+        throw new Error(`Run ${runId} disappeared during patch`);
+      }
+      return updated;
+    }
+
+    const result = await runs.updateIfVersion(runId, current.__version, {
       ...patch,
       updatedAt: new Date().toISOString(),
     });

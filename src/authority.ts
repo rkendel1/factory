@@ -55,12 +55,28 @@ function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
 }
 
 export function getOperationAuthorities(flowSpec: FlowSpec): Map<string, OperationAuthority> {
-  const entries = flowSpec.capabilities
-    .map((block) => parseOperationAuthority(block))
-    .filter((value): value is OperationAuthority => value !== null)
-    .map((authority) => [authority.operation, authority] as const);
+  const authorities = new Map<string, OperationAuthority>();
 
-  return new Map(entries);
+  for (const block of flowSpec.capabilities) {
+    const parsed = parseOperationAuthority(block);
+    if (!parsed) {
+      continue;
+    }
+
+    const existing = authorities.get(parsed.operation);
+    if (!existing) {
+      authorities.set(parsed.operation, parsed);
+      continue;
+    }
+
+    authorities.set(parsed.operation, {
+      ...existing,
+      principals: [...new Set([...existing.principals, ...parsed.principals])],
+      capabilities: [...new Set([...existing.capabilities, ...parsed.capabilities])],
+    });
+  }
+
+  return authorities;
 }
 
 function repositoriesMatch(work: WorkRecord, repository: RepositoryRef): boolean {

@@ -60,15 +60,20 @@ export async function createWorkspace(runId: string, workspaceRoot = '/tmp/softw
 async function copyRepository(sourcePath: string, destinationPath: string, ref?: string): Promise<string | undefined> {
   try {
     await stat(path.join(sourcePath, '.git'));
-    await runProcess('git', ['clone', '--depth', '1', sourcePath, destinationPath]);
-    if (ref) {
-      await runProcess('git', ['checkout', ref], destinationPath);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: string }).code) : undefined;
+    if (code !== 'ENOENT') {
+      throw error;
     }
-    return await runProcess('git', ['rev-parse', 'HEAD'], destinationPath);
-  } catch {
     await cp(sourcePath, destinationPath, { recursive: true });
     return undefined;
   }
+
+  await runProcess('git', ['clone', '--depth', '1', sourcePath, destinationPath]);
+  if (ref) {
+    await runProcess('git', ['checkout', ref], destinationPath);
+  }
+  return await runProcess('git', ['rev-parse', 'HEAD'], destinationPath);
 }
 
 export async function materializeRepository(

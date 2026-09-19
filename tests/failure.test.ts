@@ -135,7 +135,7 @@ test('same idempotency key returns the same run', async () => {
   assert.equal(first.id, second.id);
 });
 
-test('durable run survives restart and interrupted execution is recoverable', async () => {
+test('durable run survives restart and interrupted intermediate state is recoverable', async () => {
   const root = await createTempWorkspace('execution-recovery');
   const repositoryRoot = await createRepository(root, { 'package.json': '{"name":"repo","version":"1.0.0"}' });
   const service = await createService({ workingDirectory: root, namespace: 'execution-recovery', repositoryRoot });
@@ -164,7 +164,7 @@ test('durable run survives restart and interrupted execution is recoverable', as
     workId: 'work_123',
     principal: 'factory-service',
     operation: 'repo-echo',
-    status: 'executing',
+    status: 'preparing',
     idempotencyKey: 'interrupt',
     repository: { provider: 'local', owner: 'rkendel1', name: 'factory', ref: 'main' },
     createdAt: new Date().toISOString(),
