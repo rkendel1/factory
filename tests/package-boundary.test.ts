@@ -12,9 +12,13 @@ test('published @feltdb/core can be consumed from an isolated project', async ()
   const root = await mkdtemp(path.join(tmpdir(), 'factory-package-boundary-'));
 
   try {
+    const factoryPackage = JSON.parse(await readFile(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      dependencies: { '@feltdb/core': string };
+    };
+    const feltDbVersion = factoryPackage.dependencies['@feltdb/core'];
     const { stdout: packOutput } = await execFileAsync(
       'npm',
-      ['pack', '@feltdb/core', '--json', '--pack-destination', root],
+      ['pack', `@feltdb/core@${feltDbVersion}`, '--json', '--pack-destination', root],
       { cwd: root },
     );
     const [{ filename }] = JSON.parse(packOutput) as Array<{ filename: string }>;
@@ -22,6 +26,7 @@ test('published @feltdb/core can be consumed from an isolated project', async ()
     const consumer = path.join(root, 'consumer');
 
     await mkdir(consumer);
+    await writeFile(path.join(consumer, 'package.json'), '{"type":"module"}\n', 'utf8');
     await execFileAsync('npm', [
       'install',
       '--ignore-scripts',
