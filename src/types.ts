@@ -9,7 +9,7 @@ export type RunStatus =
   | 'failed'
   | 'cancelled';
 
-export type DeterministicResult = 'PASS' | 'FAIL';
+export type DeterministicResult = 'PASS' | 'FAIL' | 'CANCELLED';
 export type JevStatus = 'DRIFT' | 'ALIGNED' | 'UNAVAILABLE';
 
 export interface RepositoryRef {

@@ -46,9 +46,17 @@ export function buildEvidence(
   repositoryCommit?: string,
 ): StructuredEvidence {
   const invariant = parseInvariantEvidence(result.stdout, result.stderr);
-  const deterministicResult = result.exitCode === 0 ? 'PASS' : 'FAIL';
+  const deterministicResult = result.status === 'cancelled'
+    ? 'CANCELLED'
+    : result.exitCode === 0
+      ? 'PASS'
+      : 'FAIL';
   const jev = parseJevEvaluation(result.stdout, result.stderr);
-  const finalResult = deterministicResult === 'FAIL' ? 'FAIL' : 'PASS';
+  const finalResult = deterministicResult === 'FAIL'
+    ? 'FAIL'
+    : deterministicResult === 'CANCELLED'
+      ? 'CANCELLED'
+      : 'PASS';
 
   return {
     id: contract.runId,
@@ -78,11 +86,12 @@ export function buildFailureEvidence(
   error: Error,
   startedAt: string,
   completedAt: string,
+  status: 'failed' | 'cancelled' = 'failed',
 ): StructuredEvidence {
   return buildEvidence(
     contract,
     {
-      status: 'failed',
+      status,
       exitCode: null,
       startedAt,
       completedAt,

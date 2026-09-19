@@ -65,3 +65,18 @@ test('JEV unavailable does not override deterministic failure', () => {
   assert.equal(evidence.finalResult, 'FAIL');
   assert.equal(evidence.jev.status, 'UNAVAILABLE');
 });
+
+test('cancelled execution remains cancelled in structured evidence', () => {
+  const evidence = buildEvidence(contract, {
+    status: 'cancelled',
+    exitCode: null,
+    startedAt: '2026-01-01T00:00:00.000Z',
+    completedAt: '2026-01-01T00:00:01.000Z',
+    durationMs: 1000,
+    stdout: '',
+    stderr: 'cancelled by caller',
+  }, 'abc123');
+
+  assert.equal(evidence.deterministicResult, 'CANCELLED');
+  assert.equal(evidence.finalResult, 'CANCELLED');
+});

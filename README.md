@@ -29,7 +29,7 @@ FACTORY_FELTDB_MODE=local npm run dev
 - `POST /v1/runs/:runId/cancel`
 - `GET /health`
 
-Authenticate requests by sending the caller principal after the word ****** the Authorization header, or by setting the X-Factory-Principal header during local testing.
+Authenticate requests with the `Authorization` header by sending the caller principal after the `Bearer` prefix, or by setting the `X-Factory-Principal: factory-service` header during local testing.
 
 ## Authority model
 
