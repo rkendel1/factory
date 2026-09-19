@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createHttpServer } from '../src/server.js';
+import { resolveRemoteAuthorityBootstrap } from '../src/bootstrap.js';
 
 test('production deployment uses remote authority boundaries', async () => {
   const fly = await readFile(path.join(process.cwd(), 'fly.toml'), 'utf8');
@@ -24,6 +25,31 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.match(workflow, /fly deploy --config fly\.toml --remote-only --strategy rolling/);
   assert.match(workflow, /FLY_API_TOKEN: \$\{\{ secrets\.FLY_API_TOKEN \}\}/);
   assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
+});
+
+test('remote bootstrap accepts topology and infrastructure credentials only', () => {
+  const bootstrap = resolveRemoteAuthorityBootstrap({
+    mode: 'remote',
+    serverUrl: 'https://feltdb.example',
+    serverToken: 'infrastructure-token',
+    authBoundryUrl: 'https://auth.example',
+  });
+
+  assert.deepEqual(bootstrap, {
+    authBoundryUrl: 'https://auth.example',
+    feltDbUrl: 'https://feltdb.example',
+    feltDbToken: 'infrastructure-token',
+  });
+});
+
+test('remote bootstrap fails closed when an authority endpoint is missing', () => {
+  assert.throws(
+    () => resolveRemoteAuthorityBootstrap({
+      mode: 'remote',
+      serverUrl: 'https://feltdb.example',
+    }),
+    /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
+  );
 });
 
 test('local runtime health exposes AppPort initialization and shutdown rejects admission', async () => {

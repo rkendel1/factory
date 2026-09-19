@@ -21,7 +21,8 @@ Create the application once if necessary:
 fly apps create factory-runner
 ```
 
-Set deployment-managed secrets (never commit these values):
+Set the deployment-managed remote authority configuration (never commit
+credential values):
 
 ```sh
 fly secrets set \
@@ -29,6 +30,12 @@ fly secrets set \
   FELTDB_TOKEN="..." \
   AUTHBOUNDRY_URL="https://auth.example"
 ```
+
+`FELTDB_URL` and `AUTHBOUNDRY_URL` are topology, not application credentials.
+`FELTDB_TOKEN` is an infrastructure bootstrap credential used only to establish
+the FeltDB connection. Application API keys, provider credentials, webhook
+secrets, and service configuration are owned by the in-process AppPort Services
+boundary and must not be added to Fly environment configuration.
 
 Deploy and verify:
 

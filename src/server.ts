@@ -8,6 +8,7 @@ import { assertContractIntegrity } from './contract.js';
 import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
+import { resolveRemoteAuthorityBootstrap } from './bootstrap.js';
 import type {
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -88,6 +89,9 @@ export class FactoryService {
   }
 
   static async create(config: FactoryServiceConfig): Promise<FactoryService> {
+    if (config.mode === 'remote') {
+      resolveRemoteAuthorityBootstrap(config);
+    }
     const db = await createFactoryDB(config);
     const service = new FactoryService(config, db);
     await service.recoverInterruptedRuns();
@@ -98,12 +102,7 @@ export class FactoryService {
     if (this.config.mode !== 'remote') {
       return;
     }
-    if (!this.config.authBoundryUrl && !process.env.AUTHBOUNDRY_URL) {
-      throw new Error('AuthBoundry URL is required in production');
-    }
-    if (!this.config.serverUrl && !process.env.FELTDB_URL) {
-      throw new Error('Remote FeltDB URL is required in production');
-    }
+    resolveRemoteAuthorityBootstrap(this.config);
     if (this.appPort.protocol !== 'appport' || !this.appPort.applicationFingerprint) {
       throw new Error('AppPort Services failed to initialize');
     }
@@ -128,7 +127,11 @@ export class FactoryService {
         applicationFingerprint: this.appPort.applicationFingerprint,
       },
       runtime,
-      authority: '.flow -> FeltDB',
+      authorities: {
+        authBoundry: this.config.mode === 'remote' ? 'configured' : 'development',
+        feltDb: this.config.mode === 'remote' ? 'initialized' : 'development',
+        appPort: 'initialized',
+      },
     };
   }
 
@@ -575,9 +578,6 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const production = process.env.NODE_ENV === 'production';
-  if (production && (!process.env.FELTDB_URL || !process.env.AUTHBOUNDRY_URL)) {
-    throw new Error('Production startup requires FELTDB_URL and AUTHBOUNDRY_URL');
-  }
   const port = Number(process.env.FACTORY_PORT ?? 3000);
   const { service, server } = await createHttpServer({
     mode: production ? 'remote' : (process.env.FACTORY_FELTDB_MODE as 'local' | 'remote' | undefined) ?? 'local',
