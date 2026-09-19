@@ -4,6 +4,32 @@ import { buildEvidence } from './evidence.js';
 import { createWorkspace, destroyWorkspace, materializeRepository, type WorkspaceHandle } from './workspace.js';
 import type { ExecutionContract, StructuredEvidence } from './types.js';
 
+async function checkPax(executable: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    let errorOutput = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`PAX executable "${executable}" did not respond to --version`));
+    }, 5000);
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { errorOutput += chunk.toString(); });
+    child.on('error', () => {
+      clearTimeout(timeout);
+      reject(new Error(`PAX is required for this execution but "${executable}" is unavailable`));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`PAX is required for this execution but "${executable} --version" failed: ${errorOutput.trim()}`));
+        return;
+      }
+      resolve((output || errorOutput).trim());
+    });
+  });
+}
+
 export interface ExecutionHandle {
   cancel: () => void;
 }
@@ -26,12 +52,12 @@ function createExecutionEnvironment(contract: ExecutionContract): Record<string,
 }
 
 function validateCommand(contract: ExecutionContract): void {
-  if (contract.command.length === 0) {
+  if (!contract.command || contract.command.length === 0) {
     throw new Error('Execution contract does not contain an authorized command');
   }
 
   const shellCommands = new Set(['sh', 'bash']);
-  if (shellCommands.has(contract.command[0])) {
+  if (shellCommands.has(contract.command[0] ?? '')) {
     throw new Error('Shell-based commands are not authorized by the runner boundary');
   }
 }
@@ -42,15 +68,21 @@ export async function executeContract(
     repositoryRoot?: string;
     workspaceRoot?: string;
     onHandle?: (handle: ExecutionHandle) => void;
+    paxExecutable?: string;
   } = {},
 ): Promise<ExecutionOutcome> {
-  validateCommand(contract);
+  if (contract.execution.mode === 'native') {
+    validateCommand(contract);
+  }
+  const paxVersion = contract.execution.mode === 'pax'
+    ? await checkPax(options.paxExecutable ?? process.env.PAX_BIN ?? 'pax')
+    : undefined;
   const workspace = await createWorkspace(contract.runId, options.workspaceRoot);
   let repositoryCommit: string | undefined;
 
   try {
     ({ commit: repositoryCommit } = await materializeRepository(contract.repository, workspace, options.repositoryRoot));
-    const result = await runBoundedCommand(contract, workspace, options.onHandle);
+    const result = await runBoundedCommand(contract, workspace, options.onHandle, options.paxExecutable, paxVersion);
     return { evidence: buildEvidence(contract, result, repositoryCommit), repositoryCommit };
   } finally {
     await destroyWorkspace(workspace);
@@ -61,6 +93,8 @@ async function runBoundedCommand(
   contract: ExecutionContract,
   workspace: WorkspaceHandle,
   onHandle?: (handle: ExecutionHandle) => void,
+  paxExecutable = process.env.PAX_BIN ?? 'pax',
+  paxVersion?: string,
 ): Promise<{
   status: 'completed' | 'failed' | 'cancelled';
   exitCode: number | null;
@@ -69,9 +103,17 @@ async function runBoundedCommand(
   durationMs: number;
   stdout: string;
   stderr: string;
+  paxVersion?: string;
 }> {
   return new Promise((resolve, reject) => {
-    const [command, ...args] = contract.command;
+    const command = contract.execution.mode === 'pax' ? paxExecutable : contract.command?.[0];
+    const args = contract.execution.mode === 'pax'
+      ? ['--json', contract.execution.operation ?? 'run', contract.execution.target ?? '', ...contract.execution.args]
+      : contract.command?.slice(1) ?? [];
+    if (!command || (contract.execution.mode === 'pax' && !contract.execution.target)) {
+      reject(new Error('Execution contract does not contain a complete authorized execution'));
+      return;
+    }
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
     let stdout = '';
@@ -146,7 +188,11 @@ async function runBoundedCommand(
         return;
       }
 
-      resolve({ ...base, status: code === 0 ? 'completed' : 'failed' });
+      resolve({
+        ...base,
+        status: code === 0 ? 'completed' : 'failed',
+        ...(paxVersion ? { paxVersion } : {}),
+      });
     });
   });
 }

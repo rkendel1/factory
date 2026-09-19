@@ -58,7 +58,13 @@ export interface ExecutionContract {
   repository: RepositoryRef;
   operation: string;
   capabilities: string[];
-  command: string[];
+  execution: {
+    mode: 'pax' | 'native';
+    operation?: string;
+    target?: string;
+    args: string[];
+  };
+  command?: string[];
   limits: {
     timeoutMs: number;
   };
@@ -150,6 +156,13 @@ export interface StructuredEvidence {
   };
   stdout: string;
   stderr: string;
+  pax?: {
+    version: string;
+    operation: string;
+    target?: string;
+    args: string[];
+    invocation: string[];
+  };
   artifacts: string[];
   deterministicResult: DeterministicResult;
   finalResult: DeterministicResult;
@@ -172,4 +185,5 @@ export interface FactoryDBConfig {
 export interface FactoryServiceConfig extends FactoryDBConfig {
   repositoryRoot?: string;
   workspaceRoot?: string;
+  paxExecutable?: string;
 }

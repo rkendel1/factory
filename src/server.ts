@@ -227,7 +227,10 @@ export class FactoryService {
       startedAt,
     });
     const activeRunId = run.id;
-    await this.appendEvent(activeRunId, 'executing', authorization.contract.command.join(' '));
+    const executionDetail = authorization.contract.execution.mode === 'pax'
+      ? ['pax', '--json', authorization.contract.execution.operation, authorization.contract.execution.target, ...authorization.contract.execution.args].join(' ')
+      : authorization.contract.command?.join(' ') ?? 'native execution';
+    await this.appendEvent(activeRunId, 'executing', executionDetail);
 
     try {
       const outcome = await executeContract(authorization.contract, {
@@ -236,6 +239,7 @@ export class FactoryService {
         onHandle: (handle) => {
           this.activeExecutions.set(activeRunId, handle);
         },
+        paxExecutable: this.config.paxExecutable,
       });
 
       this.activeExecutions.delete(activeRunId);
