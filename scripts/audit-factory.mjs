@@ -42,7 +42,10 @@ const baselineCommit = process.env.BASELINE_COMMIT ?? headCommit;
 if (process.env.BASELINE_COMMIT && baselineCommit !== headCommit) {
   throw new Error(`BASELINE_COMMIT ${baselineCommit} does not match audited HEAD ${headCommit}`);
 }
-const dirtyFiles = git('status', '--porcelain', '--untracked-files=all');
+const dirtyFiles = git('status', '--porcelain', '--untracked-files=all')
+  .split(/\r?\n/)
+  .filter((line) => line && !line.slice(3).trim().endsWith('docs/factory-composition-audit-pre-jev.json'))
+  .join('\n');
 if (dirtyFiles) throw new Error(`Audited tree is not clean:\n${dirtyFiles}`);
 
 const sourceText = productionFiles.map(read).join('\n');

@@ -1,15 +1,38 @@
 {
   "baseline": {
-    "factoryCommit": "7848c83519fb36029cf18b945c18581bacedaa46",
+    "commit": "5384fa99709d79042a0a1b1eef2be3382bfdac67",
+    "tree": "1b05a9cabb649991ae65509c2c43a1fa3e26f7be",
+    "clean": true,
     "jevIntegrated": false,
+    "jevChecks": {
+      "dependency": false,
+      "imports": false,
+      "source": false,
+      "executionPath": false
+    },
     "flowPath": ".flow",
     "flowSha256": "64b90abf77644fb796340d7d711d9e596cb6c56599677c85f4815d27bf604903",
     "dependencies": {
-      "@feltdb/core": "0.11.4",
-      "@authboundry/core": "1.15.1",
-      "@appport/sdk": "1.1.18",
-      "@appport/services": "0.4.0",
-      "@appport/appboundry": "1.0.10"
+      "@feltdb/core": {
+        "version": "0.11.4",
+        "integrity": "sha512-g0T/m66jdYYouarLdR8gxXYrbYP9pKoPtibNrpL3sUGdtyRKZ6CAoIIyHBBy8PQb5jxpXHYj0DJ4FrBcudt6zQ=="
+      },
+      "@authboundry/core": {
+        "version": "1.15.1",
+        "integrity": "sha512-O+sIQmWIpGNASiOt0sEQjQejlVKnBoUW/RLF/8JA6paj0EK14jGMCzIZqJai36pzSCww9NBnthuSCw6khTLkTw=="
+      },
+      "@appport/sdk": {
+        "version": "1.1.18",
+        "integrity": "sha512-U/izTgdwfp3lNW9dUFjLgaQGUG+ZzSnvr7R9oxNpu9YNOY0q2/UvSdB57kxDzY42+Msa+H3mv/xZFhOwJIGkvQ=="
+      },
+      "@appport/services": {
+        "version": "0.4.0",
+        "integrity": "sha512-szz8TBd8IUE7mKcL83sPLIRzzLPeISjGcN7KhTstAIroL4jsf5eMkA7dX9v61lOSAL/N93hwPMrPkvcK1YDLjQ=="
+      },
+      "@appport/appboundry": {
+        "version": "1.0.10",
+        "integrity": "sha512-Bx9mmb/ZBdZzo1855ayEMksH2wuqIXJP3OYU1QwlVTsQOG8Mlt9sTFU/MzHxlTH1LmjceCaDrTLMLkcEIsxhOQ=="
+      }
     }
   },
   "methodology": {
@@ -21,11 +44,21 @@
       "lockfiles",
       "vendored code"
     ],
-    "integrationLoc": "Deduplicated union of source files whose primary purpose is crossing a named architectural boundary."
+    "integrationLoc": "A line belongs to integration LOC when its primary purpose is translating, adapting, invoking, persisting across, or enforcing a boundary between Factory and another architectural component. Shared orchestration that merely calls a boundary is not integration unless it performs boundary-specific work.",
+    "authorityTsRule": "authority.ts integration LOC includes only the portion that resolves .flow capability authority and derives the external execution/application contract; generic authorization orchestration is excluded.",
+    "classification": {
+      "loc": "mechanical",
+      "dependencyGraph": "mechanical_plus_review",
+      "conceptClassification": "manual_review",
+      "authorityAudit": "manual_review",
+      "friction": "manual_review"
+    }
   },
   "loc": {
     "production": 1703,
     "tests": 742,
+    "integration": 722,
+    "integrationFiles": 6,
     "productionFiles": {
       "src/application-contract.ts": 96,
       "src/appport.ts": 106,
@@ -62,6 +95,7 @@
     }
   },
   "integration": {
+    "total": 722,
     "glueLoc": 722,
     "glueRatio": 0.42395772166764534,
     "files": {
@@ -72,6 +106,11 @@
       "src/execution.ts": 183,
       "src/felt.ts": 65
     },
+    "direct": 3,
+    "thinAdapters": 2,
+    "projections": 2,
+    "serialization": 1,
+    "semanticTranslations": 0,
     "classifications": {
       "direct": 3,
       "thinAdapters": 2,
@@ -82,6 +121,72 @@
       "authorityDuplications": 0
     }
   },
+  "compositionInventory": [
+    {
+      "boundary": "Factory → FeltDB",
+      "classification": "direct",
+      "loc": 65,
+      "translation": false,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AuthBoundry",
+      "classification": "thinAdapter",
+      "loc": 64,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → .flow",
+      "classification": "projection",
+      "loc": 304,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AppPort",
+      "classification": "thinAdapter",
+      "loc": 106,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AppPort Services",
+      "classification": "direct",
+      "loc": 106,
+      "translation": false,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → AppBoundry",
+      "classification": "projection",
+      "loc": 96,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → PAX",
+      "classification": "serialization",
+      "loc": 183,
+      "translation": true,
+      "duplicateAuthority": false,
+      "shadowState": false
+    },
+    {
+      "boundary": "Factory → Studio",
+      "classification": "direct",
+      "loc": 0,
+      "translation": false,
+      "duplicateAuthority": false,
+      "shadowState": false
+    }
+  ],
   "boundaries": {
     "authorityViolations": 0,
     "persistenceViolations": 0,
