@@ -22,7 +22,7 @@ export async function createRepository(root: string, files: Record<string, strin
 
 export async function createService(config: Partial<FactoryServiceConfig> = {}): Promise<FactoryService> {
   const workingDirectory = config.workingDirectory ?? await createTempWorkspace('factory-db');
-  const flowPath = config.flowPath ?? path.resolve('/home/runner/work/factory/factory/.flow');
+  const flowPath = config.flowPath ?? path.resolve(process.cwd(), '.flow');
   return FactoryService.create({
     mode: 'local',
     namespace: config.namespace ?? path.basename(workingDirectory),

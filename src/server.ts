@@ -79,14 +79,22 @@ export class FactoryService {
   }
 
   async cancelRun(runId: string): Promise<RunRecord | null> {
-    const active = this.activeExecutions.get(runId);
-    if (active) {
-      active.cancel();
-    }
+    return this.cancelRunAs(runId);
+  }
 
+  async cancelRunAs(runId: string, principal?: string): Promise<RunRecord | null> {
     const run = await this.getRun(runId);
     if (!run) {
       return null;
+    }
+
+    if (principal && run.principal !== principal) {
+      throw new Error(`principal ${principal} is not authorized to cancel run ${runId}`);
+    }
+
+    const active = this.activeExecutions.get(runId);
+    if (active) {
+      active.cancel();
     }
 
     if (isTerminal(run.status)) {
@@ -157,6 +165,9 @@ export class FactoryService {
       };
       await runs.put(run, run.id);
       await this.appendEvent(run.id, 'accepted', 'Durably admitted run request');
+      if (!admission.admitted) {
+        return run;
+      }
     } else if (!admission.admitted || isTerminal(run.status)) {
       return run;
     }
@@ -364,14 +375,30 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 
       const cancelMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/cancel$/);
       if (request.method === 'POST' && cancelMatch) {
+        const principal = parsePrincipal(request);
+        if (!principal) {
+          writeJson(response, 401, { error: 'Missing authenticated principal' });
+          return;
+        }
+        const existing = await service.getRun(cancelMatch[1]);
+        if (!existing) {
+          writeJson(response, 404, { error: 'Run not found' });
+          return;
+        }
+        if (existing.principal !== principal) {
+          writeJson(response, 403, { error: 'Forbidden' });
+          return;
+        }
         const run = await service.cancelRun(cancelMatch[1]);
-        writeJson(response, run ? 202 : 404, run ?? { error: 'Run not found' });
+        writeJson(response, 202, run);
         return;
       }
 
       writeJson(response, 404, { error: 'Not found' });
     } catch (error) {
-      writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Software Factory Runner error: ${message}\n`);
+      writeJson(response, 500, { error: 'Internal server error' });
     }
   });
 

@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   software-factory-runner:
     runs-on: ubuntu-latest
