@@ -155,6 +155,19 @@ app software_factory {
     index runId using hash(runId)
   }
 
+  capability FactoryApplicationAccess {
+    visibility internal
+    application factory
+    grant factory.ui.read
+    grant configuration.read
+    grant configuration.write
+    grant configuration.delete
+    grant secret.rotate
+    grant apikeys.read
+    grant apikeys.create
+    grant apikeys.revoke
+  }
+
   capability ArchitectureConformanceExecution {
     visibility internal
     operation architecture-conformance

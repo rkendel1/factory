@@ -29,6 +29,10 @@ export interface CanonicalApplicationContract {
     version: string;
   };
   fingerprint: string;
+  authorization: {
+    applicationId: string;
+    capabilities: string[];
+  };
   capabilities: FlowCapabilityContract[];
   appPort: AuthoredApplication;
   appBoundry: AppBoundryContract;
@@ -66,6 +70,15 @@ function appPortCapabilityName(operation: string): string {
 }
 
 export function createCanonicalApplicationContract(flowSpec: FlowSpec): CanonicalApplicationContract {
+  const authorizationBlock = flowSpec.capabilities.find((block) =>
+    statementValue(block, 'application ') === 'factory');
+  if (!authorizationBlock) {
+    throw new Error('Factory .flow must declare its application authorization capabilities');
+  }
+  const authorization = {
+    applicationId: 'factory',
+    capabilities: statementValues(authorizationBlock, 'grant '),
+  };
   const capabilities = flowSpec.capabilities.flatMap((block): FlowCapabilityContract[] => {
       const operation = statementValue(block, 'operation ');
       if (!operation) return [];
@@ -119,5 +132,5 @@ export function createCanonicalApplicationContract(flowSpec: FlowSpec): Canonica
     provides: manifest.provides,
     requires: manifest.requires,
   };
-  return { identity, fingerprint, capabilities, appPort, appBoundry };
+  return { identity, fingerprint, authorization, capabilities, appPort, appBoundry };
 }

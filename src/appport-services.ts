@@ -11,7 +11,11 @@ import {
 } from '@appport/services';
 import { UI_PROTOCOL_ID, validateUiContribution, type UiContribution } from '@appport/protocol';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Authenticator } from './auth.js';
+import {
+  AuthBoundryAuthenticationError,
+  AuthBoundryAuthorizationError,
+  type Authenticator,
+} from './auth.js';
 import type { UiContributor } from './ui.js';
 
 export const appPortServicesUiContribution: UiContribution = validateUiContribution({
@@ -98,8 +102,15 @@ export function createFactoryAppPortServices(options: {
         if (typeof request.query.environment !== 'string') request.query.environment = options.environment;
       }
       next();
-    } catch {
-      response.status(401).json({ error: 'AuthBoundry authentication or authorization failed' });
+    } catch (error) {
+      if (error instanceof AuthBoundryAuthorizationError) {
+        response.status(403).json({ error: error.message, code: 'FORBIDDEN' });
+        return;
+      }
+      const message = error instanceof AuthBoundryAuthenticationError
+        ? error.message
+        : 'AuthBoundry authentication failed';
+      response.status(401).json({ error: message, code: 'UNAUTHENTICATED' });
     }
   }) as RequestHandler);
   application.use(createManagementRouter({

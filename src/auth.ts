@@ -27,6 +27,24 @@ export interface Authenticator {
   authenticate(request: IncomingMessage, operation: string): Promise<AuthenticatedContext>;
 }
 
+export class AuthBoundryAuthenticationError extends Error {
+  readonly status = 401;
+
+  constructor(message = 'AuthBoundry authentication is required') {
+    super(message);
+    this.name = 'AuthBoundryAuthenticationError';
+  }
+}
+
+export class AuthBoundryAuthorizationError extends Error {
+  readonly status = 403;
+
+  constructor(readonly capability: string) {
+    super(`AuthBoundry denied operation ${capability}`);
+    this.name = 'AuthBoundryAuthorizationError';
+  }
+}
+
 function requestHeaders(request: IncomingMessage): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const name of ['authorization', 'cookie']) {
@@ -40,7 +58,7 @@ function requestHeaders(request: IncomingMessage): Record<string, string> {
 
 function contextFromAuth(auth: AuthProjection): AuthenticatedContext {
   if (!auth.authenticated || !auth.principal?.id || !auth.tenant?.id) {
-    throw new Error('AuthBoundry authentication is required');
+    throw new AuthBoundryAuthenticationError();
   }
 
   return {
@@ -97,7 +115,7 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
       };
     }
     if (typeof request.headers.authorization !== 'string') {
-      throw new Error('AuthBoundry authentication is required');
+      throw new AuthBoundryAuthenticationError();
     }
     const client = clientFor(request);
     return { client, context: contextFromAuth(await client.session()) };
@@ -110,7 +128,7 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
     async authenticate(request: IncomingMessage, operation: string): Promise<AuthenticatedContext> {
       const { client, context } = await resolve(request);
       if (!(await client.authorize(operation))) {
-        throw new Error(`AuthBoundry denied operation ${operation}`);
+        throw new AuthBoundryAuthorizationError(operation);
       }
       return context;
     },

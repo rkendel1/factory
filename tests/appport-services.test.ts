@@ -4,7 +4,11 @@ import { createServices, type AppPortServices } from '@appport/services';
 import type { StateFirstDB } from '@feltdb/core';
 import { createHttpServer } from '../src/server.js';
 import { createTempWorkspace } from './helpers.js';
-import type { Authenticator } from '../src/auth.js';
+import {
+  AuthBoundryAuthenticationError,
+  AuthBoundryAuthorizationError,
+  type Authenticator,
+} from '../src/auth.js';
 
 const secret = 'secret-value-that-must-not-be-returned';
 
@@ -34,7 +38,7 @@ function authorized(seen: string[], allowed = [
   return {
     async authenticate(_request, operation) {
       seen.push(operation);
-      if (!allowed.includes(operation)) throw new Error(`denied ${operation}`);
+      if (!allowed.includes(operation)) throw new AuthBoundryAuthorizationError(operation);
       return {
         principal: 'operator-1', tenant: 'tenant-a', claims: {}, session: { id: 'session-1' }, delegation: null,
         boundaryVerified: true, authorizedCapabilities: allowed,
@@ -173,17 +177,40 @@ test('read-visible configuration UI cannot bypass write authorization', async ()
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'DENIED_VALUE', value: secret }),
     });
-    assert.equal(mutation.status, 401);
+    assert.equal(mutation.status, 403);
     assert.doesNotMatch(await mutation.text(), new RegExp(secret));
   });
 });
 
-test('AppPort Services fails closed when AuthBoundry denies access', async () => {
-  const denied: Authenticator = { async authenticate() { throw new Error('denied'); } };
+test('AppPort Services returns 403 when an authenticated principal is denied', async () => {
+  const denied: Authenticator = {
+    async authenticate(_request, capability) {
+      throw new AuthBoundryAuthorizationError(capability);
+    },
+  };
   await withServicesServer(denied, async (origin) => {
     const response = await fetch(`${origin}/v1/configuration`);
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), {
+      error: 'AuthBoundry denied operation configuration.read',
+      code: 'FORBIDDEN',
+    });
+  });
+});
+
+test('AppPort Services returns 401 when no AuthBoundry session exists', async () => {
+  const unauthenticated: Authenticator = {
+    async authenticate() {
+      throw new AuthBoundryAuthenticationError();
+    },
+  };
+  await withServicesServer(unauthenticated, async (origin) => {
+    const response = await fetch(`${origin}/v1/configuration`);
     assert.equal(response.status, 401);
-    assert.deepEqual(await response.json(), { error: 'AuthBoundry authentication or authorization failed' });
+    assert.deepEqual(await response.json(), {
+      error: 'AuthBoundry authentication is required',
+      code: 'UNAUTHENTICATED',
+    });
   });
 });
 

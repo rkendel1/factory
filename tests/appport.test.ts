@@ -9,6 +9,19 @@ test('AppPort SDK is the canonical Factory protocol contract', () => {
   const factoryAppPortApplication = createFactoryAppPortApplication();
   const contract = createCanonicalApplicationContract(loadFactoryFlow());
   const manifest = factoryAppPortApplication.manifest();
+  assert.deepEqual(contract.authorization, {
+    applicationId: 'factory',
+    capabilities: [
+      'factory.ui.read',
+      'configuration.read',
+      'configuration.write',
+      'configuration.delete',
+      'secret.rotate',
+      'apikeys.read',
+      'apikeys.create',
+      'apikeys.revoke',
+    ],
+  });
   assert.equal(manifest.application.id, 'software_factory');
   assert.deepEqual(manifest.provides.map((capability) => capability.name), [
     'softwarefactory.architectureconformance',
