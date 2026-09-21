@@ -98,20 +98,27 @@ and [appport-services-api-key-administration-defect.md](appport-services-api-key
 Application capability policy and relying-application registration remain
 deployment-owned AuthBoundry state.
 
-The Factory consumer now uses `@authboundry/core@1.15.2`'s supported server
-adapter. After AuthBoundry registered relying application `factory`, Factory
-image `deployment-01M32K3FGNVTR42XEBVP086R9K` was deployed with server-only
+The Factory consumer now uses `@authboundry/core@1.15.3`'s supported server
+adapter. After AuthBoundry registered relying application `factory`, the
+initial adapter image `deployment-01M32K3FGNVTR42XEBVP086R9K` was deployed with server-only
 `AUTHBOUNDRY_BROWSER_COOKIE_SECRET` sealing material. Production verification
 confirmed that login redirects through the registered AuthBoundry application
 to GitHub, the pending transaction cookie is `HttpOnly; Secure; SameSite=Lax`,
 unsafe returns and callbacks without a browser transaction return 400, and
 unauthenticated `/_appport/api/keys` returns 401. The Fly health check passes.
 
-The deployed container resolves `@authboundry/core@1.15.2`,
+The deployed container resolves `@authboundry/core@1.15.3`,
 `@appport/services@0.4.3`, and `@feltdb/core@0.11.5`. Interactive GitHub consent,
 callback completion, authenticated management mutations, logout, and restart
 persistence still require a human browser session and are not claimed by this
 non-interactive smoke test.
+
+The `1.15.3` consumer image `deployment-01M32NN7NY245ACMB4XFDYH696` exposes
+`/api/auth/login/github` as Factory's login entry and `/api/auth/callback` only
+as the AuthBoundry application-handoff callback. Production checks confirm the
+former `/auth/login` route and AuthBoundry-owned
+`/_authboundry/browser/callback/github` provider callback both return 404 from
+Factory; `/` redirects through the new login entry and `/health` remains 200.
 
 ## Verification commands
 
