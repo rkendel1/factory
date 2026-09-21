@@ -63,10 +63,13 @@ metadata. It does not authenticate or execute a workload.
 ## Browser entrypoint
 
 Factory is registered as the `factory` AuthBoundry browser relying application.
-Its package-owned adapter uses callback `/api/auth/callback`, initiates the
-GitHub provider flow, validates the browser-bound handoff, reads the opaque
-AuthBoundry session, and revokes it during `/auth/logout`. Return destinations
-are restricted to the adapter registration's fixed local allowlist.
+`GET /api/auth/login/github` asks the package-owned adapter to begin a
+Factory-bound authentication transaction. Factory redirects to the returned
+challenge without constructing or interpreting GitHub's provider callback.
+Its only callback is the AuthBoundry handoff at `/api/auth/callback`; the
+adapter validates that browser-bound handoff, reads the opaque AuthBoundry
+session, and revokes it during `/auth/logout`. Return destinations are
+restricted to the adapter registration's fixed local allowlist.
 
 The adapter requires `AUTHBOUNDRY_BROWSER_COOKIE_SECRET` as server-only sealing
 material (at least 32 bytes). It is not an authentication authority, user
@@ -76,6 +79,8 @@ session and authorization decision. Store it only as a Fly secret. The
 
 Factory does not proxy provider routes, exchange OAuth codes, construct
 AuthBoundry credentials, resolve principals, or maintain a local session store.
+The GitHub callback is owned and configured exclusively by AuthBoundry; it is
+not a Factory route or a callback registered for Factory.
 The embedded AppPort Services router receives the AuthBoundry principal and
 delegates API-key authorization back to AuthBoundry; it requires no AppPort API
 key bootstrap. `.flow` remains the separate Factory execution authority.

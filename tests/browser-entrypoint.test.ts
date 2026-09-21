@@ -39,11 +39,11 @@ test('public root enters AuthBoundry without weakening protected routes or retur
         redirect: 'manual', headers: { authorization: 'Bearer fabricated' },
       });
       assert.equal(response.status, 302);
-      assert.equal(response.headers.get('location'), '/auth/login?return_to=%2F');
+      assert.equal(response.headers.get('location'), '/api/auth/login/github?return_to=%2F');
     }
     const head = await fetch(`${origin}/`, { method: 'HEAD', redirect: 'manual' });
     assert.equal(head.status, 302);
-    assert.equal(head.headers.get('location'), '/auth/login?return_to=%2F');
+    assert.equal(head.headers.get('location'), '/api/auth/login/github?return_to=%2F');
     assert.equal((await fetch(`${origin}/v1/ui`)).status, 401);
     assert.equal((await fetch(`${origin}/configuration`)).status, 401);
     const health = await fetch(`${origin}/health`);
@@ -140,7 +140,7 @@ test('Factory uses the AuthBoundry relying-application adapter for login, sessio
   });
   const origin = await listen(server);
   try {
-    const login = await fetch(`${origin}/auth/login?return_to=%2Fconfiguration`, { redirect: 'manual' });
+    const login = await fetch(`${origin}/api/auth/login/github?return_to=%2Fconfiguration`, { redirect: 'manual' });
     assert.equal(login.status, 302);
     assert.match(login.headers.get('location') ?? '', /^https:\/\/github\.com\/login\/oauth\/authorize/);
     const transactionCookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
@@ -168,9 +168,10 @@ test('Factory uses the AuthBoundry relying-application adapter for login, sessio
     assert.match(logout.headers.getSetCookie().join(' '), /authboundry_factory_session=;.*Max-Age=0/);
 
     const stale = await fetch(`${origin}/`, { redirect: 'manual', headers: { cookie: sessionCookie } });
-    assert.equal(stale.headers.get('location'), '/auth/login?return_to=%2F');
+    assert.equal(stale.headers.get('location'), '/api/auth/login/github?return_to=%2F');
     assert.equal((await fetch(`${origin}/api/auth/callback?handoff=${'b'.repeat(64)}`)).status, 400);
-    assert.equal((await fetch(`${origin}/auth/login?return_to=https://attacker.example`)).status, 400);
+    assert.equal((await fetch(`${origin}/api/auth/login/github?return_to=https://attacker.example`)).status, 400);
+    assert.equal((await fetch(`${origin}/auth/login?return_to=%2F`)).status, 404);
     assert.equal((await fetch(`${origin}/_authboundry/callback/github?state=fabricated`)).status, 404);
   } finally {
     await close(server);

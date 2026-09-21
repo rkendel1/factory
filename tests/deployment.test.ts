@@ -41,7 +41,7 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
   assert.equal(packageJson.dependencies['@appport/services'], '^0.4.3');
   assert.equal(packageJson.overrides['@appport/services'], '$@appport/services');
-  assert.equal(packageJson.dependencies['@authboundry/core'], '^1.15.2');
+  assert.equal(packageJson.dependencies['@authboundry/core'], '^1.15.3');
   assert.equal(packageJson.overrides['@authboundry/core'], '$@authboundry/core');
 });
 

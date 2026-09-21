@@ -604,13 +604,13 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           }
           response.writeHead(302, { location: '/configuration' });
         } catch {
-          response.writeHead(302, { location: '/auth/login?return_to=%2F' });
+          response.writeHead(302, { location: '/api/auth/login/github?return_to=%2F' });
         }
         response.end();
         return;
       }
 
-      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/auth/login') {
+      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/api/auth/login/github') {
         const adapter = createFactoryBrowserAdapter(config);
         writeBrowserRedirect(response, await adapter.beginLogin({
           application: FACTORY_BROWSER_APPLICATION_ID,
