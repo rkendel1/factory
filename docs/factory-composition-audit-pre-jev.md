@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Working-tree preview based on HEAD `c29bca8deacf41f4b7bc0223fb6b16ae0c946968`. Rerun after committing to record the clean baseline commit and tree.
+Clean commit `90feb63ea9234005be829bca6cb7cdb3f66502c3`, tree `0c183db5746688fd8c6dcb4e18e5b59ee6293625`.
 
 - JEV integrated: **NO**
 - JEV authority: **NO**
@@ -14,9 +14,9 @@ Working-tree preview based on HEAD `c29bca8deacf41f4b7bc0223fb6b16ae0c946968`. R
 
 | Measure | LOC |
 | --- | ---: |
-| Factory application source | 2202 |
-| Factory integration/adapter subset | 969 |
-| Factory tests | 1285 |
+| Factory application source | 2206 |
+| Factory integration/adapter subset | 973 |
+| Factory tests | 1296 |
 | `.flow` | 239 |
 | Packaged GitHub integration runtime (separate) | 694 |
 | GitHub integration source checkout (separate) | 1221 |
