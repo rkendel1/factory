@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Working-tree preview based on HEAD `afb729801fd4c681429202b30b7a2238e5a9f796`. Rerun after committing to record the clean baseline commit and tree.
+Clean commit `f244071640b48f923eeb14f15d4b9b5a0108da19`, tree `f7d824f207ccc8831ed34a76a64d69eaab6003a8`.
 
 - JEV integrated: **NO**
 - JEV authority: **NO**
