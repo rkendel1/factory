@@ -51,7 +51,7 @@ test('Factory consumes packaged configuration and secrets with AuthBoundry conte
   const seen: string[] = [];
   const services = createServices({ memory: true, namespace: 'configuration-consumption' });
   await withServicesServer(authorized(seen), async (origin) => {
-    const query = '?application=software_factory&environment=production';
+    const query = '?application=caller_override&environment=production';
     const variable = await fetch(`${origin}/v1/configuration/variables${query}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'PUBLIC_ORIGIN', value: 'https://factory.example', required: true }),
@@ -60,7 +60,7 @@ test('Factory consumes packaged configuration and secrets with AuthBoundry conte
     const variableView = await variable.json() as { tenantId: string; applicationId: string; environment: string };
     assert.deepEqual(
       { tenantId: variableView.tenantId, applicationId: variableView.applicationId, environment: variableView.environment },
-      { tenantId: 'tenant-a', applicationId: 'software_factory', environment: 'production' },
+      { tenantId: 'tenant-a', applicationId: 'software_factory', environment: 'development' },
     );
 
     const updatedVariable = await fetch(`${origin}/v1/configuration/variables/PUBLIC_ORIGIN${query}`, {

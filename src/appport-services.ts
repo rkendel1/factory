@@ -98,8 +98,8 @@ export function createFactoryAppPortServices(options: {
         credentialId: typeof context.session?.id === 'string' ? context.session.id : 'authboundry',
       } satisfies AuthenticatedPrincipal;
       if (request.path.startsWith('/v1/configuration')) {
-        if (typeof request.query.application !== 'string') request.query.application = options.applicationId;
-        if (typeof request.query.environment !== 'string') request.query.environment = options.environment;
+        request.query.application = options.applicationId;
+        request.query.environment = options.environment;
       }
       next();
     } catch (error) {

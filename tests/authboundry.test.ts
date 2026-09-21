@@ -2,13 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHttpServer } from '../src/server.js';
 import { createService, seedWork } from './helpers.js';
-import type { Authenticator } from '../src/auth.js';
+import {
+  AuthBoundryAuthenticationError,
+  AuthBoundryAuthorizationError,
+  type Authenticator,
+} from '../src/auth.js';
 
 function authenticator(principal: string, tenant: string, allowed = true): Authenticator {
   return {
     async authenticate() {
       if (!allowed) {
-        throw new Error('denied');
+        throw new AuthBoundryAuthorizationError('factory.run');
       }
       return {
         principal,
@@ -62,7 +66,25 @@ test('HTTP execution fails closed when AuthBoundry denies authorization', async 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json() as { code: string }).code, 'FORBIDDEN');
+  });
+});
+
+test('HTTP execution returns 401 when no AuthBoundry session exists', async () => {
+  const auth: Authenticator = {
+    async authenticate() {
+      throw new AuthBoundryAuthenticationError();
+    },
+  };
+  await withServer(auth, async (url) => {
+    const response = await fetch(`${url}/v1/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
     assert.equal(response.status, 401);
+    assert.equal((await response.json() as { code: string }).code, 'UNAUTHENTICATED');
   });
 });
 

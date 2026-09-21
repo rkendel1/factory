@@ -10,6 +10,8 @@ import {
   createAuthBoundryAuthenticator,
   FACTORY_BROWSER_APPLICATION_ID,
   FACTORY_BROWSER_CALLBACK_PATH,
+  AuthBoundryAuthenticationError,
+  AuthBoundryAuthorizationError,
   type AuthenticatedContext,
 } from './auth.js';
 import { BrowserAdapterError, type BrowserRedirectResult } from '@authboundry/core/server';
@@ -90,6 +92,17 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.statusCode = statusCode;
   response.setHeader('content-type', 'application/json');
   response.end(JSON.stringify(body, null, 2));
+}
+
+function writeAuthError(response: ServerResponse, error: unknown): void {
+  if (error instanceof AuthBoundryAuthorizationError) {
+    writeJson(response, 403, { error: error.message, code: 'FORBIDDEN' });
+    return;
+  }
+  const message = error instanceof AuthBoundryAuthenticationError
+    ? error.message
+    : 'AuthBoundry authentication failed';
+  writeJson(response, 401, { error: message, code: 'UNAUTHENTICATED' });
 }
 
 function writeBrowserRedirect(response: ServerResponse, result: BrowserRedirectResult): void {
@@ -651,8 +664,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         let context;
         try {
           context = await getAuthenticator().authenticate(request, 'factory.ui.read');
-        } catch {
-          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+        } catch (error) {
+          writeAuthError(response, error);
           return;
         }
         writeJson(response, 200, service.discoverUi(context));
@@ -675,8 +688,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
             await getAuthenticator().authenticate(request, capability);
           }
           context.authorizedCapabilities = githubCapabilities;
-        } catch {
-          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+        } catch (error) {
+          writeAuthError(response, error);
           return;
         }
         const run = await service.startRun(payload, context);
@@ -689,8 +702,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         let context;
         try {
           context = await getAuthenticator().authenticate(request, 'factory.run.read');
-        } catch {
-          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+        } catch (error) {
+          writeAuthError(response, error);
           return;
         }
         const run = await service.getRun(runMatch[1], context);
@@ -703,8 +716,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         let context;
         try {
           context = await getAuthenticator().authenticate(request, 'factory.run.evidence');
-        } catch {
-          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+        } catch (error) {
+          writeAuthError(response, error);
           return;
         }
         const evidence = await service.getEvidence(evidenceMatch[1], context);
@@ -717,8 +730,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         let context;
         try {
           context = await getAuthenticator().authenticate(request, 'factory.run.cancel');
-        } catch {
-          writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
+        } catch (error) {
+          writeAuthError(response, error);
           return;
         }
         const existing = await service.getRun(cancelMatch[1], context);

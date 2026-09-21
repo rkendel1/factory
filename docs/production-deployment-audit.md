@@ -120,6 +120,34 @@ former `/auth/login` route and AuthBoundry-owned
 `/_authboundry/browser/callback/github` provider callback both return 404 from
 Factory; `/` redirects through the new login entry and `/health` remains 200.
 
+## Factory application delegation verification
+
+The 2026-09-21 authenticated-management follow-up did not confirm the claimed
+durable AuthBoundry provisioning. AuthBoundry logged
+`factory_application_delegation=true` during genesis at 19:32:02 UTC. After a
+controlled restart, the same persistent store contained `delegations: []`, the
+GitHub human principal remained `role=member`, and the only policy remained the
+authority-administration policy. Authenticated Factory management therefore
+remains blocked by the upstream durability defect documented in
+[authboundry-factory-delegation-durability-defect.md](authboundry-factory-delegation-durability-defect.md).
+
+Factory retains no authorization fallback. Its local verification covers the
+eight declared application capabilities, 401 for missing authentication, 403
+for an AuthBoundry denial, tenant isolation, host-owned application/environment
+context, configuration and secret lifecycle, API-key one-time secret behavior,
+and AppBoundry execution evidence. Live authenticated 200 responses and
+post-restart management persistence cannot be claimed until AuthBoundry retains
+the delegation and a normal browser logout/login refreshes the session.
+
+The OAuth callback ownership and URLs were not changed. OAuth transaction
+durability remains explicitly recorded as `DRIFT`.
+
+Factory image `deployment-01M32QW90XN8TNEK95B2EABYH1` (machine version 17)
+deployed the verified semantics and passed its Fly health check. Production
+`GET /v1/ui`, `GET /v1/configuration`, and `GET /_appport/api/keys` each return
+structured `401 UNAUTHENTICATED` without a session. Authenticated 200/403
+verification remains gated on the durable AuthBoundry delegation above.
+
 ## Verification commands
 
 Local and artifact verification:
