@@ -78,15 +78,60 @@ function requestId(request: Request): string {
     : `cfg_${randomUUID()}`;
 }
 
-function configurationError(error: unknown, request: Request): {
+/**
+ * Statuses the in-process management and configuration layers produce about the
+ * request itself. Any other status came from the durable authority: an
+ * authority that answers 404 for an unregistered application is not telling the
+ * caller that their configuration resource is missing, so its status is never
+ * mirrored back to the browser.
+ */
+const REQUEST_SCOPED_STATUSES = new Set([400, 401, 403]);
+
+function reportedStatus(error: unknown): number | undefined {
+  return typeof error === 'object' && error !== null && 'status' in error
+    && typeof error.status === 'number' && error.status >= 400 && error.status < 600
+    ? error.status
+    : undefined;
+}
+
+/**
+ * Classify an error as a failure of the FeltDB authority behind AppPort
+ * Services rather than a rejection of the caller's request.
+ *
+ * Only the authority's status, code, and correlation id are carried out of the
+ * error. The message is left behind: it is attacker- and authority-controlled
+ * text that may echo a rejected request body, and secret values never reach a
+ * log.
+ */
+function authorityFailure(error: unknown): { status: number; code: string; requestId: string } | null {
+  if (error instanceof ConfigurationAuthorizationError || error instanceof ConfigurationValidationError) {
+    return null;
+  }
+  const status = reportedStatus(error);
+  if (status === undefined || REQUEST_SCOPED_STATUSES.has(status)) {
+    return null;
+  }
+  const field = (name: 'code' | 'requestId'): string | undefined =>
+    typeof error === 'object' && error !== null && name in error
+      && typeof (error as Record<string, unknown>)[name] === 'string'
+      ? (error as Record<string, string>)[name]
+      : undefined;
+  return {
+    status,
+    code: field('code') ?? 'REQUEST_FAILED',
+    requestId: field('requestId') ?? 'none',
+  };
+}
+
+function configurationError(error: unknown): {
   status: number;
   code: string;
   message: string;
 } {
   const errorName = error instanceof Error ? error.constructor.name : '';
-  const status = typeof error === 'object' && error !== null && 'status' in error
-    && typeof error.status === 'number' && error.status >= 400 && error.status < 600
-    ? error.status
+  const reported = reportedStatus(error);
+  const status = reported !== undefined && REQUEST_SCOPED_STATUSES.has(reported)
+    ? reported
     : error instanceof ConfigurationAuthorizationError
       ? 403
       : error instanceof ConfigurationValidationError
@@ -103,17 +148,11 @@ function configurationError(error: unknown, request: Request): {
     ? 'APPPORT_AUTHENTICATION_REQUIRED'
     : status === 403
       ? 'APPPORT_AUTHORIZATION_DENIED'
-      : status === 404
-        ? 'APPPORT_RESOURCE_NOT_FOUND'
-        : status === 409
-          ? 'APPPORT_CONFIGURATION_CONFLICT'
-          : status === 422
-            ? 'APPPORT_CONFIGURATION_INVALID'
-            : status >= 500
-              ? 'APPPORT_SERVICES_FAILURE'
-              : errorName === 'ConfigurationValidationError'
-                ? 'INVALID_CONFIGURATION'
-                : 'CONFIGURATION_REQUEST_FAILED';
+      : status >= 500
+        ? 'APPPORT_SERVICES_FAILURE'
+        : errorName === 'ConfigurationValidationError'
+          ? 'INVALID_CONFIGURATION'
+          : 'CONFIGURATION_REQUEST_FAILED';
   return { status, code, message };
 }
 
@@ -126,6 +165,46 @@ function sendConfigurationError(
     error: { ...detail, message: clientMessage },
     ...detail,
   });
+}
+
+export interface AppPortServicesDeployment {
+  mode: 'local' | 'remote';
+  namespace: string;
+  environment: string;
+  serverUrl?: string;
+  serverToken?: string;
+  path?: string;
+}
+
+/**
+ * Resolve the FeltDB deployment AppPort Services runs on.
+ *
+ * `applicationId` is deliberately not part of this deployment. Setting it moves
+ * the FeltDB client onto the canonical application service, which resolves an
+ * application revision through `GET /v1/application` before every read and
+ * write. Factory never registers itself with that service — `deployFlowSpec`
+ * runs against the same unscoped surface the Factory's own durable state uses —
+ * so every configuration read and write failed that lookup with HTTP 404 and
+ * reached the browser as `APPPORT_RESOURCE_NOT_FOUND`.
+ *
+ * Configuration stays application-scoped either way: the scope travels in each
+ * record's `applicationId` field, pinned to the Factory application by the
+ * request middleware below, not in the FeltDB client's transport.
+ */
+export function resolveAppPortServicesDeployment(deployment: AppPortServicesDeployment): CreateServicesOptions {
+  return deployment.mode === 'remote'
+    ? {
+        mode: 'remote',
+        namespace: deployment.namespace,
+        url: deployment.serverUrl,
+        token: deployment.serverToken,
+        environment: deployment.environment,
+      }
+    : {
+        mode: 'local',
+        namespace: deployment.namespace,
+        path: deployment.path,
+      };
 }
 
 export interface FactoryAppPortServices {
@@ -203,7 +282,24 @@ export function createFactoryAppPortServices(options: {
   }));
   application.use(createConfigurationManagementRouter(services.configuration));
   application.use(((error, request, response, _next) => {
-    const detail = { ...configurationError(error, request), requestId: requestId(request) };
+    const correlationId = requestId(request);
+    const upstream = authorityFailure(error);
+    if (upstream) {
+      process.stderr.write(
+        `AppPort Services configuration authority failure (${correlationId}): `
+        + `HTTP ${upstream.status} ${upstream.code}, authority request ${upstream.requestId}\n`,
+      );
+    }
+    const detail = {
+      ...(upstream
+        ? {
+            status: 502,
+            code: 'APPPORT_AUTHORITY_UNAVAILABLE',
+            message: 'AppPort Services could not reach the configuration authority.',
+          }
+        : configurationError(error)),
+      requestId: correlationId,
+    };
     sendConfigurationError(response, detail);
   }) as ErrorRequestHandler);
 

@@ -51,9 +51,11 @@ try {
   }), 400, 'duplicate variable rejection');
   let listed = await expect(await request(''), 200, 'configuration list after variable create');
   if (!listed.variables.some((item) => item.name === variableName && item.value === 'created')) throw new Error('created variable was not listed');
-  const isolatedQuery = new URLSearchParams({ application: `${application}-isolated`, environment }).toString();
-  const isolated = await expect(await fetch(`${configurationUrl}?${isolatedQuery}`, { headers }), 200, 'application scope isolation');
-  if (isolated.variables.some((item) => item.name === variableName)) throw new Error('configuration crossed application scope');
+  // Factory pins configuration scope to its own application and environment, so a
+  // caller-supplied scope must be ignored rather than honoured as a scope selector.
+  const spoofedQuery = new URLSearchParams({ application: `${application}-isolated`, environment: 'staging' }).toString();
+  const spoofed = await expect(await fetch(`${configurationUrl}?${spoofedQuery}`, { headers }), 200, 'caller-supplied scope rejection');
+  if (!spoofed.variables.some((item) => item.name === variableName)) throw new Error('caller-supplied application scope was honoured');
 
   await expect(await request(`/variables/${variableName}`, {
     method: 'PATCH', body: JSON.stringify({ value: 'updated', required: false }),
