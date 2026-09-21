@@ -39,6 +39,7 @@ function contextFromAuth(auth: AuthProjection): AuthenticatedContext {
     session: auth.session as Record<string, unknown> | null,
     delegation: auth.delegation as Record<string, unknown> | null,
     boundaryVerified: true,
+    authorizedCapabilities: [...auth.capabilities],
   };
 }
 

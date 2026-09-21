@@ -4,8 +4,10 @@ Factory Runner is deployed as the dedicated `factory-runner` Fly application.
 It owns execution orchestration only: FeltDB owns durable state, AuthBoundry
 owns identity and authorization, and `.flow` remains the application capability
 contract. FeltDB and AuthBoundry are the only Factory authority URLs. GitHub operations are
-delegated to the standalone GitHub integration package; Factory does not host
-AppPort Services. No Factory database or Fly volume is required.
+delegated to the standalone GitHub integration package. Factory directly mounts
+the AppPort Services package's management router and composes its `AppPort/ui/1`
+contribution; AppPort Services owns that state and UI. No Factory database or
+Fly volume is required because both Factory and AppPort Services use remote FeltDB.
 
 ## Prerequisites
 
@@ -32,9 +34,10 @@ fly secrets set \
 
 `FELTDB_URL` and `AUTHBOUNDRY_URL` are topology, not application credentials.
 `FELTDB_TOKEN` is an infrastructure bootstrap credential used only to establish
-the FeltDB connection. Application API keys, GitHub credentials, webhook
-secrets, and provider configuration belong to their integration boundaries and
-must not be added to Factory environment configuration.
+the FeltDB connection. Application API keys, configuration,
+notification/webhook/job state, and secret metadata are managed through AppPort
+Services. GitHub credentials and provider configuration remain
+integration-owned. None belong in Factory environment configuration.
 
 Deploy and verify:
 

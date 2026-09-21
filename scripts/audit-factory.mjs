@@ -44,11 +44,13 @@ const testFiles = walk('tests').filter((file) => file.endsWith('.ts')).sort();
 const integrationFiles = [
   'src/application-contract.ts',
   'src/appport.ts',
+  'src/appport-services.ts',
   'src/auth.ts',
   'src/authority.ts',
   'src/execution.ts',
   'src/felt.ts',
   'src/integrations/github.ts',
+  'src/ui.ts',
 ].filter((file) => existsSync(path.join(root, file)));
 const production = Object.fromEntries(productionFiles.map((file) => [file, loc(file)]));
 const tests = Object.fromEntries(testFiles.map((file) => [file, loc(file)]));
@@ -92,11 +94,10 @@ const jevChecks = {
 if (Object.values(jevChecks).some(Boolean)) {
   throw new Error(`JEV must be absent from the pre-JEV baseline: ${JSON.stringify(jevChecks)}`);
 }
-if (directDependencies.includes('@appport/services')) {
-  throw new Error('@appport/services must not be a direct Factory dependency');
-}
-if (directDependencies.includes('express')) {
-  throw new Error('Express must not be a direct Factory dependency');
+for (const required of ['@appport/client', '@appport/protocol', '@appport/services', 'express']) {
+  if (!directDependencies.includes(required)) {
+    throw new Error(`${required} is required for direct AppPort service and UI composition`);
+  }
 }
 if (/@octokit\//.test(sourceText) || /@rkendel1\/github-integration\//.test(sourceText)) {
   throw new Error('Factory must consume only the GitHub integration package root');
@@ -160,7 +161,7 @@ const report = {
       package: packageEvidence('@rkendel1/github-integration'),
       declaredDependencies: githubPackage.dependencies,
       appPortServicesOwnership: {
-        factoryDirect: false,
+        factoryDirect: true,
         integrationTransitive: githubPackage.dependencies['@appport/services'] ?? null,
       },
     },
@@ -171,6 +172,7 @@ const report = {
     { authority: 'Factory ExecutionContract', owns: ['authorized immutable execution projection and fingerprint'] },
     { authority: 'FeltDB', owns: ['durable Work, authorization, run, contract, event, artifact, and evidence state'] },
     { authority: '@rkendel1/github-integration', owns: ['GitHub transport', 'credentials', 'webhooks', 'provider state', 'normalized GitHub behavior'] },
+    { authority: '@appport/services', owns: ['configuration', 'secrets', 'API keys', 'notifications', 'webhooks', 'jobs', 'service management UI'] },
   ],
   durableStateInventory: [
     'Work', 'ExecutionRequest', 'ExecutionContract', 'Run', 'RunEvent',
@@ -184,7 +186,8 @@ const report = {
     { boundary: 'Factory → AppBoundry', file: 'src/application-contract.ts', classification: 'projection' },
     { boundary: 'Factory → PAX/OS', file: 'src/execution.ts', classification: 'serialization and process boundary' },
     { boundary: 'Factory → GitHub integration', file: 'src/integrations/github.ts', classification: 'thin package consumer adapter' },
-    { boundary: 'Factory → AppPort Services', file: null, classification: 'absent; integration-owned transitive dependency only' },
+    { boundary: 'Factory → AppPort Services', file: 'src/appport-services.ts', classification: 'thin authentication and router mount adapter' },
+    { boundary: 'Factory → AppPort UI composition', file: 'src/ui.ts', classification: 'generic AppPort/ui/1 composition' },
   ],
   findings: {
     authorityViolations: 0,
@@ -194,8 +197,8 @@ const report = {
     factoryGitHubCredentialStores: 0,
     factoryGitHubWebhookEndpoints: 0,
     factoryGitHubPersistenceCollections: 0,
-    directAppPortServicesDependency: false,
-    directExpressDependency: false,
+    directAppPortServicesDependency: true,
+    directExpressDependency: true,
   },
 };
 
@@ -238,7 +241,7 @@ The packaged integration is not Factory code. The historical Factory GitHub foot
 | --- | --- | --- |
 ${dependencyRows}
 
-Factory has no direct \`@appport/services\` or Express dependency. \`@rkendel1/github-integration@1.0.0\` declares \`@appport/services@${githubPackage.dependencies['@appport/services']}\`; that dependency is integration-owned.
+Factory directly consumes \`@appport/services\` for package-owned configuration, secret, API-key, notification, webhook, job, and management-UI capabilities. Express is direct only because the published service package exports Express routers while declaring Express as a development dependency. The GitHub integration independently declares \`@appport/services@${githubPackage.dependencies['@appport/services']}\` for its own provider state.
 
 ## Boundary inventory
 
@@ -248,7 +251,7 @@ ${boundaryRows}
 
 ## Authority and durable state
 
-AuthBoundry owns identity and external authorization. \`.flow\` owns application capabilities and execution declarations. Factory creates the immutable authorized ExecutionContract. FeltDB owns all durable Factory state and evidence. The GitHub package owns GitHub transport, credentials, webhooks, normalized behavior, and provider persistence.
+AuthBoundry owns identity and external authorization. \`.flow\` owns application capabilities and execution declarations. Factory creates the immutable authorized ExecutionContract. FeltDB owns all durable Factory state and evidence. AppPort Services owns service configuration and management state/UI. The GitHub package owns GitHub transport, credentials, webhooks, normalized behavior, and provider persistence.
 
 Factory durable collections remain: ${report.durableStateInventory.map((name) => `\`${name}\``).join(', ')}. There are no Factory GitHub credential, webhook, provider-model, or persistence collections.
 

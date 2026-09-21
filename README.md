@@ -54,6 +54,8 @@ project, compiles a public import, and executes a state operation.
 - `GET /v1/runs/:runId`
 - `GET /v1/runs/:runId/evidence`
 - `POST /v1/runs/:runId/cancel`
+- `GET /v1/ui` (composed `AppPort/ui/1` discovery)
+- `/v1/configuration` and AppPort Services management routes
 - `GET /health`
 
 Protected requests are authenticated and authorized by AuthBoundry. Configure its canonical origin with `AUTHBOUNDRY_URL` (or `authBoundryUrl` when embedding the service); the runner verifies the AuthBoundry session and asks it to authorize each operation. The request body never supplies the principal or tenant.
@@ -117,9 +119,22 @@ AppBoundry contract identity, and invokes GitHub only through the public
 and evidence boundary. Secret values are never copied into process environments,
 contracts, events, evidence, or logs.
 
-Factory does not host AppPort Services. The GitHub integration owns any AppPort
-Services dependency it needs, along with GitHub transport, credentials,
-webhooks, provider persistence, and normalized provider behavior.
+Factory directly consumes AppPort Services and mounts its package-owned
+configuration API and management UI behind AuthBoundry. Factory contributes
+Work, Runs, Evidence, and Artifacts to generic `AppPort/ui/1` composition; it
+does not recreate service-management screens or store service state locally.
+The GitHub integration remains independently responsible for GitHub transport,
+credentials, webhooks, provider persistence, and normalized provider behavior.
+
+| Concern | Distribution | Factory role |
+| --- | --- | --- |
+| FeltDB | `@feltdb/core@0.11.4` | Durable Factory and service authority |
+| AuthBoundry | `@authboundry/core@1.15.1` | Identity and authorization client |
+| AppPort contracts/UI | `@appport/sdk`, `@appport/client`, `@appport/protocol` | Contract projection and generic UI composition |
+| AppPort Services | `@appport/services@0.4.1` | Thin authenticated router mount; package owns state and screens |
+| AppBoundry | `@appport/appboundry@1.0.10` | Certified application identity |
+| GitHub | vendored `@rkendel1/github-integration@1.0.0` package artifact | Thin operation adapter only |
+| PAX | external executable | Bounded execution engine |
 
 ## Development
 

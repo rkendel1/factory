@@ -254,5 +254,7 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   paxExecutable?: string;
   authBoundryUrl?: string;
   authenticator?: import('./auth.js').Authenticator;
+  appportPath?: string;
+  appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;
 }

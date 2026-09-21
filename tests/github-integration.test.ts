@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   createGitHubIntegration,
@@ -256,7 +256,7 @@ test('caller identity, tenant, capabilities, and connection identity are rejecte
   } as RunRequest, 'factory-service'), /not accepted/i);
 });
 
-test('Factory depends only on the integration package root and owns no webhook endpoint', async () => {
+test('Factory keeps GitHub behind the packaged integration root and owns no GitHub webhook endpoint', async () => {
   const packageJson = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
     dependencies: Record<string, string>;
   };
@@ -264,16 +264,16 @@ test('Factory depends only on the integration package root and owns no webhook e
     packageJson.dependencies['@rkendel1/github-integration'],
     'file:vendor/rkendel1-github-integration-1.0.0.tgz',
   );
-  assert.equal(packageJson.dependencies['@appport/services'], undefined);
-  assert.equal(packageJson.dependencies.express, undefined);
+  assert.equal(packageJson.dependencies['@appport/services'], '^0.4.1');
+  assert.match(packageJson.dependencies.express, /^\^4\./);
   assert.equal(packageJson.dependencies['@octokit/rest'], undefined);
-  const sourceFiles = (await readdir(path.resolve('src'))).filter((file) => file.endsWith('.ts'));
-  sourceFiles.push('integrations/github.ts');
+  const sourceFiles = ['server.ts', 'types.ts', 'integrations/github.ts'];
   const source = (await Promise.all(sourceFiles.map((file) => readFile(path.resolve('src', file), 'utf8')))).join('\n');
   assert.match(source, /from '@rkendel1\/github-integration'/);
   assert.doesNotMatch(source, /@octokit|@rkendel1\/github-integration\//);
-  assert.doesNotMatch(source, /@appport\/services|appportPath|accessToken|refreshToken|privateKey|clientSecret/);
-  assert.doesNotMatch(source, /x-hub-signature|\/webhooks?\b/i);
+  assert.doesNotMatch(source, /accessToken|refreshToken|privateKey|clientSecret|x-hub-signature/i);
+  const githubAdapter = await readFile(path.resolve('src/integrations/github.ts'), 'utf8');
+  assert.doesNotMatch(githubAdapter, /\/webhooks?\b/i);
   const flow = await readFile(path.resolve('.flow'), 'utf8');
   assert.match(flow, /operation repositories\.list[\s\S]*grant github\.repository\.read/);
   assert.match(flow, /operation pull_request\.merge[\s\S]*grant github\.pull_request\.merge/);

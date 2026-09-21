@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Clean commit `6bfd5cea493f52d35e0760f1cb212d19f73c281a`, tree `7057e40fdbedfd27cf7bd6ddcad585b3b183aea7`.
+Working-tree preview based on HEAD `c29bca8deacf41f4b7bc0223fb6b16ae0c946968`. Rerun after committing to record the clean baseline commit and tree.
 
 - JEV integrated: **NO**
 - JEV authority: **NO**
@@ -14,9 +14,9 @@ Clean commit `6bfd5cea493f52d35e0760f1cb212d19f73c281a`, tree `7057e40fdbedfd27c
 
 | Measure | LOC |
 | --- | ---: |
-| Factory application source | 2000 |
-| Factory integration/adapter subset | 834 |
-| Factory tests | 1112 |
+| Factory application source | 2202 |
+| Factory integration/adapter subset | 969 |
+| Factory tests | 1285 |
 | `.flow` | 239 |
 | Packaged GitHub integration runtime (separate) | 694 |
 | GitHub integration source checkout (separate) | 1221 |
@@ -29,12 +29,16 @@ The packaged integration is not Factory code. The historical Factory GitHub foot
 | Package | Version | Integrity/resolution |
 | --- | --- | --- |
 | `@appport/appboundry` | `1.0.10` | `sha512-Bx9mmb/ZBdZzo1855ayEMksH2wuqIXJP3OYU1QwlVTsQOG8Mlt9sTFU/MzHxlTH1LmjceCaDrTLMLkcEIsxhOQ==` |
+| `@appport/client` | `1.0.0` | `sha512-x5EdpDN4GpOwwT5vs7xIdsLyRxzqGDT382zecpGYjH+Oo6XSIn1w5HTQnSpbPHcCPV1P8/gh1uoFohRTsS5b6Q==` |
+| `@appport/protocol` | `1.0.0` | `sha512-8+wh6XJTZ4aObwKrvGtVSZR0lE+SwWb2wui1jf8dPJNHYKNzkFV8E//UaOe9+nE6Q3KKIhTbzavnncBnC38yyQ==` |
 | `@appport/sdk` | `1.1.19` | `sha512-eXM3OJUGMgecVfjEj5mrANTWLVRcgInKQ+GnUtvQZ6N9OuLhZTttQuVBNC1xA7Uvk2P+bFOF4j0p04RJPOJ3AA==` |
+| `@appport/services` | `0.4.1` | `sha512-HOxCAusqrLldl+FgJLVqDNyTo004vcjSJJ9yTISCO7PB82BbXgFA2zVzGtWJPvjd1e3Ot+jvRNOU8hajuhW10Q==` |
 | `@authboundry/core` | `1.15.1` | `sha512-O+sIQmWIpGNASiOt0sEQjQejlVKnBoUW/RLF/8JA6paj0EK14jGMCzIZqJai36pzSCww9NBnthuSCw6khTLkTw==` |
 | `@feltdb/core` | `0.11.4` | `sha512-g0T/m66jdYYouarLdR8gxXYrbYP9pKoPtibNrpL3sUGdtyRKZ6CAoIIyHBBy8PQb5jxpXHYj0DJ4FrBcudt6zQ==` |
 | `@rkendel1/github-integration` | `1.0.0` | `sha512-TeWDO6s39RVKW8woCzvdvRke9I7brQS5pIYIwcvvcFKfu7kXmhVNQX4v4i313yKZsS1rEnI9mdS5uBVX1PJadg==` |
+| `express` | `4.22.3` | `sha512-Bdcs4+3qlpVlx2NRn6fgX2Ue2/gGRaPeawebgclM0ERSCqDpA+owF1fdPwjJUTAJWMTuAaxjDf+hzb0/4eKvvw==` |
 
-Factory has no direct `@appport/services` or Express dependency. `@rkendel1/github-integration@1.0.0` declares `@appport/services@0.4.0`; that dependency is integration-owned.
+Factory directly consumes `@appport/services` for package-owned configuration, secret, API-key, notification, webhook, job, and management-UI capabilities. Express is direct only because the published service package exports Express routers while declaring Express as a development dependency. The GitHub integration independently declares `@appport/services@0.4.0` for its own provider state.
 
 ## Boundary inventory
 
@@ -47,11 +51,12 @@ Factory has no direct `@appport/services` or Express dependency. `@rkendel1/gith
 | Factory → AppBoundry | projection | `src/application-contract.ts` |
 | Factory → PAX/OS | serialization and process boundary | `src/execution.ts` |
 | Factory → GitHub integration | thin package consumer adapter | `src/integrations/github.ts` |
-| Factory → AppPort Services | absent; integration-owned transitive dependency only | none |
+| Factory → AppPort Services | thin authentication and router mount adapter | `src/appport-services.ts` |
+| Factory → AppPort UI composition | generic AppPort/ui/1 composition | `src/ui.ts` |
 
 ## Authority and durable state
 
-AuthBoundry owns identity and external authorization. `.flow` owns application capabilities and execution declarations. Factory creates the immutable authorized ExecutionContract. FeltDB owns all durable Factory state and evidence. The GitHub package owns GitHub transport, credentials, webhooks, normalized behavior, and provider persistence.
+AuthBoundry owns identity and external authorization. `.flow` owns application capabilities and execution declarations. Factory creates the immutable authorized ExecutionContract. FeltDB owns all durable Factory state and evidence. AppPort Services owns service configuration and management state/UI. The GitHub package owns GitHub transport, credentials, webhooks, normalized behavior, and provider persistence.
 
 Factory durable collections remain: `Work`, `ExecutionRequest`, `ExecutionContract`, `Run`, `RunEvent`, `Artifact`, `Evidence`, `AuthorizationDecision`. There are no Factory GitHub credential, webhook, provider-model, or persistence collections.
 

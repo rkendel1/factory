@@ -32,6 +32,9 @@ export async function createService(config: Partial<FactoryServiceConfig> = {}):
     workspaceRoot: config.workspaceRoot ?? path.join(workingDirectory, 'workspaces'),
     paxExecutable: config.paxExecutable,
     environmentId: 'test',
+    appportPath: config.appportPath ?? path.join(workingDirectory, 'appport-services'),
+    authenticator: config.authenticator,
+    appPortServices: config.appPortServices,
     githubIntegration: config.githubIntegration,
   });
 }
