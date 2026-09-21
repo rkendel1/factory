@@ -685,6 +685,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const production = process.env.NODE_ENV === 'production';
+  const host = process.env.FACTORY_HOST ?? (production ? '0.0.0.0' : '127.0.0.1');
   const port = Number(process.env.FACTORY_PORT ?? 3000);
   const config: FactoryServiceConfig = {
     mode: production ? 'remote' : (process.env.FACTORY_FELTDB_MODE as 'local' | 'remote' | undefined) ?? 'local',
@@ -711,8 +712,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (production) {
     process.stdout.write('Factory starting...\n');
   }
-  server.listen(port, () => {
-    process.stdout.write(`Software Factory Runner listening on ${port}\n`);
+  server.listen(port, host, () => {
+    process.stdout.write(`Software Factory Runner listening on ${host}:${port}\n`);
   });
 
   const shutdown = async () => {

@@ -34,6 +34,7 @@
     "express": "^4.22.3"
   },
   "overrides": {
+    "@appport/services": "$@appport/services",
     "@feltdb/core": "$@feltdb/core"
   },
   "devDependencies": {

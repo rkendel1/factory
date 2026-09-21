@@ -14,13 +14,14 @@ primary_region = 'iad'
 
 [env]
   # These remote authority locations are deployment topology, not secrets.
-  AUTHBOUNDRY_URL = 'https://authboundry.fly.dev'
+  AUTHBOUNDRY_URL = 'https://authboundry-api.fly.dev'
   FACTORY_ENVIRONMENT_ID = 'production'
   FACTORY_FELTDB_MODE = 'remote'
+  FACTORY_HOST = '0.0.0.0'
   FACTORY_NAMESPACE = 'software-factory'
   FACTORY_PORT = '3000'
   FACTORY_WORKSPACE_ROOT = '/tmp/software-factory'
-  FELTDB_URL = 'https://feltdb.fly.dev'
+  FELTDB_URL = 'http://feltdb.internal:7700'
   NODE_ENV = 'production'
   PAX_BIN = '/usr/local/bin/pax'
 
@@ -46,4 +47,3 @@ primary_region = 'iad'
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256

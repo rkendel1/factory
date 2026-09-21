@@ -13,6 +13,10 @@ test('production deployment uses remote authority boundaries', async () => {
   const fly = await readFile(path.join(process.cwd(), 'fly.toml'), 'utf8');
   const dockerfile = await readFile(path.join(process.cwd(), 'Dockerfile'), 'utf8');
   const workflow = await readFile(path.join(process.cwd(), '.github/workflows/factory-runner.yml'), 'utf8');
+  const packageJson = JSON.parse(await readFile(path.join(process.cwd(), 'package.json'), 'utf8')) as {
+    dependencies: Record<string, string>;
+    overrides: Record<string, string>;
+  };
 
   assert.match(fly, /app = 'factory-idvhpa'/);
   assert.match(fly, /internal_port = 3000/);
@@ -20,16 +24,23 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.match(fly, /path = '\/health'/);
   assert.match(fly, /force_https = true/);
   assert.match(fly, /FACTORY_FELTDB_MODE = 'remote'/);
-  assert.match(fly, /AUTHBOUNDRY_URL = 'https:\/\/authboundry\.fly\.dev'/);
-  assert.match(fly, /FELTDB_URL = 'https:\/\/feltdb\.fly\.dev'/);
+  assert.match(fly, /AUTHBOUNDRY_URL = 'https:\/\/authboundry-api\.fly\.dev'/);
+  assert.match(fly, /FELTDB_URL = 'http:\/\/feltdb\.internal:7700'/);
+  assert.match(fly, /FACTORY_HOST = '0\.0\.0\.0'/);
   assert.doesNotMatch(fly, /FELTDB_TOKEN\s*=/);
+  assert.equal((fly.match(/^\[http_service\]$/gm) ?? []).length, 1);
+  assert.equal((fly.match(/^\[\[services\]\]$/gm) ?? []).length, 0);
+  assert.equal((fly.match(/^\s*(?:memory|memory_mb)\s*=/gm) ?? []).length, 1);
   assert.doesNotMatch(fly, /appport.*(?:URL|url)/i);
   assert.match(dockerfile, /npm ci --omit=dev/);
+  assert.equal((dockerfile.match(/COPY vendor \.\/vendor/g) ?? []).length, 2);
   assert.match(dockerfile, /pax --version/);
   assert.match(dockerfile, /USER node/);
   assert.match(workflow, /fly deploy --config fly\.toml --remote-only --strategy rolling/);
   assert.match(workflow, /FLY_API_TOKEN: \$\{\{ secrets\.FLY_API_TOKEN \}\}/);
   assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
+  assert.equal(packageJson.dependencies['@appport/services'], '^0.4.2');
+  assert.equal(packageJson.overrides['@appport/services'], '$@appport/services');
 });
 
 test('remote bootstrap accepts topology and infrastructure credentials only', () => {

@@ -62,6 +62,7 @@ const flowLoc = loc('.flow');
 
 const packageJson = JSON.parse(read('package.json'));
 const lock = JSON.parse(read('package-lock.json'));
+const flyConfig = read('fly.toml');
 const directDependencies = Object.keys(packageJson.dependencies ?? {}).sort();
 const packageEvidence = (name) => {
   const entry = lock.packages[`node_modules/${name}`];
@@ -164,6 +165,26 @@ const report = {
         factoryDirect: true,
         integrationTransitive: githubPackage.dependencies['@appport/services'] ?? null,
       },
+    },
+  },
+  deployment: {
+    app: flyConfig.match(/^app\s*=\s*['"]([^'"]+)['"]/m)?.[1] ?? null,
+    primaryRegion: flyConfig.match(/^primary_region\s*=\s*['"]([^'"]+)['"]/m)?.[1] ?? null,
+    internalPort: Number(flyConfig.match(/^\s*internal_port\s*=\s*(\d+)/m)?.[1] ?? 0),
+    forceHttps: /^\s*force_https\s*=\s*true/m.test(flyConfig),
+    healthPath: flyConfig.match(/^\s*path\s*=\s*['"]([^'"]+)['"]/m)?.[1] ?? null,
+    factoryHost: flyConfig.match(/^\s*FACTORY_HOST\s*=\s*['"]([^'"]+)['"]/m)?.[1] ?? null,
+    feltDbUrl: flyConfig.match(/^\s*FELTDB_URL\s*=\s*['"]([^'"]+)['"]/m)?.[1] ?? null,
+    authBoundryUrl: flyConfig.match(/^\s*AUTHBOUNDRY_URL\s*=\s*['"]([^'"]+)['"]/m)?.[1] ?? null,
+    httpServiceCount: (flyConfig.match(/^\[http_service\]$/gm) ?? []).length,
+    legacyServiceCount: (flyConfig.match(/^\[\[services\]\]$/gm) ?? []).length,
+    secretValuesRecorded: false,
+    packageVersions: {
+      appPortServices: packageEvidence('@appport/services').version,
+      feltDbCore: packageEvidence('@feltdb/core').version,
+      authBoundryCore: packageEvidence('@authboundry/core').version,
+      appBoundry: packageEvidence('@appport/appboundry').version,
+      githubIntegration: packageEvidence('@rkendel1/github-integration').version,
     },
   },
   authorityInventory: [

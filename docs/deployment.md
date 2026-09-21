@@ -26,13 +26,15 @@ Set the deployment-managed remote authority configuration (never commit
 credential values):
 
 ```sh
-fly secrets set \
-  FELTDB_URL="https://feltdb.example" \
-  FELTDB_TOKEN="..." \
-  AUTHBOUNDRY_URL="https://auth.example"
+fly secrets set FELTDB_TOKEN="..." -a factory-idvhpa
 ```
 
-`FELTDB_URL` and `AUTHBOUNDRY_URL` are topology, not application credentials.
+`fly.toml` supplies the production private topology:
+`FELTDB_URL=http://feltdb.internal:7700` and
+the verified AuthBoundry origin `AUTHBOUNDRY_URL=https://authboundry-api.fly.dev`.
+These URLs are topology, not application credentials.
+Fly private DNS is IPv6, so the FeltDB process must listen on `::` (for example,
+`HOST=::`) rather than only `0.0.0.0`.
 `FELTDB_TOKEN` is an infrastructure bootstrap credential used only to establish
 the FeltDB connection. Application API keys, configuration,
 notification/webhook/job state, and secret metadata are managed through AppPort
