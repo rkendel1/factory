@@ -10,6 +10,8 @@ import type {
 import { withContractFingerprint } from './contract.js';
 import type { AuthenticatedContext } from './auth.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
+import type { AuthorizedApplicationContext, FactoryAssociation } from './association.js';
+import { isFactoryAgentPrincipal } from './association.js';
 
 interface OperationAuthority {
   name: string;
@@ -117,6 +119,10 @@ export async function authorizeExecution(
   context: AuthenticatedContext,
   request: RunRequest,
   runId: string,
+  applicationAuthority?: {
+    association: FactoryAssociation;
+    authorized: AuthorizedApplicationContext | null;
+  },
 ): Promise<AuthorizationResolution> {
   const principal = context.principal;
   const decisionCollection = db.collection<AuthorizationDecisionRecord>(COLLECTIONS.authorizationDecisions);
@@ -126,6 +132,11 @@ export async function authorizeExecution(
   const authority = authorities.get(request.operation);
   const application = createCanonicalApplicationContract(flowSpec);
 
+  const grantProvenance = {
+    ...(context.authority === undefined ? {} : { authority: context.authority }),
+    ...(context.delegationId === undefined ? {} : { delegationId: context.delegationId }),
+  };
+
   const reject = async (reason: string): Promise<AuthorizationResolution> => {
     const decision: AuthorizationDecisionRecord = {
       id: runId,
@@ -134,6 +145,7 @@ export async function authorizeExecution(
       tenantId: context.tenant,
       authSession: context.session,
       delegation: context.delegation,
+      ...grantProvenance,
       operation: request.operation,
       decision: 'rejected',
       reason,
@@ -208,6 +220,30 @@ export async function authorizeExecution(
     return reject(`principal ${principal} is not delegated in .flow for operation ${request.operation}`);
   }
 
+  /*
+   * The application an Action executes in is the one AuthBoundry authorized.
+   *
+   * `.flow` declares which application Factory *is*; that declaration is a
+   * contract identity, not a grant, so it cannot stand in for the authority's
+   * answer. A Factory service principal therefore executes only inside a
+   * resolved application context, and only when the authority's context and the
+   * declared contract name the same application.
+   */
+  const authorizedApplication = applicationAuthority?.authorized ?? null;
+  if (applicationAuthority && isFactoryAgentPrincipal(principal, applicationAuthority.association)) {
+    if (!authorizedApplication) {
+      return reject(`AuthBoundry authorized no application context for ${principal}`);
+    }
+    if (authorizedApplication.tenantId !== context.tenant) {
+      return reject(`the authorized application context is not held in tenant ${context.tenant}`);
+    }
+    if (authorizedApplication.applicationId !== application.authorization.applicationId) {
+      return reject(
+        `AuthBoundry authorized application ${authorizedApplication.applicationId}, not ${application.authorization.applicationId}`,
+      );
+    }
+  }
+
   const decision: AuthorizationDecisionRecord = {
     id: runId,
     runId,
@@ -215,6 +251,7 @@ export async function authorizeExecution(
     tenantId: context.tenant,
     authSession: context.session,
     delegation: context.delegation,
+    ...grantProvenance,
     operation: request.operation,
     decision: 'granted',
     reason: 'authorized by .flow capability and FeltDB work state',
@@ -228,6 +265,15 @@ export async function authorizeExecution(
       principal,
       tenantId: context.tenant,
       authorizationDecisionId: decision.id,
+      ...(authorizedApplication ? {
+        authorizedApplication: {
+          applicationId: authorizedApplication.applicationId,
+          resource: authorizedApplication.resource,
+          tenantId: authorizedApplication.tenantId,
+          principalId: authorizedApplication.principalId,
+          delegationId: authorizedApplication.delegationId,
+        },
+      } : {}),
       applicationContract: {
         id: application.identity.id,
         version: application.identity.version,

@@ -66,6 +66,9 @@ export function buildEvidence(
     contractId: contract.runId,
     contractFingerprint: contract.fingerprint,
     ...(contract.applicationContract ? { applicationContractFingerprint: contract.applicationContract.fingerprint } : {}),
+    // The application context the authority authorized, so the durable chain
+    // records which association an Action executed under.
+    ...(contract.authorizedApplication ? { authorizedApplication: contract.authorizedApplication } : {}),
     principal: contract.principal,
     tenantId: contract.tenantId,
     operation: contract.operation,

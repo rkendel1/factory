@@ -13,11 +13,26 @@ import {
   AuthBoundryAuthenticationError,
   AuthBoundryAuthorizationError,
   type AuthenticatedContext,
+  type Authenticator,
 } from './auth.js';
 import { BrowserAdapterError, type BrowserRedirectResult } from '@authboundry/core/server';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
 import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
+import {
+  assertFactoryAssociation,
+  authorizedApplicationContext,
+  factoryAssociation,
+  FactoryAssociationError,
+  type FactoryAssociation,
+  type FactoryConnectionState,
+} from './association.js';
+import {
+  createAuthBoundryControlPlane,
+  provisionFactoryAssociation,
+  resolveFactoryAssociation,
+  type AuthBoundryControlPlane,
+} from './provisioning.js';
 import {
   createFactoryAppPortServices,
   resolveAppPortServicesDeployment,
@@ -99,6 +114,10 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
 }
 
 function writeAuthError(response: ServerResponse, error: unknown): void {
+  if (error instanceof FactoryAssociationError) {
+    writeJson(response, 403, { error: error.message, code: 'FORBIDDEN', reason: error.reason });
+    return;
+  }
   if (error instanceof AuthBoundryAuthorizationError) {
     writeJson(response, 403, { error: error.message, code: 'FORBIDDEN' });
     return;
@@ -124,6 +143,12 @@ export class FactoryService {
   private readonly uiContributors: readonly UiContributor[];
   private readonly applicationId: string;
   private readonly environmentId: string;
+  private readonly association: FactoryAssociation;
+  private readonly controlPlane: AuthBoundryControlPlane | null;
+  private connection: FactoryConnectionState = {
+    status: 'unverified',
+    reason: 'the Factory application association has not been checked yet',
+  };
   private paxVersion?: string;
   private shuttingDown = false;
 
@@ -138,6 +163,16 @@ export class FactoryService {
     this.appPort = createAppPortAdapter({
       application,
     });
+    this.association = factoryAssociation(this.flowSpec);
+    this.controlPlane = config.authBoundryControlPlane
+      ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
+        && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
+        ? createAuthBoundryControlPlane({
+            baseUrl: (config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)!,
+            operatorCredential: (config.authBoundryOperatorCredential
+              ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)!,
+          })
+        : null);
     this.appPortServices = createFactoryAppPortServices({
       ...(config.appPortServices ? { services: config.appPortServices } : {}),
       deployment: resolveAppPortServicesDeployment({
@@ -148,7 +183,7 @@ export class FactoryService {
         serverToken: config.serverToken,
         path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
       }),
-      authenticator: () => config.authenticator ?? createAuthBoundryAuthenticator(config),
+      authenticator: () => this.boundAuthenticator(),
       applicationId: application.identity.id,
       environment: this.environmentId,
     });
@@ -160,12 +195,101 @@ export class FactoryService {
     });
   }
 
+  /**
+   * Every protected operation passes through here, so the association is
+   * enforced once rather than at each call site.
+   *
+   * AuthBoundry stays the authority: Factory adds no capability and reverses no
+   * denial. It only refuses to let one of its own service principals act on a
+   * grant that did not come from the Factory application association.
+   */
+  private boundAuthenticator(): Authenticator {
+    const delegate = this.config.authenticator ?? createAuthBoundryAuthenticator(this.config);
+    const verified = () => this.connection.status === 'associated' ? this.connection.association : null;
+    return {
+      ...(delegate.session ? { session: (request) => delegate.session!(request) } : {}),
+      authenticate: async (request, operation) => {
+        const context = await delegate.authenticate(request, operation);
+        assertFactoryAssociation(
+          { principal: context.principal, tenant: context.tenant },
+          this.association,
+          verified(),
+        );
+        return context;
+      },
+    };
+  }
+
+  authenticator(): Authenticator {
+    return this.boundAuthenticator();
+  }
+
+  /**
+   * Record the Factory application association in AuthBoundry, then keep only
+   * what AuthBoundry reports back.
+   *
+   * Safe to run on every boot: provisioning reads before it writes, and the
+   * delegation id is derived from the tenant, application, and agent, so a
+   * restart or redeployment re-asserts one association instead of adding
+   * another.
+   */
+  async provisionAuthority(): Promise<FactoryConnectionState> {
+    return this.resolveAuthority(true);
+  }
+
+  /**
+   * Re-read the association without changing it. This is what the connection
+   * endpoint reports: AuthBoundry's answer, never Factory's configuration.
+   */
+  async refreshConnection(): Promise<FactoryConnectionState> {
+    return this.resolveAuthority(false);
+  }
+
+  private async resolveAuthority(register: boolean): Promise<FactoryConnectionState> {
+    if (!this.controlPlane) {
+      this.connection = {
+        status: 'unverified',
+        reason: 'no AuthBoundry operator credential is configured for control-plane access',
+      };
+      return this.connection;
+    }
+    const tenantId = this.config.authBoundryTenantId ?? this.config.tenantId ?? 'default';
+    const request = { controlPlane: this.controlPlane, association: this.association, tenantId };
+    try {
+      const resolved = register
+        ? await provisionFactoryAssociation(request)
+        : await resolveFactoryAssociation(request);
+      this.connection = resolved.association
+        ? { status: 'associated', association: resolved.association }
+        : {
+            status: 'unassociated',
+            reason: resolved.reason
+              ?? `AuthBoundry holds no ${this.association.applicationId} application association in tenant ${tenantId}`,
+          };
+    } catch (error) {
+      this.connection = {
+        status: 'unverified',
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    return this.connection;
+  }
+
+  connectionState(): FactoryConnectionState {
+    return this.connection;
+  }
+
+  declaredAssociation(): FactoryAssociation {
+    return this.association;
+  }
+
   static async create(config: FactoryServiceConfig): Promise<FactoryService> {
     if (config.mode === 'remote') {
       resolveRemoteAuthorityBootstrap(config);
     }
     const db = await createFactoryDB(config);
     const service = new FactoryService(config, db);
+    await service.provisionAuthority();
     await service.recoverInterruptedRuns();
     return service;
   }
@@ -205,12 +329,39 @@ export class FactoryService {
       },
       runtime,
       authorities: {
-        authBoundry: this.config.mode === 'remote' ? 'configured' : 'development',
+        // Derived from the association AuthBoundry reports, not from the fact
+        // that a URL was configured: a configured authority that holds no
+        // Factory delegation is not a connected one.
+        authBoundry: this.connection.status,
         feltDb: this.config.mode === 'remote' ? 'initialized' : 'development',
         appPort: 'initialized',
         appPortServices: 'initialized',
       },
     };
+  }
+
+  /** The connection document: what AuthBoundry holds for this application. */
+  connectionDocument(): Record<string, unknown> {
+    const declared = {
+      application: this.association.applicationId,
+      capabilities: [...this.association.capabilities],
+      agents: this.association.agents.map((agent) => agent.principalId),
+    };
+    return this.connection.status === 'associated'
+      ? {
+          status: 'associated',
+          declared,
+          authority: {
+            tenant: this.connection.association.tenantId,
+            application: this.connection.association.applicationId,
+            agents: this.connection.association.agents.map((agent) => ({
+              principal: agent.principalId,
+              delegation: agent.delegationId,
+              capabilities: [...agent.capabilities],
+            })),
+          },
+        }
+      : { status: this.connection.status, reason: this.connection.reason, declared };
   }
 
   requiredCapabilities(operation: string): string[] {
@@ -387,7 +538,13 @@ export class FactoryService {
 
     await this.recordRequest(run.id, request, principal, context.tenant);
 
-    const authorization = await authorizeExecution(this.db, this.flowSpec, context, request, run.id);
+    const authorization = await authorizeExecution(this.db, this.flowSpec, context, request, run.id, {
+      association: this.association,
+      authorized: authorizedApplicationContext(
+        this.connection.status === 'associated' ? this.connection.association : null,
+        context.principal,
+      ),
+    });
     run = await this.patchRun(run.id, { authorizationDecisionId: authorization.decision.id });
 
     if (!authorization.allowed || !authorization.contract) {
@@ -599,8 +756,9 @@ export class FactoryService {
 
 export async function createHttpServer(config: FactoryServiceConfig): Promise<{ service: FactoryService; server: Server; }> {
   const service = await FactoryService.create(config);
-  const authenticator = config.authenticator;
-  const getAuthenticator = () => authenticator ?? createAuthBoundryAuthenticator(config);
+  // Protected requests are authenticated by AuthBoundry and then held to the
+  // Factory application association, so no route can bypass it.
+  const getAuthenticator = () => service.authenticator();
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -662,6 +820,18 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 
       if (request.method === 'GET' && url.pathname === '/health') {
         writeJson(response, 200, await service.health());
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/connection') {
+        try {
+          await getAuthenticator().authenticate(request, 'factory.ui.read');
+        } catch (error) {
+          writeAuthError(response, error);
+          return;
+        }
+        const state = await service.refreshConnection();
+        writeJson(response, state.status === 'associated' ? 200 : 503, service.connectionDocument());
         return;
       }
 
