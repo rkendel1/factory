@@ -72,6 +72,16 @@ export function buildEvidence(
     ...(contract.appport ? { appport: contract.appport } : {}),
     ref: contract.repository.ref,
     executionMode: contract.execution.mode,
+    ...(contract.github ? {
+      github: {
+        package: contract.github.package,
+        packageVersion: contract.github.packageVersion,
+        connectionId: contract.github.connectionId,
+        operation: contract.github.operation,
+        capability: contract.github.capability,
+        resource: contract.github.resource,
+      },
+    } : {}),
     authorizationDecisionId: contract.authorizationDecisionId,
     authorizationDecision: 'granted',
     status: result.status,
@@ -129,4 +139,33 @@ export function buildFailureEvidence(
     },
     contract.repository.commit,
   );
+}
+
+export function buildGitHubEvidence(
+  contract: ExecutionContract,
+  result: unknown,
+  timing: { startedAt: string; completedAt: string; durationMs: number },
+): StructuredEvidence {
+  const evidence = buildEvidence(contract, {
+    status: 'completed',
+    exitCode: 0,
+    ...timing,
+    stdout: JSON.stringify(result) ?? '',
+    stderr: '',
+  });
+  if (!contract.github) {
+    throw new Error('GitHub evidence requires a GitHub execution contract');
+  }
+  return {
+    ...evidence,
+    github: {
+      package: contract.github.package,
+      packageVersion: contract.github.packageVersion,
+      connectionId: contract.github.connectionId,
+      operation: contract.github.operation,
+      capability: contract.github.capability,
+      resource: contract.github.resource,
+      result,
+    },
+  };
 }

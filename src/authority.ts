@@ -15,7 +15,7 @@ interface OperationAuthority {
   name: string;
   operation: string;
   principals: string[];
-  mode: 'pax' | 'native';
+  mode: 'pax' | 'native' | 'integration';
   command?: string[];
   paxOperation?: string;
   paxTarget?: string;
@@ -24,6 +24,8 @@ interface OperationAuthority {
   appportOperation?: string;
   appportService?: string;
   appportCapability?: string;
+  integration?: string;
+  githubOperation?: string;
 }
 
 export interface AuthorizationResolution {
@@ -53,8 +55,13 @@ function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
   const appportOperation = statementValue(block, 'appport_operation ');
   const appportService = statementValue(block, 'appport_service ');
   const appportCapability = statementValue(block, 'appport_capability ');
+  const integration = statementValue(block, 'integration ');
+  const githubOperation = statementValue(block, 'github_operation ');
 
-  if (!operation || (!commandJson && mode !== 'pax') || (mode === 'pax' && (!paxOperation || !paxTarget))) {
+  if (!operation
+    || (!commandJson && mode !== 'pax' && mode !== 'integration')
+    || (mode === 'pax' && (!paxOperation || !paxTarget))
+    || (mode === 'integration' && (!integration || !githubOperation))) {
     return null;
   }
 
@@ -72,6 +79,8 @@ function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
     appportOperation,
     appportService,
     appportCapability,
+    integration,
+    githubOperation,
   };
 }
 
@@ -138,6 +147,13 @@ export async function authorizeExecution(
     return reject('missing .flow authority for requested operation');
   }
 
+  if (request.github && authority.integration !== 'github') {
+    return reject('GitHub parameters are not authorized for the requested operation');
+  }
+  if (authority.githubOperation === 'repositories.list' && request.github) {
+    return reject('repositories.list does not accept caller-defined GitHub operation parameters');
+  }
+
   const work = await workCollection.get(request.workId);
   if (!work) {
     return reject('missing FeltDB work state for requested workId');
@@ -161,6 +177,31 @@ export async function authorizeExecution(
 
   if (!repositoriesMatch(work, request.repository)) {
     return reject('requested repository does not match authoritative work repository');
+  }
+
+  if (authority.mode === 'integration' && authority.integration === 'github' && !work.githubConnectionId) {
+    return reject(`work ${request.workId} does not reference a GitHub connection`);
+  }
+
+  const requiredGitHubCapability = authority.githubOperation === 'repositories.list'
+    ? 'github.repository.read'
+    : authority.githubOperation === 'pull_request.merge'
+      ? 'github.pull_request.merge'
+      : undefined;
+  if (authority.integration === 'github'
+    && (!requiredGitHubCapability
+      || authority.appportCapability !== requiredGitHubCapability
+      || !authority.capabilities.includes(requiredGitHubCapability))) {
+    return reject(`GitHub operation ${authority.githubOperation ?? 'unknown'} lacks its required .flow capability`);
+  }
+  if (context.boundaryVerified && requiredGitHubCapability
+    && !context.authorizedCapabilities?.includes(requiredGitHubCapability)) {
+    return reject(`AuthBoundry did not authorize ${requiredGitHubCapability}`);
+  }
+
+  if (authority.githubOperation === 'pull_request.merge'
+    && (!Number.isInteger(request.github?.pullNumber) || (request.github?.pullNumber ?? 0) < 1)) {
+    return reject('pull_request.merge requires a positive pullNumber');
   }
 
   if (!context.boundaryVerified && !authority.principals.includes(principal)) {
@@ -220,6 +261,24 @@ export async function authorizeExecution(
         target: authority.paxTarget,
         args: [],
       },
+      ...(authority.integration === 'github' ? {
+        github: {
+          package: '@rkendel1/github-integration' as const,
+          packageVersion: '1.0.0' as const,
+          connectionId: work.githubConnectionId!,
+          operation: authority.githubOperation as 'repositories.list' | 'pull_request.merge',
+          capability: authority.appportCapability as 'github.repository.read' | 'github.pull_request.merge',
+          resource: {
+            owner: work.repositoryOwner,
+            repository: work.repositoryName,
+            identifier: authority.githubOperation === 'pull_request.merge'
+              ? String(request.github?.pullNumber)
+              : work.repositoryOwner,
+            ...(request.github?.pullNumber ? { pullNumber: request.github.pullNumber } : {}),
+          },
+          ...(request.github?.mergeMethod ? { mergeMethod: request.github.mergeMethod } : {}),
+        },
+      } : {}),
       command: authority.command,
       limits: { timeoutMs: authority.timeoutMs },
       evidence: { required: true },

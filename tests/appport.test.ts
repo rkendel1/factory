@@ -12,7 +12,9 @@ test('AppPort SDK is the canonical Factory protocol contract', () => {
   assert.equal(manifest.application.id, 'software_factory');
   assert.deepEqual(manifest.provides.map((capability) => capability.name), [
     'softwarefactory.architectureconformance',
+    'softwarefactory.pullrequestmerge',
     'softwarefactory.repoecho',
+    'softwarefactory.repositorieslist',
   ]);
   assert.equal(factoryAppPortApplication.fingerprint(), contract.appBoundry.contractFingerprint);
   assert.equal(contract.fingerprint, contract.appBoundry.contractFingerprint);
@@ -24,7 +26,6 @@ test('authorized runs persist AppPort provenance without secret material', async
   const service = await createService({
     namespace: `appport-${Date.now()}`,
     repositoryRoot,
-    appportPath: `${root}/services`,
   });
   const work = await seedWork(service, {
     operation: 'repo-echo',

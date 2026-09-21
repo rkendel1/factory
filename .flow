@@ -15,6 +15,7 @@ app software_factory {
     repositoryOwner: text?
     repositoryName: text?
     repositoryRef: text?
+    githubConnectionId: text?
     status: text
     index owner_principal using hash(owner_principal)
     index ownerPrincipal using hash(ownerPrincipal)
@@ -114,6 +115,7 @@ app software_factory {
     appport: json?
     ref: text?
     executionMode: text?
+    github: json?
     authorizationDecisionId: ref AuthorizationDecision?
     status: text
     exitCode: integer?
@@ -182,6 +184,36 @@ app software_factory {
     appport_operation repo-echo
     appport_service execution
     appport_capability repository.read
+    jev bounded
+  }
+
+  capability GitHubRepositoriesListExecution {
+    visibility internal
+    operation repositories.list
+    principal factory-service
+    execution_mode integration
+    integration github
+    github_operation repositories.list
+    timeoutMs 60000
+    grant github.repository.read
+    appport_operation repositories.list
+    appport_service github
+    appport_capability github.repository.read
+    jev bounded
+  }
+
+  capability GitHubPullRequestMergeExecution {
+    visibility internal
+    operation pull_request.merge
+    principal factory-service
+    execution_mode integration
+    integration github
+    github_operation pull_request.merge
+    timeoutMs 60000
+    grant github.pull_request.merge
+    appport_operation pull_request.merge
+    appport_service github
+    appport_capability github.pull_request.merge
     jev bounded
   }
 

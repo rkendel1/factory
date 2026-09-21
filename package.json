@@ -24,10 +24,10 @@
   "type": "module",
   "dependencies": {
     "@appport/appboundry": "^1.0.10",
-    "@appport/sdk": "^1.1.18",
-    "@appport/services": "^0.4.0",
+    "@appport/sdk": "^1.1.19",
     "@authboundry/core": "^1.15.1",
-    "@feltdb/core": "0.11.4"
+    "@feltdb/core": "0.11.4",
+    "@rkendel1/github-integration": "file:vendor/rkendel1-github-integration-1.0.0.tgz"
   },
   "overrides": {
     "@feltdb/core": "$@feltdb/core"

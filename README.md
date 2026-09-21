@@ -98,34 +98,33 @@ The composition introduces no custom views, state models, adapter, or
 persistence layer: it reuses FeltDB Studio's collection discovery, schema,
 relationship, live-update, proposal, preview, and validation surfaces.
 
-# Software Factory
-
 The Factory composes the execution stack without replacing any layer:
 
 ```text
-Attn → Factory → AuthBoundry → .flow → FeltDB → ExecutionContract
-     → AppPort SDK → AppPort Services → AppBoundry/PAX → execution
-     → JEV → FeltDB evidence
+AuthBoundry → .flow → Factory → ExecutionContract
+                         ├── native/PAX execution
+                         └── @rkendel1/github-integration → GitHub
+                                      │
+                                      └── FeltDB
+Factory ─────────────────────────────────→ FeltDB evidence
 ```
 
 AuthBoundry remains the authority boundary (who may act), and the application
 `.flow` is the single canonical application contract (what the application
-declares). AppPort exposes its projection, AppPort Services implements declared
-service requirements, and AppBoundry contains execution under the same
-contract identity and fingerprint. Factory only derives an immutable execution
-projection; it does not define a competing capability model. FeltDB remains the
-durable state boundary. Secret values are never copied into process
-environments, contracts, events, evidence, or logs.
+declares). Factory consumes AppPort capabilities through `@appport/sdk`, uses
+AppBoundry contract identity, and invokes GitHub only through the public
+`@rkendel1/github-integration` package. FeltDB remains the durable Factory state
+and evidence boundary. Secret values are never copied into process environments,
+contracts, events, evidence, or logs.
 
-AppPort Services operations are downstream of Factory authorization. Webhooks
-and jobs may only be used through an explicitly granted capability, and their
-tenant is taken from the authorized contract rather than caller input. Direct
-AppPort service calls cannot create a Factory run or bypass `.flow`.
+Factory does not host AppPort Services. The GitHub integration owns any AppPort
+Services dependency it needs, along with GitHub transport, credentials,
+webhooks, provider persistence, and normalized provider behavior.
 
 ## Development
 
 ```sh
 npm install
 npm run check
-npm ls @appport/sdk @appport/services
+npm ls @appport/sdk @appport/appboundry @rkendel1/github-integration
 ```

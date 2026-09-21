@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { loadFactoryFlow, createFactoryDB, COLLECTIONS } from './felt.js';
-import { authorizeExecution } from './authority.js';
+import { authorizeExecution, getOperationAuthorities } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
 import { executeContract, verifyPax, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
+import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
 import {
   formatDeploymentConfigDiagnostics,
   readDeploymentConfig,
@@ -28,8 +29,9 @@ function isTerminal(status: RunRecord['status']): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
-const requestKeys = new Set(['workId', 'repository', 'operation', 'idempotencyKey']);
+const requestKeys = new Set(['workId', 'repository', 'operation', 'idempotencyKey', 'github']);
 const repositoryKeys = new Set(['provider', 'owner', 'name', 'ref']);
+const githubKeys = new Set(['pullNumber', 'mergeMethod']);
 const validTransitions: Record<RunRecord['status'], RunRecord['status'][]> = {
   accepted: ['authorized', 'failed', 'cancelled'],
   authorized: ['allocated', 'failed', 'cancelled'],
@@ -57,6 +59,12 @@ function validateRunRequest(request: RunRequest): void {
   if (repositoryUnexpected.length > 0) {
     throw new Error(`Repository fields are not accepted in a run request: ${repositoryUnexpected.join(', ')}`);
   }
+  const githubUnexpected = request.github
+    ? Object.keys(request.github).filter((key) => !githubKeys.has(key))
+    : [];
+  if (githubUnexpected.length > 0) {
+    throw new Error(`GitHub execution fields are not accepted in a run request: ${githubUnexpected.join(', ')}`);
+  }
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {
@@ -78,6 +86,7 @@ export class FactoryService {
 
   private readonly activeExecutions = new Map<string, ExecutionHandle>();
   private readonly appPort: FactoryAppPortAdapter;
+  private readonly github: FactoryGitHubAdapter;
   private paxVersion?: string;
   private shuttingDown = false;
 
@@ -87,9 +96,12 @@ export class FactoryService {
   ) {
     this.flowSpec = loadFactoryFlow(config.flowPath);
     this.appPort = createAppPortAdapter({
-      namespace: config.namespace ?? 'software-factory',
-      path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
       application: createCanonicalApplicationContract(this.flowSpec),
+    });
+    this.github = createFactoryGitHubAdapter({
+      integration: config.githubIntegration,
+      namespace: `${config.namespace ?? 'software-factory'}-github`,
+      path: `${config.workingDirectory ?? process.cwd()}/github-integration`,
     });
   }
 
@@ -109,7 +121,7 @@ export class FactoryService {
     }
     resolveRemoteAuthorityBootstrap(this.config);
     if (this.appPort.protocol !== 'appport' || !this.appPort.applicationFingerprint) {
-      throw new Error('AppPort Services failed to initialize');
+      throw new Error('AppPort application projection failed to initialize');
     }
     this.paxVersion = await verifyPax(this.config.paxExecutable);
   }
@@ -138,6 +150,10 @@ export class FactoryService {
         appPort: 'initialized',
       },
     };
+  }
+
+  requiredCapabilities(operation: string): string[] {
+    return [...(getOperationAuthorities(this.flowSpec).get(operation)?.capabilities ?? [])];
   }
 
   async getRun(runId: string, context?: AuthenticatedContext): Promise<RunRecord | null> {
@@ -332,14 +348,16 @@ export class FactoryService {
     await this.appendEvent(activeRunId, 'executing', executionDetail);
 
     try {
-      const outcome = await executeContract(authorization.contract, {
-        repositoryRoot: this.config.repositoryRoot,
-        workspaceRoot: this.config.workspaceRoot,
-        onHandle: (handle) => {
-          this.activeExecutions.set(activeRunId, handle);
-        },
-        paxExecutable: this.config.paxExecutable,
-      });
+      const outcome = authorization.contract.execution.mode === 'integration'
+        ? await this.github.execute(authorization.contract)
+        : await executeContract(authorization.contract, {
+          repositoryRoot: this.config.repositoryRoot,
+          workspaceRoot: this.config.workspaceRoot,
+          onHandle: (handle) => {
+            this.activeExecutions.set(activeRunId, handle);
+          },
+          paxExecutable: this.config.paxExecutable,
+        });
 
       this.activeExecutions.delete(activeRunId);
       if (outcome.evidence.status !== 'cancelled') {
@@ -509,14 +527,20 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/runs') {
+        const payload = await readJson<RunRequest>(request);
         let context;
         try {
           context = await getAuthenticator().authenticate(request, 'factory.run');
+          const githubCapabilities = service.requiredCapabilities(payload.operation)
+            .filter((capability) => capability.startsWith('github.'));
+          for (const capability of githubCapabilities) {
+            await getAuthenticator().authenticate(request, capability);
+          }
+          context.authorizedCapabilities = githubCapabilities;
         } catch {
           writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
         }
-        const payload = await readJson<RunRequest>(request);
         const run = await service.startRun(payload, context);
         writeJson(response, 201, run);
         return;

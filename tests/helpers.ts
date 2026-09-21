@@ -32,6 +32,7 @@ export async function createService(config: Partial<FactoryServiceConfig> = {}):
     workspaceRoot: config.workspaceRoot ?? path.join(workingDirectory, 'workspaces'),
     paxExecutable: config.paxExecutable,
     environmentId: 'test',
+    githubIntegration: config.githubIntegration,
   });
 }
 
@@ -45,6 +46,7 @@ export async function seedWork(service: FactoryService, work: Partial<WorkRecord
     repositoryName: work.repositoryName ?? 'factory',
     repositoryRef: work.repositoryRef ?? 'main',
     status: work.status ?? 'active',
+    ...(work.githubConnectionId ? { githubConnectionId: work.githubConnectionId } : {}),
   };
 
   const db = (service as unknown as { db: import('@feltdb/core').StateFirstDB }).db;

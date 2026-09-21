@@ -9,6 +9,7 @@ export interface AuthenticatedContext {
   session: Record<string, unknown> | null;
   delegation: Record<string, unknown> | null;
   boundaryVerified?: boolean;
+  authorizedCapabilities?: string[];
 }
 
 export interface Authenticator {

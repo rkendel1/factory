@@ -26,6 +26,10 @@ export interface RunRequest {
   repository: RepositoryRef;
   operation: string;
   idempotencyKey?: string;
+  github?: {
+    pullNumber?: number;
+    mergeMethod?: 'merge' | 'squash' | 'rebase';
+  };
 }
 
 export interface WorkRecord {
@@ -38,6 +42,7 @@ export interface WorkRecord {
   repositoryName: string;
   repositoryRef: string;
   status: string;
+  githubConnectionId?: string;
   __version?: number;
 }
 
@@ -69,7 +74,7 @@ export interface ExecutionContract {
   };
   appBoundry?: {
     contractFingerprint: string;
-    executionMode: 'pax' | 'native';
+    executionMode: 'pax' | 'native' | 'integration';
     permissions: string[];
   };
   repository: RepositoryRef;
@@ -77,10 +82,24 @@ export interface ExecutionContract {
   capabilities: string[];
   appport?: import('./appport.js').AppPortContract;
   execution: {
-    mode: 'pax' | 'native';
+    mode: 'pax' | 'native' | 'integration';
     operation?: string;
     target?: string;
     args: string[];
+  };
+  github?: {
+    package: '@rkendel1/github-integration';
+    packageVersion: '1.0.0';
+    connectionId: string;
+    operation: 'repositories.list' | 'pull_request.merge';
+    capability: 'github.repository.read' | 'github.pull_request.merge';
+    resource: {
+      owner: string;
+      repository: string;
+      identifier: string;
+      pullNumber?: number;
+    };
+    mergeMethod?: 'merge' | 'squash' | 'rebase';
   };
   command?: string[];
   limits: {
@@ -174,7 +193,21 @@ export interface StructuredEvidence {
   operation?: string;
   appport?: import('./appport.js').AppPortContract;
   ref?: string;
-  executionMode?: 'pax' | 'native';
+  executionMode?: 'pax' | 'native' | 'integration';
+  github?: {
+    package: '@rkendel1/github-integration';
+    packageVersion: '1.0.0';
+    connectionId: string;
+    operation: 'repositories.list' | 'pull_request.merge';
+    capability: 'github.repository.read' | 'github.pull_request.merge';
+    resource: {
+      owner: string;
+      repository: string;
+      identifier: string;
+      pullNumber?: number;
+    };
+    result?: unknown;
+  };
   authorizationDecisionId: string;
   authorizationDecision: 'granted' | 'rejected';
   status: 'completed' | 'failed' | 'cancelled';
@@ -221,5 +254,5 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   paxExecutable?: string;
   authBoundryUrl?: string;
   authenticator?: import('./auth.js').Authenticator;
-  appportPath?: string;
+  githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;
 }

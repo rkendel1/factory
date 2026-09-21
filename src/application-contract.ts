@@ -1,7 +1,17 @@
 import { createHash } from 'node:crypto';
 import { APPBOUNDRY_CERTIFICATION_PROTOCOL } from '@appport/appboundry';
-import { defineApplication, defineCapability, appBoundryContractFromManifest, fingerprintAppBoundryContract, s, type AuthoredApplication } from '@appport/sdk';
+import { defineApplication, defineCapability, s, type ApplicationManifest, type AuthoredApplication } from '@appport/sdk';
 import type { FlowBlock, FlowSpec } from '@feltdb/core';
+
+interface AppBoundryContract {
+  protocol: 'AppBoundry/contract/1';
+  application: ApplicationManifest['application'];
+  contractRevision: number;
+  contractFingerprint: string;
+  metadata?: ApplicationManifest['metadata'];
+  provides: ApplicationManifest['provides'];
+  requires: ApplicationManifest['requires'];
+}
 
 export interface FlowCapabilityContract {
   name: string;
@@ -21,7 +31,7 @@ export interface CanonicalApplicationContract {
   fingerprint: string;
   capabilities: FlowCapabilityContract[];
   appPort: AuthoredApplication;
-  appBoundry: ReturnType<typeof appBoundryContractFromManifest>;
+  appBoundry: AppBoundryContract;
 }
 
 function canonicalize(value: unknown): unknown {
@@ -98,7 +108,16 @@ export function createCanonicalApplicationContract(flowSpec: FlowSpec): Canonica
       }))
       .map(({ key, value }) => [key, value])).values()],
   });
-  const appBoundry = appBoundryContractFromManifest(appPort.manifest(), flowSpec.version);
-  const fingerprint = fingerprintAppBoundryContract(appBoundry);
+  const manifest = appPort.manifest();
+  const fingerprint = appPort.fingerprint();
+  const appBoundry: AppBoundryContract = {
+    protocol: 'AppBoundry/contract/1',
+    application: manifest.application,
+    contractRevision: flowSpec.version,
+    contractFingerprint: fingerprint,
+    ...(manifest.metadata ? { metadata: manifest.metadata } : {}),
+    provides: manifest.provides,
+    requires: manifest.requires,
+  };
   return { identity, fingerprint, capabilities, appPort, appBoundry };
 }

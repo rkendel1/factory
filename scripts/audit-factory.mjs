@@ -1,60 +1,88 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (file) => readFileSync(path.join(root, file), 'utf8');
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
-const loc = (file) => read(file).split(/\r?\n/).filter((line) => line.trim()).length;
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
-const lock = JSON.parse(read('package-lock.json'));
-const packageEvidence = (name) => {
-  const entry = lock.packages[`node_modules/${name}`];
-  return { version: entry?.version, integrity: entry?.integrity ?? null };
+const loc = (file) => read(file).split(/\r?\n/).filter((line) => line.trim()).length;
+const walk = (directory) => readdirSync(path.join(root, directory), { withFileTypes: true })
+  .flatMap((entry) => {
+    const relative = path.join(directory, entry.name);
+    return entry.isDirectory() ? walk(relative) : [relative];
+  })
+  .map((file) => file.split(path.sep).join('/'));
+const sum = (values) => values.reduce((total, value) => total + value, 0);
+const externalTypeScriptLoc = (directory) => {
+  if (!existsSync(directory)) return null;
+  const files = readdirSync(directory, { recursive: true })
+    .map((file) => path.join(directory, String(file)))
+    .filter((file) => file.endsWith('.ts'))
+    .filter((file) => existsSync(file));
+  return sum(files.map((file) => readFileSync(file, 'utf8').split(/\r?\n/).filter((line) => line.trim()).length));
 };
 
-const productionFiles = [
-  'src/application-contract.ts', 'src/appport.ts', 'src/auth.ts', 'src/authority.ts',
-  'src/contract.ts', 'src/evidence.ts', 'src/execution.ts', 'src/felt.ts',
-  'src/github.ts', 'src/server.ts', 'src/types.ts', 'src/workspace.ts',
+const reportPaths = [
+  'docs/factory-composition-audit-pre-jev.json',
+  'docs/factory-composition-audit-pre-jev.md',
 ];
-const testFiles = [
-  'tests/appport.test.ts', 'tests/authboundry.test.ts', 'tests/authority.test.ts',
-  'tests/evidence.test.ts', 'tests/execution.test.ts', 'tests/failure.test.ts',
-  'tests/helpers.ts', 'tests/package-boundary.test.ts', 'tests/studio.test.ts',
-];
+const statusLines = git('status', '--porcelain', '--untracked-files=all')
+  .split(/\r?\n/)
+  .filter(Boolean)
+  .filter((line) => !reportPaths.some((reportPath) => line.endsWith(reportPath)));
+const clean = statusLines.length === 0;
+const allowDirty = process.env.AUDIT_ALLOW_DIRTY === '1';
+if (!clean && !allowDirty) {
+  throw new Error(`Pre-JEV baseline requires a clean tree:\n${statusLines.join('\n')}`);
+}
+
+const productionFiles = walk('src').filter((file) => file.endsWith('.ts')).sort();
+const testFiles = walk('tests').filter((file) => file.endsWith('.ts')).sort();
+const integrationFiles = [
+  'src/application-contract.ts',
+  'src/appport.ts',
+  'src/auth.ts',
+  'src/authority.ts',
+  'src/execution.ts',
+  'src/felt.ts',
+  'src/integrations/github.ts',
+].filter((file) => existsSync(path.join(root, file)));
 const production = Object.fromEntries(productionFiles.map((file) => [file, loc(file)]));
 const tests = Object.fromEntries(testFiles.map((file) => [file, loc(file)]));
-const integrationFiles = [
-  'src/application-contract.ts', 'src/appport.ts', 'src/auth.ts',
-  'src/authority.ts', 'src/execution.ts', 'src/felt.ts',
-];
-const integration = Object.fromEntries(integrationFiles.map((file) => [file, production[file]]));
-const productionLoc = Object.values(production).reduce((sum, value) => sum + value, 0);
-const testLoc = Object.values(tests).reduce((sum, value) => sum + value, 0);
-const integrationLoc = Object.values(integration).reduce((sum, value) => sum + value, 0);
-const glueRatio = integrationLoc / productionLoc;
+const integration = Object.fromEntries(integrationFiles.map((file) => [file, loc(file)]));
+const productionLoc = sum(Object.values(production));
+const testLoc = sum(Object.values(tests));
+const integrationLoc = sum(Object.values(integration));
+const flowLoc = loc('.flow');
 
-const headCommit = git('rev-parse', 'HEAD');
-const baselineCommit = process.env.BASELINE_COMMIT ?? headCommit;
-if (process.env.BASELINE_COMMIT && baselineCommit !== headCommit) {
-  throw new Error(`BASELINE_COMMIT ${baselineCommit} does not match audited HEAD ${headCommit}`);
-}
-const dirtyFiles = git('status', '--porcelain', '--untracked-files=all')
-  .split(/\r?\n/)
-  .filter((line) => line && !line.slice(3).trim().endsWith('docs/factory-composition-audit-pre-jev.json'))
-  .join('\n');
-if (dirtyFiles) throw new Error(`Audited tree is not clean:\n${dirtyFiles}`);
+const packageJson = JSON.parse(read('package.json'));
+const lock = JSON.parse(read('package-lock.json'));
+const directDependencies = Object.keys(packageJson.dependencies ?? {}).sort();
+const packageEvidence = (name) => {
+  const entry = lock.packages[`node_modules/${name}`];
+  return {
+    version: entry?.version ?? null,
+    resolved: entry?.resolved ?? null,
+    integrity: entry?.integrity ?? null,
+    direct: directDependencies.includes(name),
+  };
+};
+const githubPackagePath = 'node_modules/@rkendel1/github-integration';
+const githubPackage = JSON.parse(read(`${githubPackagePath}/package.json`));
+const githubRuntimeFiles = walk(`${githubPackagePath}/dist/src`).filter((file) => file.endsWith('.js'));
+const githubRuntimeLoc = sum(githubRuntimeFiles.map((file) => loc(file)));
+const githubRepository = path.resolve(root, '..', 'github-integration');
+const githubSourceLoc = externalTypeScriptLoc(path.join(githubRepository, 'src'));
+const githubTestLoc = externalTypeScriptLoc(path.join(githubRepository, 'tests'));
+const githubRepositoryCommit = existsSync(path.join(githubRepository, '.git'))
+  ? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: githubRepository, encoding: 'utf8' }).trim()
+  : null;
 
 const sourceText = productionFiles.map(read).join('\n');
-const packageJson = JSON.parse(read('package.json'));
-const dependencyNames = Object.keys({
-  ...packageJson.dependencies,
-  ...packageJson.devDependencies,
-  ...packageJson.optionalDependencies,
-});
+const dependencyNames = [...directDependencies, ...Object.keys(packageJson.devDependencies ?? {})];
 const jevChecks = {
   dependency: dependencyNames.some((name) => /\bjev\b/i.test(name)),
   imports: /\b(?:from|import)\s*['"][^'"]*\bjev\b/i.test(sourceText),
@@ -64,88 +92,187 @@ const jevChecks = {
 if (Object.values(jevChecks).some(Boolean)) {
   throw new Error(`JEV must be absent from the pre-JEV baseline: ${JSON.stringify(jevChecks)}`);
 }
+if (directDependencies.includes('@appport/services')) {
+  throw new Error('@appport/services must not be a direct Factory dependency');
+}
+if (directDependencies.includes('express')) {
+  throw new Error('Express must not be a direct Factory dependency');
+}
+if (/@octokit\//.test(sourceText) || /@rkendel1\/github-integration\//.test(sourceText)) {
+  throw new Error('Factory must consume only the GitHub integration package root');
+}
+if (existsSync(path.join(root, 'src/github.ts'))) {
+  throw new Error('Removed dead code src/github.ts must not be present');
+}
 
-const inventory = [
-  ['Factory → FeltDB', production['src/felt.ts'], 'direct', false],
-  ['Factory → AuthBoundry', production['src/auth.ts'], 'thinAdapter', true],
-  ['Factory → .flow', production['src/authority.ts'] + production['src/application-contract.ts'], 'projection', true],
-  ['Factory → AppPort', production['src/appport.ts'], 'thinAdapter', true],
-  ['Factory → AppPort Services', production['src/appport.ts'], 'direct', false],
-  ['Factory → AppBoundry', production['src/application-contract.ts'], 'projection', true],
-  ['Factory → PAX', production['src/execution.ts'], 'serialization', true],
-  ['Factory → Studio', 0, 'direct', false],
-].map(([boundary, boundaryLoc, classification, translation]) => ({
-  boundary, classification, loc: boundaryLoc, translation, duplicateAuthority: false, shadowState: false,
-}));
-
+const baselineCommit = git('rev-parse', 'HEAD');
+if (process.env.BASELINE_COMMIT && process.env.BASELINE_COMMIT !== baselineCommit) {
+  throw new Error(`BASELINE_COMMIT ${process.env.BASELINE_COMMIT} does not match HEAD ${baselineCommit}`);
+}
 const report = {
   baseline: {
     commit: baselineCommit,
-    tree: git('rev-parse', 'HEAD^{tree}'),
-    clean: true,
-    jevIntegrated: false,
-    jevChecks,
+    tree: clean ? git('rev-parse', 'HEAD^{tree}') : null,
+    clean,
+    preview: !clean,
     flowPath: '.flow',
     flowSha256: sha256(read('.flow')),
-    dependencies: Object.fromEntries([
-      '@feltdb/core', '@authboundry/core', '@appport/sdk', '@appport/services', '@appport/appboundry',
-    ].map((name) => [name, packageEvidence(name)])),
+    jev: {
+      integrated: false,
+      authority: false,
+      persistence: false,
+      executionAuthority: false,
+      checks: jevChecks,
+    },
+  },
+  historicalGitHubFact: {
+    file: 'src/github.ts',
+    physicalLines: 33,
+    nonEmptyLines: 30,
+    referenced: false,
+    classification: 'removed unused dead code; never a GitHub SDK, transport, credential, webhook, or persistence subsystem',
   },
   methodology: {
-    loc: 'Non-empty physical lines in tracked TypeScript source/test files; blank lines excluded. Comments and type declarations count.',
-    excluded: ['node_modules', 'dist', 'generated code', 'lockfiles', 'vendored code'],
-    integrationLoc: 'A line belongs to integration LOC when its primary purpose is translating, adapting, invoking, persisting across, or enforcing a boundary between Factory and another architectural component. Shared orchestration that merely calls a boundary is not integration unless it performs boundary-specific work.',
-    authorityTsRule: 'authority.ts integration LOC includes only the portion that resolves .flow capability authority and derives the external execution/application contract; generic authorization orchestration is excluded.',
-    classification: {
-      loc: 'mechanical',
-      dependencyGraph: 'mechanical_plus_review',
-      conceptClassification: 'manual_review',
-      authorityAudit: 'manual_review',
-      friction: 'manual_review',
-    },
+    loc: 'Non-empty physical lines; comments and type declarations count.',
+    factoryScope: 'src/**/*.ts',
+    testScope: 'tests/**/*.ts',
+    integrationScope: integrationFiles,
+    excludedFromFactory: ['node_modules', 'dist', 'vendored package artifacts', 'lockfiles'],
+    githubIntegrationRuntime: 'Compiled JavaScript shipped by the installed 1.0.0 artifact; reported separately and never counted as Factory LOC.',
+    githubIntegrationTests: 'Not distributed in the package artifact. When the canonical sibling checkout is available, its source and test LOC are recorded as external metrics.',
   },
   loc: {
-    production: productionLoc, tests: testLoc, integration: integrationLoc,
-    integrationFiles: integrationFiles.length, productionFiles: production, testFiles: tests,
-    categories: {
-      factoryOrchestration: production['src/server.ts'], domainModel: production['src/types.ts'],
-      httpApi: production['src/server.ts'], persistenceIntegration: production['src/felt.ts'],
-      contractProjection: production['src/application-contract.ts'],
-      executionIntegration: production['src/execution.ts'], adapterGlue: integrationLoc,
+    factoryApplication: productionLoc,
+    factoryIntegrationAdapters: integrationLoc,
+    factoryTests: testLoc,
+    flow: flowLoc,
+    githubIntegrationPackagedRuntime: githubRuntimeLoc,
+    githubIntegrationSource: githubSourceLoc,
+    githubIntegrationTests: githubTestLoc,
+    githubIntegrationRepositoryCommit: githubRepositoryCommit,
+    productionFiles: production,
+    integrationFiles: integration,
+    testFiles: tests,
+  },
+  dependencies: {
+    direct: Object.fromEntries(directDependencies.map((name) => [name, packageEvidence(name)])),
+    githubIntegration: {
+      package: packageEvidence('@rkendel1/github-integration'),
+      declaredDependencies: githubPackage.dependencies,
+      appPortServicesOwnership: {
+        factoryDirect: false,
+        integrationTransitive: githubPackage.dependencies['@appport/services'] ?? null,
+      },
     },
   },
-  integration: {
-    total: integrationLoc, glueLoc: integrationLoc, glueRatio, files: integration,
-    direct: 3, thinAdapters: 2, projections: 2, serialization: 1, semanticTranslations: 0,
-    classifications: {
-      direct: 3, thinAdapters: 2, projections: 2, serialization: 1,
-      semanticTranslations: 0, duplicateModels: 0, authorityDuplications: 0,
-    },
-  },
-  compositionInventory: inventory,
-  boundaries: {
-    authorityViolations: 0, persistenceViolations: 0, shadowState: 0,
-    integrations: {
-      'Factory ↔ FeltDB': { loc: production['src/felt.ts'], files: ['src/felt.ts'], classification: 'direct composition' },
-      'Factory ↔ AuthBoundry': { loc: production['src/auth.ts'], files: ['src/auth.ts'], classification: 'thin adapter' },
-      'Factory ↔ .flow': { loc: production['src/authority.ts'] + production['src/application-contract.ts'], files: ['src/authority.ts', 'src/application-contract.ts'], classification: 'projection' },
-      'Factory ↔ AppPort': { loc: production['src/appport.ts'], files: ['src/appport.ts'], classification: 'thin adapter' },
-      'Factory ↔ AppPort Services': { loc: production['src/appport.ts'], files: ['src/appport.ts'], classification: 'direct composition' },
-      'Factory ↔ AppBoundry': { loc: production['src/application-contract.ts'], files: ['src/application-contract.ts'], classification: 'projection' },
-      'Factory ↔ PAX': { loc: production['src/execution.ts'], files: ['src/execution.ts'], classification: 'serialization' },
-      'Factory ↔ Studio': { loc: 0, files: [], classification: 'direct composition' },
-    },
-  },
-  concepts: { canonical: 11, projected: 7, duplicated: 0, authorityDuplications: 0 },
-  processState: {
-    configuration: ['process.env in src/felt.ts, src/auth.ts, src/execution.ts, src/server.ts'],
-    ephemeralExecution: ['child process handles and workspace paths in src/execution.ts and src/workspace.ts'],
-    cache: [], authority: [], durableStateSubstitute: [],
+  authorityInventory: [
+    { authority: 'AuthBoundry', owns: ['principal', 'tenant', 'session', 'delegation', 'external authorization'] },
+    { authority: '.flow', owns: ['application capabilities', 'execution mode', 'operation mapping', 'grants', 'limits'] },
+    { authority: 'Factory ExecutionContract', owns: ['authorized immutable execution projection and fingerprint'] },
+    { authority: 'FeltDB', owns: ['durable Work, authorization, run, contract, event, artifact, and evidence state'] },
+    { authority: '@rkendel1/github-integration', owns: ['GitHub transport', 'credentials', 'webhooks', 'provider state', 'normalized GitHub behavior'] },
+  ],
+  durableStateInventory: [
+    'Work', 'ExecutionRequest', 'ExecutionContract', 'Run', 'RunEvent',
+    'Artifact', 'Evidence', 'AuthorizationDecision',
+  ],
+  boundaryInventory: [
+    { boundary: 'Factory → FeltDB', file: 'src/felt.ts', classification: 'direct composition' },
+    { boundary: 'Factory → AuthBoundry', file: 'src/auth.ts', classification: 'thin adapter' },
+    { boundary: 'Factory → .flow', file: 'src/authority.ts', classification: 'projection' },
+    { boundary: 'Factory → AppPort', file: 'src/appport.ts', classification: 'thin contract adapter' },
+    { boundary: 'Factory → AppBoundry', file: 'src/application-contract.ts', classification: 'projection' },
+    { boundary: 'Factory → PAX/OS', file: 'src/execution.ts', classification: 'serialization and process boundary' },
+    { boundary: 'Factory → GitHub integration', file: 'src/integrations/github.ts', classification: 'thin package consumer adapter' },
+    { boundary: 'Factory → AppPort Services', file: null, classification: 'absent; integration-owned transitive dependency only' },
+  ],
+  findings: {
+    authorityViolations: 0,
+    persistenceViolations: 0,
+    githubSdkImports: 0,
+    githubInternalImports: 0,
+    factoryGitHubCredentialStores: 0,
+    factoryGitHubWebhookEndpoints: 0,
+    factoryGitHubPersistenceCollections: 0,
+    directAppPortServicesDependency: false,
+    directExpressDependency: false,
   },
 };
 
 writeFileSync(path.join(root, 'docs/factory-composition-audit-pre-jev.json'), `${JSON.stringify(report, null, 2)}\n`);
+const dependencyRows = Object.entries(report.dependencies.direct)
+  .map(([name, evidence]) => `| \`${name}\` | \`${evidence.version}\` | ${evidence.integrity ? `\`${evidence.integrity}\`` : 'local file artifact'} |`)
+  .join('\n');
+const boundaryRows = report.boundaryInventory
+  .map((item) => `| ${item.boundary} | ${item.classification} | ${item.file ? `\`${item.file}\`` : 'none'} |`)
+  .join('\n');
+const markdown = `# Factory Composition Audit — Pre-JEV Baseline
+
+## Baseline
+
+${clean ? `Clean commit \`${baselineCommit}\`, tree \`${report.baseline.tree}\`.` : `Working-tree preview based on HEAD \`${baselineCommit}\`. Rerun after committing to record the clean baseline commit and tree.`}
+
+- JEV integrated: **NO**
+- JEV authority: **NO**
+- JEV persistence: **NO**
+- JEV execution authority: **NO**
+- Canonical flow: \`.flow\` (${flowLoc} LOC, SHA-256 \`${report.baseline.flowSha256}\`)
+
+## LOC
+
+| Measure | LOC |
+| --- | ---: |
+| Factory application source | ${productionLoc} |
+| Factory integration/adapter subset | ${integrationLoc} |
+| Factory tests | ${testLoc} |
+| \`.flow\` | ${flowLoc} |
+| Packaged GitHub integration runtime (separate) | ${githubRuntimeLoc} |
+| GitHub integration source checkout (separate) | ${githubSourceLoc ?? 'unavailable'} |
+| GitHub integration tests (separate) | ${githubTestLoc ?? 'unavailable'} |
+
+The packaged integration is not Factory code. The historical Factory GitHub footprint was the unused 33-physical-line \`src/github.ts\` formatter; it was removed as dead code, not extracted as a subsystem.
+
+## Direct dependencies
+
+| Package | Version | Integrity/resolution |
+| --- | --- | --- |
+${dependencyRows}
+
+Factory has no direct \`@appport/services\` or Express dependency. \`@rkendel1/github-integration@1.0.0\` declares \`@appport/services@${githubPackage.dependencies['@appport/services']}\`; that dependency is integration-owned.
+
+## Boundary inventory
+
+| Boundary | Classification | Factory file |
+| --- | --- | --- |
+${boundaryRows}
+
+## Authority and durable state
+
+AuthBoundry owns identity and external authorization. \`.flow\` owns application capabilities and execution declarations. Factory creates the immutable authorized ExecutionContract. FeltDB owns all durable Factory state and evidence. The GitHub package owns GitHub transport, credentials, webhooks, normalized behavior, and provider persistence.
+
+Factory durable collections remain: ${report.durableStateInventory.map((name) => `\`${name}\``).join(', ')}. There are no Factory GitHub credential, webhook, provider-model, or persistence collections.
+
+## Reproduction
+
+Run from a clean committed tree:
+
+\`\`\`sh
+npm ci
+BASELINE_COMMIT="$(git rev-parse HEAD)" node scripts/audit-factory.mjs
+\`\`\`
+
+For a non-baseline working-tree preview only, use \`AUDIT_ALLOW_DIRTY=1\`.
+`;
+writeFileSync(path.join(root, 'docs/factory-composition-audit-pre-jev.md'), markdown);
 console.log(JSON.stringify({
-  baselineCommit, tree: report.baseline.tree, productionLoc, testLoc, integrationLoc, glueRatio,
-  flowSha256: report.baseline.flowSha256,
+  baselineCommit,
+  tree: report.baseline.tree,
+  clean,
+  productionLoc,
+  testLoc,
+  integrationLoc,
+  flowLoc,
+  githubRuntimeLoc,
+  githubSourceLoc,
+  githubTestLoc,
 }, null, 2));

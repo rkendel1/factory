@@ -27,7 +27,17 @@ export function contractFingerprint(contract: FingerprintableContract | Executio
 
 export function withContractFingerprint(contract: Omit<ExecutionContract, 'fingerprint'>): ExecutionContract {
   const fingerprint = contractFingerprint(contract);
-  return Object.freeze({ ...contract, fingerprint });
+  return deepFreeze({ ...contract, fingerprint });
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
 }
 
 export function assertContractIntegrity(contract: ExecutionContract): void {
