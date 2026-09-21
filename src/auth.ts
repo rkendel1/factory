@@ -47,7 +47,7 @@ export class AuthBoundryAuthorizationError extends Error {
 
 function requestHeaders(request: IncomingMessage): Record<string, string> {
   const headers: Record<string, string> = {};
-  for (const name of ['authorization', 'cookie']) {
+  for (const name of ['authorization', 'cookie', 'x-request-id']) {
     const value = request.headers[name];
     if (typeof value === 'string') {
       headers[name] = value;

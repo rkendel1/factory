@@ -79,3 +79,13 @@ test('changing .flow changes the canonical application projection', () => {
     original.appBoundry.contractFingerprint,
   );
 });
+
+test('authorization application identity is sourced from .flow', () => {
+  const flow = loadFactoryFlow();
+  const changed = structuredClone(flow);
+  const authorization = changed.capabilities.find((block) => block.statements.includes('application factory'));
+  assert.ok(authorization);
+  authorization.statements = authorization.statements.map((statement) =>
+    statement === 'application factory' ? 'application registered_factory' : statement);
+  assert.equal(createCanonicalApplicationContract(changed).authorization.applicationId, 'registered_factory');
+});

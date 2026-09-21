@@ -71,12 +71,12 @@ function appPortCapabilityName(operation: string): string {
 
 export function createCanonicalApplicationContract(flowSpec: FlowSpec): CanonicalApplicationContract {
   const authorizationBlock = flowSpec.capabilities.find((block) =>
-    statementValue(block, 'application ') === 'factory');
+    Boolean(statementValue(block, 'application ')));
   if (!authorizationBlock) {
     throw new Error('Factory .flow must declare its application authorization capabilities');
   }
   const authorization = {
-    applicationId: 'factory',
+    applicationId: statementValue(authorizationBlock, 'application ')!,
     capabilities: statementValues(authorizationBlock, 'grant '),
   };
   const capabilities = flowSpec.capabilities.flatMap((block): FlowCapabilityContract[] => {
