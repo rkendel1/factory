@@ -66,6 +66,18 @@ app software_factory {
     reason: text
     created_at: datetime
   }
+  capability FactoryApplicationAccess {
+    visibility internal
+    application factory
+    grant factory.ui.read
+    grant configuration.read
+    grant configuration.write
+    grant configuration.delete
+    grant secret.rotate
+    grant apikeys.read
+    grant apikeys.create
+    grant apikeys.revoke
+  }
   capability RepositoryEchoExecution {
     visibility internal
     operation repo-echo

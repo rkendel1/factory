@@ -19,7 +19,25 @@ const request = {
 test('missing .flow authority rejects execution', async () => {
   const root = await createTempWorkspace('authority-flow');
   const flowPath = path.join(root, '.flow');
-  await writeFile(flowPath, 'flow_version 1\napp broken {\n  collection Work {\n    owner_principal: text\n  }\n}\n', 'utf8');
+  await writeFile(flowPath, `flow_version 1
+app broken {
+  collection Work {
+    owner_principal: text
+  }
+  capability FactoryApplicationAccess {
+    visibility internal
+    application factory
+    grant factory.ui.read
+    grant configuration.read
+    grant configuration.write
+    grant configuration.delete
+    grant secret.rotate
+    grant apikeys.read
+    grant apikeys.create
+    grant apikeys.revoke
+  }
+}
+`, 'utf8');
   const service = await createService({ flowPath, workingDirectory: root, namespace: 'authority-flow' });
   await seedWork(service);
 
