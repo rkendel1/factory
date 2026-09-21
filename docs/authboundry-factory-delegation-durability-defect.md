@@ -1,6 +1,12 @@
 # AuthBoundry Factory delegation durability defect
 
-Status: open upstream blocker, reproduced in production on 2026-09-21.
+Status: fixed upstream. AuthBoundry now re-asserts the durable Factory
+application delegation on every bootstrap under the deterministic id
+`factory-application-<tenant>-delegation`, and refuses to assign that authority
+to a principal that does not exist. Factory's side of the association is
+described in [factory-authority-association.md](factory-authority-association.md).
+
+The reproduction below is retained as the record of the original defect.
 
 ## Impact
 

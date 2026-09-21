@@ -53,6 +53,14 @@ export interface AuthorizationDecisionRecord {
   tenantId?: string;
   authSession?: Record<string, unknown> | null;
   delegation?: Record<string, unknown> | null;
+  /**
+   * Provenance of the AuthBoundry grant behind this decision: the authority
+   * basis and the delegation that carried it. Recording both is what lets the
+   * durable chain answer which application association authorized a run,
+   * rather than only that something did.
+   */
+  authority?: string;
+  delegationId?: string | null;
   operation: string;
   decision: 'granted' | 'rejected';
   reason: string;
@@ -67,6 +75,20 @@ export interface ExecutionContract {
   tenantId?: string;
   authorizationDecisionId: string;
   fingerprint: string;
+  /**
+   * The application context AuthBoundry authorized this principal to act in.
+   *
+   * It is the authority's answer, not `.flow`'s declaration, and it is required
+   * for a Factory service principal: an Action executes in the application the
+   * authority named or it does not execute.
+   */
+  authorizedApplication?: {
+    applicationId: string;
+    resource: string;
+    tenantId: string;
+    principalId: string;
+    delegationId: string;
+  };
   applicationContract?: {
     id: string;
     version: string;
@@ -188,6 +210,13 @@ export interface StructuredEvidence {
   contractId?: string;
   contractFingerprint: string;
   applicationContractFingerprint?: string;
+  authorizedApplication?: {
+    applicationId: string;
+    resource: string;
+    tenantId: string;
+    principalId: string;
+    delegationId: string;
+  };
   principal?: string;
   tenantId?: string;
   operation?: string;
@@ -258,6 +287,15 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   authBoundryTenantId?: string;
   authenticator?: import('./auth.js').Authenticator;
   appportPath?: string;
+  /**
+   * Operator credential for AuthBoundry's control plane. Provisioning and
+   * association verification need it; nothing else in Factory does, and Factory
+   * never falls back to local authority when it is absent.
+   */
+  authBoundryOperatorCredential?: string;
+  /** The principal whose authority the Factory application delegation narrows. */
+  authBoundryDelegator?: string;
+  authBoundryControlPlane?: import('./provisioning.js').AuthBoundryControlPlane;
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;
 }

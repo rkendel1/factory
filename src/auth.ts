@@ -20,6 +20,23 @@ export interface AuthenticatedContext {
   delegation: Record<string, unknown> | null;
   boundaryVerified?: boolean;
   authorizedCapabilities?: string[];
+  /**
+   * Provenance of the grant AuthBoundry made for this operation: `claim` when
+   * the principal's own claims satisfied a policy, `delegated` when it acted on
+   * delegated authority. `delegationId` names the delegation that carried it.
+   *
+   * Factory keeps both because "allowed" alone cannot answer whether a Factory
+   * agent was authorized through the Factory application association or through
+   * some other authority it happens to hold.
+   */
+  authority?: string;
+  delegationId?: string | null;
+}
+
+export interface AuthorizationGrant {
+  allowed: boolean;
+  authority?: string;
+  delegationId: string | null;
 }
 
 export interface Authenticator {
@@ -78,19 +95,55 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
     throw new Error('AuthBoundry URL is required');
   }
 
-  const clientFor = (request: IncomingMessage, credential?: string): AuthBoundryClient => createAuthBoundry({
-    baseUrl,
-    fetch: (input, init) => fetch(input, {
+  const credentialFetchFor = (request: IncomingMessage, credential?: string): typeof fetch =>
+    ((input, init) => fetch(input, {
       ...init,
       headers: {
         ...(credential ? { authorization: `Bearer ${credential}` } : requestHeaders(request)),
         ...(init?.headers ?? {}),
       },
-    }),
+    })) as typeof fetch;
+
+  const clientFor = (request: IncomingMessage, credential?: string): AuthBoundryClient => createAuthBoundry({
+    baseUrl,
+    fetch: credentialFetchFor(request, credential),
   });
 
+  /**
+   * Ask AuthBoundry its own authority question and keep the whole answer.
+   *
+   * `AuthBoundryClient.authorize` collapses the decision to a boolean, which
+   * discards the grant's provenance. Factory needs that provenance to hold a
+   * service principal to its application association, so it reads the published
+   * `/auth/authorize` response directly rather than re-deriving anything.
+   */
+  const authorizeWithProvenance = async (
+    credentialFetch: typeof fetch,
+    capability: string,
+  ): Promise<AuthorizationGrant> => {
+    const response = await credentialFetch(`${baseUrl.replace(/\/$/, '')}/auth/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ capability }),
+    });
+    if (!response.ok) {
+      throw new AuthBoundryAuthorizationError(capability);
+    }
+    const body = await response.json() as {
+      allowed?: boolean;
+      principal?: string;
+      authority?: string;
+      delegation?: string | null;
+    };
+    return {
+      allowed: body.allowed === true,
+      ...(typeof body.authority === 'string' ? { authority: body.authority } : {}),
+      delegationId: typeof body.delegation === 'string' ? body.delegation : null,
+    };
+  };
+
   const resolve = async (request: IncomingMessage): Promise<{
-    client: AuthBoundryClient;
+    credentialFetch: typeof fetch;
     context: AuthenticatedContext;
   }> => {
     const browser = await createFactoryBrowserAdapter(config).session({
@@ -100,7 +153,7 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
     if (browser) {
       const projection = browser.projection;
       return {
-        client: clientFor(request, browser.credential),
+        credentialFetch: credentialFetchFor(request, browser.credential),
         context: {
           principal: projection.principal.id,
           tenant: projection.tenant.id,
@@ -118,7 +171,10 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
       throw new AuthBoundryAuthenticationError();
     }
     const client = clientFor(request);
-    return { client, context: contextFromAuth(await client.session()) };
+    return {
+      credentialFetch: credentialFetchFor(request),
+      context: contextFromAuth(await client.session()),
+    };
   };
 
   return {
@@ -126,11 +182,16 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
       return (await resolve(request)).context;
     },
     async authenticate(request: IncomingMessage, operation: string): Promise<AuthenticatedContext> {
-      const { client, context } = await resolve(request);
-      if (!(await client.authorize(operation))) {
+      const { credentialFetch, context } = await resolve(request);
+      const grant = await authorizeWithProvenance(credentialFetch, operation);
+      if (!grant.allowed) {
         throw new AuthBoundryAuthorizationError(operation);
       }
-      return context;
+      return {
+        ...context,
+        ...(grant.authority === undefined ? {} : { authority: grant.authority }),
+        delegationId: grant.delegationId,
+      };
     },
   };
 }

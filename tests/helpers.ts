@@ -36,6 +36,8 @@ export async function createService(config: Partial<FactoryServiceConfig> = {}):
     authenticator: config.authenticator,
     appPortServices: config.appPortServices,
     githubIntegration: config.githubIntegration,
+    ...(config.authBoundryControlPlane ? { authBoundryControlPlane: config.authBoundryControlPlane } : {}),
+    ...(config.authBoundryTenantId ? { authBoundryTenantId: config.authBoundryTenantId } : {}),
   });
 }
 
@@ -49,6 +51,7 @@ export async function seedWork(service: FactoryService, work: Partial<WorkRecord
     repositoryName: work.repositoryName ?? 'factory',
     repositoryRef: work.repositoryRef ?? 'main',
     status: work.status ?? 'active',
+    ...(work.tenantId ? { tenantId: work.tenantId } : {}),
     ...(work.githubConnectionId ? { githubConnectionId: work.githubConnectionId } : {}),
   };
 

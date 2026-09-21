@@ -73,6 +73,7 @@ Protected requests are authenticated and authorized by AuthBoundry. Configure it
 - Execution contracts are service-owned artifacts. The current `.flow` policy grammar does not express a distinct service writer subject, so the service enforces create-once semantics and rejects mutations. There is intentionally no contract creation endpoint.
 - Evidence records the request, authorization decision, contract fingerprint, principal, operation, repository ref, execution mode, and PAX invocation needed to reconstruct the durable chain.
 - Every protected read and cancellation is checked against the AuthBoundry principal and tenant. A run ID is not a bearer capability, and AuthBoundry outages fail closed.
+- Factory registers its `.flow` service principals as AuthBoundry agents and resolves its authority from the Factory application association AuthBoundry maintains. The application id in `.flow` is a contract identity, not a grant: an Action executes in the application context AuthBoundry authorized, and a service principal with no such context fails closed. See [docs/factory-authority-association.md](docs/factory-authority-association.md).
 - The Factory Runner never executes caller-supplied commands.
 - Remote FeltDB must be explicitly configured with `FELTDB_URL`; the server does not silently fall back to local storage for production authority.
 
