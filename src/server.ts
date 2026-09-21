@@ -143,7 +143,7 @@ export class FactoryService {
             url: config.serverUrl,
             token: config.serverToken,
             applicationId: application.identity.id,
-            environment: config.environmentId,
+            environment: this.environmentId,
           }
         : {
             mode: 'local',
