@@ -80,6 +80,17 @@ client and password policy, and OAuth begin/callback are relayed. Arbitrary
 AuthBoundry control-plane routes are not exposed, and caller-provided return
 targets do not influence redirects.
 
+Production verification after deployment:
+
+- `HEAD /` returns 302 to `/auth/login?return_to=%2F`.
+- The relayed login route returns the published AuthBoundry sign-in page.
+- An external `return` query still redirects only to the fixed local login.
+- `/health` returns 200 while unauthenticated `/v1/ui` and `/configuration`
+  return 401.
+- The published AuthBoundry browser client returns 200, fabricated OAuth state
+  returns 400, and an unrelated AuthBoundry control-plane route returns 404.
+- Fly's configured health check passes on the deployed image.
+
 ## Verification commands
 
 Local and artifact verification:
