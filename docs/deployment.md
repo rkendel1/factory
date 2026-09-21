@@ -60,6 +60,21 @@ setting, followed by `Factory starting...`.
 The health response contains only safe service, runtime, and PAX version
 metadata. It does not authenticate or execute a workload.
 
+## Browser entrypoint
+
+Factory's public `/` route checks the existing AuthBoundry session. An
+unauthenticated browser is redirected to
+`/auth/login?return_to=%2F`; an authenticated browser is redirected to the
+existing `/configuration` AppPort Services surface. The login, session, logout,
+published client, password-policy, and OAuth begin/callback requests are
+relayed narrowly to `AUTHBOUNDRY_URL` on the Factory origin so AuthBoundry's
+opaque, host-scoped session cookie returns to Factory. AuthBoundry still creates,
+validates, authorizes, and revokes the session.
+
+No additional Factory authentication setting is required. Return destinations
+are fixed local paths; Factory does not consume a caller-provided return URL.
+The `/v1/ui`, `/configuration`, and execution routes remain protected.
+
 ## Smoke test
 
 The optional authenticated smoke test requires an AuthBoundry bearer token and

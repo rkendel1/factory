@@ -5,7 +5,12 @@ import { authorizeExecution, getOperationAuthorities } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
 import { executeContract, verifyPax, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
-import { createAuthBoundryAuthenticator, type AuthenticatedContext } from './auth.js';
+import {
+  createAuthBoundryAuthenticator,
+  isAuthBoundryBrowserPath,
+  proxyAuthBoundryBrowserRequest,
+  type AuthenticatedContext,
+} from './auth.js';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
 import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
@@ -581,6 +586,29 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/') {
+        try {
+          const browserAuthenticator = getAuthenticator();
+          if (browserAuthenticator.session) {
+            await browserAuthenticator.session(request);
+          } else {
+            await browserAuthenticator.authenticate(request, 'factory.ui.read');
+          }
+          response.writeHead(302, { location: '/configuration' });
+        } catch {
+          response.writeHead(302, { location: '/auth/login?return_to=%2F' });
+        }
+        response.end();
+        return;
+      }
+
+      if (isAuthBoundryBrowserPath(url.pathname)) {
+        const authBoundryUrl = config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL;
+        if (!authBoundryUrl) throw new Error('AuthBoundry URL is required');
+        await proxyAuthBoundryBrowserRequest(request, response, authBoundryUrl);
+        return;
+      }
 
       if (request.method === 'GET' && url.pathname === '/health') {
         writeJson(response, 200, await service.health());

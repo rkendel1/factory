@@ -68,6 +68,18 @@ Audit date: 2026-09-21. Application: `factory-idvhpa`, region: `iad`.
   provenance, and retrieval of pre-restart application records remain pending;
   these checks must not be bypassed with a fabricated identity.
 
+## Browser entrypoint follow-up
+
+The original hardened deployment intentionally exposed APIs and package-owned
+management routes but had no handler for `/`. Factory now checks the canonical
+AuthBoundry session at the public root and redirects unauthenticated users to
+the existing AuthBoundry login surface on the Factory origin. Authenticated
+users continue to the package-owned `/configuration` surface. Only the
+AuthBoundry browser routes required for login/session/logout, its published
+client and password policy, and OAuth begin/callback are relayed. Arbitrary
+AuthBoundry control-plane routes are not exposed, and caller-provided return
+targets do not influence redirects.
+
 ## Verification commands
 
 Local and artifact verification:

@@ -12,6 +12,9 @@ Webhooks, and Jobs management surfaces. The same principal, tenant, application,
 environment, and capabilities context is passed to every contribution.
 
 The package's configuration API and management router are mounted directly.
+Factory `/` is only the browser authentication entrypoint: it redirects through
+the existing AuthBoundry browser surface and then to `/configuration`. It does
+not render another shell or own session state.
 Factory's adapter only translates authenticated AuthBoundry context into the
 principal shape expected by AppPort Services; it does not create a second
 configuration store, secret resolver, or management screen. Secret values are

@@ -56,6 +56,7 @@ project, compiles a public import, and executes a state operation.
 - `POST /v1/runs/:runId/cancel`
 - `GET /v1/ui` (contextual Factory `AppPort/ui/1` discovery)
 - `/v1/configuration` and AppPort Services management routes
+- `/` as the browser entrypoint into AuthBoundry and the composed management UI
 - `GET /health`
 
 Protected requests are authenticated and authorized by AuthBoundry. Configure its canonical origin with `AUTHBOUNDRY_URL` (or `authBoundryUrl` when embedding the service); the runner verifies the AuthBoundry session and asks it to authorize each operation. The request body never supplies the principal or tenant.
