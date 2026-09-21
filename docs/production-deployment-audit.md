@@ -100,9 +100,10 @@ deployment-owned AuthBoundry state.
 
 The Factory consumer now uses `@authboundry/core@1.15.2`'s supported server
 adapter. Production deployment remains intentionally blocked until the
-AuthBoundry service is upgraded and registers relying application `factory`
-with callback `/api/auth/callback`: on 2026-09-21 the live browser-begin route
-returned HTTP 403 `unclassified_route`. Factory also has no
+AuthBoundry service registers relying application `factory` with callback
+`/api/auth/callback`: after the 2026-09-21 AuthBoundry upgrade, the live route
+works for registered application `portal` but returns HTTP 400
+`unknown_application` for `factory`. Factory also has no
 `AUTHBOUNDRY_BROWSER_COOKIE_SECRET` Fly secret yet. Do not deploy the consumer
 until both deployment-owned prerequisites exist; the current release fails
 closed rather than restoring the former proxy workaround.
