@@ -118,6 +118,7 @@ test('packaged management screens are mounted rather than recreated by Factory',
     assert.match(html, /<h2>Variables<\/h2>/);
     assert.match(html, /<h2>Secrets<\/h2>/);
     assert.match(html, /<option>development<\/option>/);
+    assert.match(html, /error\?\.(?:message)/);
     assert.doesNotMatch(html, /localStorage|sessionStorage|secret-value-that-must-not-be-returned/);
   });
 });
@@ -189,12 +190,18 @@ test('AppPort Services returns 403 when an authenticated principal is denied', a
     },
   };
   await withServicesServer(denied, async (origin) => {
-    const response = await fetch(`${origin}/v1/configuration`);
+    const response = await fetch(`${origin}/v1/configuration`, { headers: { 'x-request-id': 'cfg_test-denied' } });
     assert.equal(response.status, 403);
-    assert.deepEqual(await response.json(), {
-      error: 'AuthBoundry denied operation configuration.read',
-      code: 'FORBIDDEN',
-    });
+    const body = await response.json() as {
+      error: { message: string };
+      code: string;
+      message: string;
+      requestId: string;
+    };
+    assert.equal(body.code, 'APPPORT_AUTHORIZATION_DENIED');
+    assert.equal(body.requestId, 'cfg_test-denied');
+    assert.match(body.error.message, /Configuration request failed \(403\).*Request ID: cfg_test-denied/);
+    assert.equal(response.headers.get('x-request-id'), 'cfg_test-denied');
   });
 });
 
@@ -207,10 +214,10 @@ test('AppPort Services returns 401 when no AuthBoundry session exists', async ()
   await withServicesServer(unauthenticated, async (origin) => {
     const response = await fetch(`${origin}/v1/configuration`);
     assert.equal(response.status, 401);
-    assert.deepEqual(await response.json(), {
-      error: 'AuthBoundry authentication is required',
-      code: 'UNAUTHENTICATED',
-    });
+    const body = await response.json() as { code: string; message: string; requestId: string };
+    assert.equal(body.code, 'APPPORT_AUTHENTICATION_REQUIRED');
+    assert.match(body.message, /AuthBoundry authentication is required/);
+    assert.match(body.requestId, /^cfg_/);
   });
 });
 
@@ -221,8 +228,10 @@ test('service unavailability returns a sanitized failure without a local fallbac
   await withServicesServer(authorized([]), async (origin) => {
     const response = await fetch(`${origin}/v1/configuration`);
     assert.equal(response.status, 500);
-    const text = await response.text();
-    assert.match(text, /Configuration operation failed/);
-    assert.doesNotMatch(text, /backend unavailable|secret-value/);
+    const body = await response.json() as { code: string; message: string; error: { message: string } };
+    assert.equal(body.code, 'APPPORT_SERVICES_FAILURE');
+    assert.match(body.message, /could not complete/);
+    assert.match(body.error.message, /Request ID: cfg_/);
+    assert.doesNotMatch(JSON.stringify(body), /backend unavailable|secret-value/);
   }, services);
 });
