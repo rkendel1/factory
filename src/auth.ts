@@ -1,6 +1,16 @@
 import { createAuthBoundry, type AuthBoundryClient, type AuthProjection } from '@authboundry/core';
+import {
+  createBrowserRelyingApplicationAdapter,
+  type BrowserRelyingApplicationAdapter,
+} from '@authboundry/core/server';
 import type { IncomingMessage } from 'node:http';
 import type { FactoryServiceConfig } from './types.js';
+
+export const FACTORY_BROWSER_APPLICATION_ID = 'factory';
+export const FACTORY_BROWSER_CALLBACK_PATH = '/api/auth/callback';
+export const FACTORY_BROWSER_RETURN_PATHS = [
+  '/', '/configuration', '/api-keys', '/v1/ui', '/runs', '/work', '/factory/runs', '/factory/work',
+] as const;
 
 export interface AuthenticatedContext {
   principal: string;
@@ -50,25 +60,55 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
     throw new Error('AuthBoundry URL is required');
   }
 
-  const clientFor = (request: IncomingMessage): AuthBoundryClient => createAuthBoundry({
+  const clientFor = (request: IncomingMessage, credential?: string): AuthBoundryClient => createAuthBoundry({
     baseUrl,
     fetch: (input, init) => fetch(input, {
       ...init,
       headers: {
-        ...requestHeaders(request),
+        ...(credential ? { authorization: `Bearer ${credential}` } : requestHeaders(request)),
         ...(init?.headers ?? {}),
       },
     }),
   });
 
+  const resolve = async (request: IncomingMessage): Promise<{
+    client: AuthBoundryClient;
+    context: AuthenticatedContext;
+  }> => {
+    const browser = await createFactoryBrowserAdapter(config).session({
+      application: FACTORY_BROWSER_APPLICATION_ID,
+      cookieHeader: request.headers.cookie,
+    });
+    if (browser) {
+      const projection = browser.projection;
+      return {
+        client: clientFor(request, browser.credential),
+        context: {
+          principal: projection.principal.id,
+          tenant: projection.tenant.id,
+          claims: projection.claims,
+          session: projection.session,
+          delegation: projection.delegation && typeof projection.delegation === 'object'
+            ? projection.delegation as Record<string, unknown>
+            : null,
+          boundaryVerified: true,
+          authorizedCapabilities: [...projection.capabilities],
+        },
+      };
+    }
+    if (typeof request.headers.authorization !== 'string') {
+      throw new Error('AuthBoundry authentication is required');
+    }
+    const client = clientFor(request);
+    return { client, context: contextFromAuth(await client.session()) };
+  };
+
   return {
     async session(request: IncomingMessage): Promise<AuthenticatedContext> {
-      return contextFromAuth(await clientFor(request).session());
+      return (await resolve(request)).context;
     },
     async authenticate(request: IncomingMessage, operation: string): Promise<AuthenticatedContext> {
-      const client = clientFor(request);
-      const auth = await client.session();
-      const context = contextFromAuth(auth);
+      const { client, context } = await resolve(request);
       if (!(await client.authorize(operation))) {
         throw new Error(`AuthBoundry denied operation ${operation}`);
       }
@@ -77,69 +117,20 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
   };
 }
 
-export function isAuthBoundryBrowserPath(pathname: string): boolean {
-  const browserRoutes = [
-    '/auth/login', '/auth/sign-in', '/auth/logout', '/auth/sign-out',
-    '/auth/session', '/auth/providers', '/auth/signup',
-    '/auth/password/change', '/auth/password/forgot', '/auth/password/reset',
-    '/auth/email/verification', '/auth/mfa', '/auth/passkeys', '/auth/recovery',
-    '/auth/account/links',
-  ];
-  return browserRoutes.includes(pathname)
-    || pathname === '/authboundry/client.js'
-    || pathname === '/_authboundry/password-policy'
-    || pathname === '/_authboundry/begin'
-    || /^\/_authboundry\/callback\/[^/]+$/.test(pathname);
-}
-
-async function requestBody(request: IncomingMessage): Promise<Buffer | undefined> {
-  if (request.method === 'GET' || request.method === 'HEAD') return undefined;
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += value.length;
-    if (size > 1_048_576) throw new Error('AuthBoundry browser request body is too large');
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks);
-}
-
-export async function proxyAuthBoundryBrowserRequest(
-  request: IncomingMessage,
-  response: import('node:http').ServerResponse,
-  baseUrl: string,
-): Promise<void> {
-  const incomingUrl = new URL(request.url ?? '/', 'http://factory.invalid');
-  if (!isAuthBoundryBrowserPath(incomingUrl.pathname)) {
-    response.writeHead(404, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ error: 'Not found' }));
-    return;
-  }
-
-  const headers = new Headers();
-  for (const name of ['accept', 'authorization', 'content-type', 'cookie', 'user-agent']) {
-    const value = request.headers[name];
-    if (typeof value === 'string') headers.set(name, value);
-  }
-  if (request.headers.host) headers.set('x-forwarded-host', request.headers.host);
-  headers.set('x-forwarded-proto', 'https');
-
-  const upstream = await fetch(`${baseUrl.replace(/\/$/, '')}${incomingUrl.pathname}${incomingUrl.search}`, {
-    method: request.method,
-    headers,
-    body: await requestBody(request),
-    redirect: 'manual',
+export function createFactoryBrowserAdapter(config: FactoryServiceConfig): BrowserRelyingApplicationAdapter {
+  if (config.authBoundryBrowserAdapter) return config.authBoundryBrowserAdapter;
+  const authorityUrl = config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL;
+  const cookieSecret = config.authBoundryBrowserCookieSecret ?? process.env.AUTHBOUNDRY_BROWSER_COOKIE_SECRET;
+  if (!authorityUrl) throw new Error('AuthBoundry URL is required');
+  if (!cookieSecret) throw new Error('AUTHBOUNDRY_BROWSER_COOKIE_SECRET is required');
+  return createBrowserRelyingApplicationAdapter({
+    authorityUrl,
+    cookieSecret,
+    production: config.mode === 'remote' || process.env.NODE_ENV === 'production',
+    applications: [{
+      id: FACTORY_BROWSER_APPLICATION_ID,
+      callbackPath: FACTORY_BROWSER_CALLBACK_PATH,
+      allowedReturnPaths: [...FACTORY_BROWSER_RETURN_PATHS],
+    }],
   });
-  const body = Buffer.from(await upstream.arrayBuffer());
-  const responseHeaders: Record<string, string | string[]> = {};
-  for (const name of ['cache-control', 'content-type', 'location']) {
-    const value = upstream.headers.get(name);
-    if (value) responseHeaders[name] = value;
-  }
-  const cookies = upstream.headers.getSetCookie();
-  if (cookies.length > 0) responseHeaders['set-cookie'] = cookies;
-  responseHeaders['content-length'] = String(body.length);
-  response.writeHead(upstream.status, responseHeaders);
-  response.end(body);
 }

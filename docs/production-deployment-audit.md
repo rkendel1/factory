@@ -91,13 +91,21 @@ Production verification after deployment:
   returns 400, and an unrelated AuthBoundry control-plane route returns 404.
 - Fly's configured health check passes on the deployed image.
 
-The subsequent GitHub administration audit found two owning-product blockers:
-the deployed AuthBoundry GitHub browser flow cannot return a session to the
-Factory origin or grant the required application capabilities, and AppPort
-Services does not export a mountable, externally authorized API-key management
-handler. See [authboundry-github-factory-administration-defect.md](authboundry-github-factory-administration-defect.md)
+The subsequent GitHub administration audit found two owning-product blockers.
+Their package contracts are now available and consumed without Factory-owned
+workarounds: see [authboundry-github-factory-administration-defect.md](authboundry-github-factory-administration-defect.md)
 and [appport-services-api-key-administration-defect.md](appport-services-api-key-administration-defect.md).
-Factory intentionally contains no workaround for either authority boundary.
+Application capability policy and relying-application registration remain
+deployment-owned AuthBoundry state.
+
+The Factory consumer now uses `@authboundry/core@1.15.2`'s supported server
+adapter. Production deployment remains intentionally blocked until the
+AuthBoundry service is upgraded and registers relying application `factory`
+with callback `/api/auth/callback`: on 2026-09-21 the live browser-begin route
+returned HTTP 403 `unclassified_route`. Factory also has no
+`AUTHBOUNDRY_BROWSER_COOKIE_SECRET` Fly secret yet. Do not deploy the consumer
+until both deployment-owned prerequisites exist; the current release fails
+closed rather than restoring the former proxy workaround.
 
 ## Verification commands
 

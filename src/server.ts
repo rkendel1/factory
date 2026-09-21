@@ -6,11 +6,13 @@ import { buildFailureEvidence } from './evidence.js';
 import { executeContract, verifyPax, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import {
+  createFactoryBrowserAdapter,
   createAuthBoundryAuthenticator,
-  isAuthBoundryBrowserPath,
-  proxyAuthBoundryBrowserRequest,
+  FACTORY_BROWSER_APPLICATION_ID,
+  FACTORY_BROWSER_CALLBACK_PATH,
   type AuthenticatedContext,
 } from './auth.js';
+import { BrowserAdapterError, type BrowserRedirectResult } from '@authboundry/core/server';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
 import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
@@ -88,6 +90,11 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.statusCode = statusCode;
   response.setHeader('content-type', 'application/json');
   response.end(JSON.stringify(body, null, 2));
+}
+
+function writeBrowserRedirect(response: ServerResponse, result: BrowserRedirectResult): void {
+  response.writeHead(302, { location: result.redirectTo, 'set-cookie': result.setCookies });
+  response.end();
 }
 
 export class FactoryService {
@@ -603,10 +610,35 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         return;
       }
 
-      if (isAuthBoundryBrowserPath(url.pathname)) {
-        const authBoundryUrl = config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL;
-        if (!authBoundryUrl) throw new Error('AuthBoundry URL is required');
-        await proxyAuthBoundryBrowserRequest(request, response, authBoundryUrl);
+      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/auth/login') {
+        const adapter = createFactoryBrowserAdapter(config);
+        writeBrowserRedirect(response, await adapter.beginLogin({
+          application: FACTORY_BROWSER_APPLICATION_ID,
+          provider: 'github',
+          tenant: config.authBoundryTenantId ?? config.tenantId ?? 'default',
+          returnTo: url.searchParams.get('return_to') ?? '/',
+        }));
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === FACTORY_BROWSER_CALLBACK_PATH) {
+        const adapter = createFactoryBrowserAdapter(config);
+        writeBrowserRedirect(response, await adapter.completeLogin({
+          application: FACTORY_BROWSER_APPLICATION_ID,
+          handoff: url.searchParams.get('handoff') ?? '',
+          cookieHeader: request.headers.cookie,
+          callbackPath: url.pathname,
+        }));
+        return;
+      }
+
+      if ((request.method === 'GET' || request.method === 'POST') && url.pathname === '/auth/logout') {
+        const adapter = createFactoryBrowserAdapter(config);
+        writeBrowserRedirect(response, await adapter.logout({
+          application: FACTORY_BROWSER_APPLICATION_ID,
+          cookieHeader: request.headers.cookie,
+          returnTo: url.searchParams.get('return_to') ?? '/',
+        }));
         return;
       }
 
@@ -701,6 +733,10 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
 
       writeJson(response, 404, { error: 'Not found' });
     } catch (error) {
+      if (error instanceof BrowserAdapterError) {
+        writeJson(response, error.status, { error: error.code });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`Software Factory Runner error: ${message}\n`);
       const clientError = /invalid run request|requires workId|not accepted in a run request|not accepted in a repository|authenticated principal is required|Execution fields/.test(message);
@@ -726,6 +762,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     environmentId: process.env.FACTORY_ENVIRONMENT_ID,
     appportPath: process.env.APPPORT_SERVICES_PATH,
     paxExecutable: process.env.PAX_BIN,
+    authBoundryUrl: process.env.AUTHBOUNDRY_URL,
+    authBoundryBrowserCookieSecret: process.env.AUTHBOUNDRY_BROWSER_COOKIE_SECRET,
+    authBoundryTenantId: process.env.AUTHBOUNDRY_TENANT_ID,
   };
   if (production) {
     const deploymentConfig = readDeploymentConfig(config);

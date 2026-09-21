@@ -1,5 +1,10 @@
 # AuthBoundry GitHub browser administration defect
 
+Status: the relying-application integration is fixed upstream in
+`@authboundry/core@1.15.2` and consumed by Factory through the package's
+`/server` export. Durable AuthBoundry application registration and capability
+policy remain deployment-owned requirements.
+
 Verified 2026-09-21 against Factory `https://factory-idvhpa.fly.dev`, deployed
 AuthBoundry `authboundry-api`, and `@authboundry/core@1.15.1` (the current npm
 latest release).
@@ -74,4 +79,3 @@ Factory already forwards the opaque AuthBoundry session to `/auth/session` and
 uses `/auth/authorize` for every protected operation. It should consume the
 corrected browser/session adapter and durable policies. It should not reproduce
 OAuth token exchange, identity storage, session authority, or policy state.
-

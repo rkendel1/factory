@@ -2,12 +2,14 @@ import type { FactoryServiceConfig } from './types.js';
 
 export interface RemoteAuthorityBootstrap {
   authBoundryUrl: string;
+  authBoundryBrowserCookieSecret: string;
   feltDbUrl: string;
   feltDbToken?: string;
 }
 
 export interface DeploymentConfig {
   authBoundryUrl?: string;
+  authBoundryBrowserCookieSecret?: string;
   feltDbUrl?: string;
   feltDbToken?: string;
 }
@@ -24,6 +26,9 @@ export function readDeploymentConfig(config: FactoryServiceConfig): DeploymentCo
 
   return {
     authBoundryUrl: trim(config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL),
+    authBoundryBrowserCookieSecret: trim(
+      config.authBoundryBrowserCookieSecret ?? process.env.AUTHBOUNDRY_BROWSER_COOKIE_SECRET,
+    ),
     feltDbUrl: trim(config.serverUrl ?? process.env.FELTDB_URL),
     feltDbToken: trim(config.serverToken ?? process.env.FELTDB_TOKEN),
   };
@@ -31,15 +36,22 @@ export function readDeploymentConfig(config: FactoryServiceConfig): DeploymentCo
 
 export function validateDeploymentConfig(config: DeploymentConfig): RemoteAuthorityBootstrap {
   const authBoundryUrl = config.authBoundryUrl?.trim();
+  const authBoundryBrowserCookieSecret = config.authBoundryBrowserCookieSecret?.trim();
   const feltDbUrl = config.feltDbUrl?.trim();
   const feltDbToken = config.feltDbToken?.trim() || undefined;
 
-  if (!authBoundryUrl || !feltDbUrl) {
-    throw new Error('Production startup requires FELTDB_URL and AUTHBOUNDRY_URL');
+  if (!authBoundryUrl || !feltDbUrl || !authBoundryBrowserCookieSecret) {
+    throw new Error(
+      'Production startup requires FELTDB_URL, AUTHBOUNDRY_URL, and AUTHBOUNDRY_BROWSER_COOKIE_SECRET',
+    );
+  }
+  if (authBoundryBrowserCookieSecret.length < 32) {
+    throw new Error('AUTHBOUNDRY_BROWSER_COOKIE_SECRET must contain at least 32 bytes');
   }
 
   return {
     authBoundryUrl,
+    authBoundryBrowserCookieSecret,
     feltDbUrl,
     feltDbToken,
   };
@@ -54,6 +66,7 @@ export function formatDeploymentConfigDiagnostics(config: DeploymentConfig): str
     'Factory startup configuration:',
     `  FELTDB_URL configured: ${Boolean(config.feltDbUrl)}`,
     `  AUTHBOUNDRY_URL configured: ${Boolean(config.authBoundryUrl)}`,
+    `  AUTHBOUNDRY_BROWSER_COOKIE_SECRET configured: ${Boolean(config.authBoundryBrowserCookieSecret)}`,
     `  FELTDB_TOKEN configured: ${Boolean(config.feltDbToken)}`,
   ].join('\n');
 }

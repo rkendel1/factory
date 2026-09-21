@@ -41,6 +41,8 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
   assert.equal(packageJson.dependencies['@appport/services'], '^0.4.3');
   assert.equal(packageJson.overrides['@appport/services'], '$@appport/services');
+  assert.equal(packageJson.dependencies['@authboundry/core'], '^1.15.2');
+  assert.equal(packageJson.overrides['@authboundry/core'], '$@authboundry/core');
 });
 
 test('remote bootstrap accepts topology and infrastructure credentials only', () => {
@@ -49,10 +51,12 @@ test('remote bootstrap accepts topology and infrastructure credentials only', ()
     serverUrl: 'https://feltdb.example',
     serverToken: 'infrastructure-token',
     authBoundryUrl: 'https://auth.example',
+    authBoundryBrowserCookieSecret: 'deployment-cookie-secret-at-least-32-bytes',
   });
 
   assert.deepEqual(bootstrap, {
     authBoundryUrl: 'https://auth.example',
+    authBoundryBrowserCookieSecret: 'deployment-cookie-secret-at-least-32-bytes',
     feltDbUrl: 'https://feltdb.example',
     feltDbToken: 'infrastructure-token',
   });
@@ -64,21 +68,21 @@ test('remote bootstrap fails closed when an authority endpoint is missing', () =
       mode: 'remote',
       serverUrl: 'https://feltdb.example',
     }),
-    /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
+    /Production startup requires FELTDB_URL, AUTHBOUNDRY_URL, and AUTHBOUNDRY_BROWSER_COOKIE_SECRET/,
   );
 });
 
 test('deployment validation rejects a missing FeltDB URL', () => {
   assert.throws(
     () => validateDeploymentConfig({ authBoundryUrl: 'https://auth.example' }),
-    /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
+    /Production startup requires FELTDB_URL, AUTHBOUNDRY_URL, and AUTHBOUNDRY_BROWSER_COOKIE_SECRET/,
   );
 });
 
 test('deployment validation rejects a missing AuthBoundry URL', () => {
   assert.throws(
     () => validateDeploymentConfig({ feltDbUrl: 'https://feltdb.example' }),
-    /Production startup requires FELTDB_URL and AUTHBOUNDRY_URL/,
+    /Production startup requires FELTDB_URL, AUTHBOUNDRY_URL, and AUTHBOUNDRY_BROWSER_COOKIE_SECRET/,
   );
 });
 
@@ -86,12 +90,14 @@ test('deployment validation trims topology and accepts the optional bootstrap se
   const config = validateDeploymentConfig({
     feltDbUrl: ' https://feltdb.example ',
     authBoundryUrl: ' https://auth.example ',
+    authBoundryBrowserCookieSecret: ' deployment-cookie-secret-at-least-32-bytes ',
     feltDbToken: ' infrastructure-token ',
   });
 
   assert.deepEqual(config, {
     feltDbUrl: 'https://feltdb.example',
     authBoundryUrl: 'https://auth.example',
+    authBoundryBrowserCookieSecret: 'deployment-cookie-secret-at-least-32-bytes',
     feltDbToken: 'infrastructure-token',
   });
 });
@@ -100,11 +106,13 @@ test('startup diagnostics expose presence without secret values', () => {
   const diagnostics = formatDeploymentConfigDiagnostics({
     feltDbUrl: 'https://feltdb.example',
     authBoundryUrl: 'https://auth.example',
+    authBoundryBrowserCookieSecret: 'deployment-cookie-secret-at-least-32-bytes',
     feltDbToken: 'super-secret-token',
   });
 
   assert.match(diagnostics, /FELTDB_URL configured: true/);
   assert.match(diagnostics, /AUTHBOUNDRY_URL configured: true/);
+  assert.match(diagnostics, /AUTHBOUNDRY_BROWSER_COOKIE_SECRET configured: true/);
   assert.match(diagnostics, /FELTDB_TOKEN configured: true/);
   assert.doesNotMatch(diagnostics, /super-secret-token|feltdb\.example|auth\.example/);
 });

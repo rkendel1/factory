@@ -62,18 +62,23 @@ metadata. It does not authenticate or execute a workload.
 
 ## Browser entrypoint
 
-Factory's public `/` route checks the existing AuthBoundry session. An
-unauthenticated browser is redirected to
-`/auth/login?return_to=%2F`; an authenticated browser is redirected to the
-existing `/configuration` AppPort Services surface. The login, session, logout,
-published client, password-policy, and OAuth begin/callback requests are
-relayed narrowly to `AUTHBOUNDRY_URL` on the Factory origin so AuthBoundry's
-opaque, host-scoped session cookie returns to Factory. AuthBoundry still creates,
-validates, authorizes, and revokes the session.
+Factory is registered as the `factory` AuthBoundry browser relying application.
+Its package-owned adapter uses callback `/api/auth/callback`, initiates the
+GitHub provider flow, validates the browser-bound handoff, reads the opaque
+AuthBoundry session, and revokes it during `/auth/logout`. Return destinations
+are restricted to the adapter registration's fixed local allowlist.
 
-No additional Factory authentication setting is required. Return destinations
-are fixed local paths; Factory does not consume a caller-provided return URL.
-The `/v1/ui`, `/configuration`, and execution routes remain protected.
+The adapter requires `AUTHBOUNDRY_BROWSER_COOKIE_SECRET` as server-only sealing
+material (at least 32 bytes). It is not an authentication authority, user
+credential, or AppPort API key; AuthBoundry remains authoritative for every
+session and authorization decision. Store it only as a Fly secret. The
+`/v1/ui`, management, and execution routes remain protected.
+
+Factory does not proxy provider routes, exchange OAuth codes, construct
+AuthBoundry credentials, resolve principals, or maintain a local session store.
+The embedded AppPort Services router receives the AuthBoundry principal and
+delegates API-key authorization back to AuthBoundry; it requires no AppPort API
+key bootstrap. `.flow` remains the separate Factory execution authority.
 
 ## Smoke test
 

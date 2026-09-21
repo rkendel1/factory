@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
+import { createHash } from 'node:crypto';
+import { createBrowserRelyingApplicationAdapter } from '@authboundry/core/server';
 import { createHttpServer } from '../src/server.js';
 import { createTempWorkspace } from './helpers.js';
 import type { Authenticator } from '../src/auth.js';
@@ -72,55 +74,130 @@ test('authenticated root redirects to the existing AppPort Services entry surfac
   }
 });
 
-test('Factory relays only the canonical AuthBoundry browser surface on its own origin', async () => {
+test('Factory uses the AuthBoundry relying-application adapter for login, session, and logout', async () => {
+  let nonceHash = '';
+  let revoked = false;
   const authority = createServer((request, response) => {
-    if (request.url?.startsWith('/auth/login')) {
-      response.writeHead(200, { 'content-type': 'text/html' });
-      response.end('<title>Sign in · AuthBoundry</title>');
+    const url = new URL(request.url ?? '/', 'http://authority.invalid');
+    if (url.pathname === '/_authboundry/browser/begin') {
+      assert.equal(url.searchParams.get('application'), 'factory');
+      assert.equal(url.searchParams.get('provider'), 'github');
+      assert.equal(url.searchParams.get('tenant'), 'default');
+      assert.equal(url.searchParams.get('return_to'), '/configuration');
+      nonceHash = url.searchParams.get('browser_nonce_hash') ?? '';
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        kind: 'redirect',
+        url: 'https://github.com/login/oauth/authorize?state=authority-state',
+        state: 'authority-state',
+        expires_in: 600,
+      }));
       return;
     }
-    if (request.url === '/auth/sign-in' && request.method === 'POST') {
-      response.writeHead(200, {
-        'content-type': 'application/json',
-        'set-cookie': 'authboundry_session=opaque-issued-handle; Path=/; HttpOnly; Secure; SameSite=Lax',
+    if (url.pathname === '/_authboundry/browser/complete' && request.method === 'POST') {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+          application: string; handoff: string; browser_nonce: string;
+        };
+        assert.equal(body.application, 'factory');
+        assert.equal(createHash('sha256').update(body.browser_nonce).digest('hex'), nonceHash);
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          credential: 'opaque-authority-credential',
+          return_to: '/configuration',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+        }));
       });
-      response.end(JSON.stringify({ authenticated: true }));
       return;
     }
-    if (request.url?.startsWith('/_authboundry/callback/')) {
-      response.writeHead(400, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ error: 'invalid state' }));
+    if (url.pathname === '/auth/session') {
+      assert.equal(request.headers.authorization, 'Bearer opaque-authority-credential');
+      response.writeHead(revoked ? 401 : 200, { 'content-type': 'application/json' });
+      response.end(revoked ? '{}' : JSON.stringify({
+        authenticated: true,
+        principal: { id: 'operator-1', kind: 'user' },
+        tenant: { id: 'tenant-a' },
+        claims: {}, capabilities: ['factory.ui.read'],
+        session: { expires_at: Math.floor(Date.now() / 1000) + 3600 }, delegation: null,
+      }));
+      return;
+    }
+    if (url.pathname === '/auth/sign-out' && request.method === 'POST') {
+      revoked = true;
+      response.writeHead(200, { 'content-type': 'application/json' }).end('{}');
       return;
     }
     response.writeHead(404).end();
   });
   const authorityOrigin = await listen(authority);
-  const authenticator: Authenticator = {
-    async session() { throw new Error('missing session'); },
-    async authenticate() { throw new Error('missing session'); },
-  };
   const workingDirectory = await createTempWorkspace('factory-browser-proxy');
   const { server } = await createHttpServer({
-    mode: 'local', workingDirectory, appportPath: `${workingDirectory}/services`, authenticator,
+    mode: 'local', workingDirectory, appportPath: `${workingDirectory}/services`,
     authBoundryUrl: authorityOrigin,
+    authBoundryBrowserCookieSecret: 'test-cookie-secret-that-is-at-least-32-bytes',
   });
   const origin = await listen(server);
   try {
-    const login = await fetch(`${origin}/auth/login?return_to=%2F`);
-    assert.equal(login.status, 200);
-    assert.match(await login.text(), /Sign in · AuthBoundry/);
+    const login = await fetch(`${origin}/auth/login?return_to=%2Fconfiguration`, { redirect: 'manual' });
+    assert.equal(login.status, 302);
+    assert.match(login.headers.get('location') ?? '', /^https:\/\/github\.com\/login\/oauth\/authorize/);
+    const transactionCookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(transactionCookie, /^authboundry_factory_transaction=/);
+    assert.match(login.headers.get('set-cookie') ?? '', /HttpOnly.*SameSite=Lax/);
 
-    const signIn = await fetch(`${origin}/auth/sign-in`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    const callback = await fetch(`${origin}/api/auth/callback?handoff=${'a'.repeat(64)}`, {
+      redirect: 'manual', headers: { cookie: transactionCookie },
     });
-    assert.equal(signIn.status, 200);
-    assert.match(signIn.headers.get('set-cookie') ?? '', /^authboundry_session=opaque-issued-handle/);
+    assert.equal(callback.status, 302);
+    assert.equal(callback.headers.get('location'), '/configuration');
+    const sessionCookie = callback.headers.getSetCookie()
+      .find((value) => value.startsWith('authboundry_factory_session='))?.split(';')[0];
+    assert.ok(sessionCookie);
+    assert.match(callback.headers.getSetCookie().join(' '), /HttpOnly.*SameSite=Lax/);
 
-    assert.equal((await fetch(`${origin}/_authboundry/callback/github?state=fabricated`)).status, 400);
-    assert.equal((await fetch(`${origin}/auth/agents`)).status, 404);
-    assert.equal((await fetch(`${origin}/_authboundry/authority-state`)).status, 404);
+    const root = await fetch(`${origin}/`, { redirect: 'manual', headers: { cookie: sessionCookie } });
+    assert.equal(root.headers.get('location'), '/configuration');
+
+    const logout = await fetch(`${origin}/auth/logout`, {
+      redirect: 'manual', headers: { cookie: sessionCookie },
+    });
+    assert.equal(logout.status, 302);
+    assert.equal(logout.headers.get('location'), '/');
+    assert.match(logout.headers.getSetCookie().join(' '), /authboundry_factory_session=;.*Max-Age=0/);
+
+    const stale = await fetch(`${origin}/`, { redirect: 'manual', headers: { cookie: sessionCookie } });
+    assert.equal(stale.headers.get('location'), '/auth/login?return_to=%2F');
+    assert.equal((await fetch(`${origin}/api/auth/callback?handoff=${'b'.repeat(64)}`)).status, 400);
+    assert.equal((await fetch(`${origin}/auth/login?return_to=https://attacker.example`)).status, 400);
+    assert.equal((await fetch(`${origin}/_authboundry/callback/github?state=fabricated`)).status, 404);
   } finally {
     await close(server);
     await close(authority);
   }
+});
+
+test('AuthBoundry browser transactions are isolated by relying application', async () => {
+  const adapter = createBrowserRelyingApplicationAdapter({
+    authorityUrl: 'https://authority.example',
+    cookieSecret: 'test-cookie-secret-that-is-at-least-32-bytes',
+    applications: [
+      { id: 'factory', callbackPath: '/api/auth/callback', allowedReturnPaths: ['/'] },
+      { id: 'portal', callbackPath: '/portal/callback', allowedReturnPaths: ['/'] },
+    ],
+    fetch: async () => new Response(JSON.stringify({
+      kind: 'redirect', url: 'https://github.com/login/oauth/authorize', state: 'state', expires_in: 600,
+    }), { status: 200 }),
+  });
+  const begun = await adapter.beginLogin({ application: 'factory', provider: 'github', tenant: 'default', returnTo: '/' });
+  const cookieHeader = begun.setCookies[0].split(';')[0];
+  await assert.rejects(
+    adapter.completeLogin({ application: 'portal', handoff: 'c'.repeat(64), cookieHeader, callbackPath: '/portal/callback' }),
+    /no pending login/,
+  );
+  await assert.rejects(
+    adapter.completeLogin({ application: 'factory', handoff: 'c'.repeat(64), cookieHeader, callbackPath: '/portal/callback' }),
+    /callback path is not registered/,
+  );
 });

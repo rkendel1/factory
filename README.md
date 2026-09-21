@@ -130,7 +130,7 @@ credentials, webhooks, provider persistence, and normalized provider behavior.
 | Concern | Distribution | Factory role |
 | --- | --- | --- |
 | FeltDB | `@feltdb/core@0.11.5` | Durable Factory and service authority |
-| AuthBoundry | `@authboundry/core@1.15.1` | Identity and authorization client |
+| AuthBoundry | `@authboundry/core@1.15.2` | Identity, authorization, and browser relying-application adapter |
 | AppPort contracts/UI | `@appport/sdk`, `@appport/client`, `@appport/protocol` | Contract projection and generic UI composition |
 | AppPort Services | `@appport/services@0.4.3` | Thin authenticated router mount; package owns state and screens |
 | AppBoundry | `@appport/appboundry@1.0.10` | Certified application identity |

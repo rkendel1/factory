@@ -253,6 +253,9 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   workspaceRoot?: string;
   paxExecutable?: string;
   authBoundryUrl?: string;
+  authBoundryBrowserCookieSecret?: string;
+  authBoundryBrowserAdapter?: import('@authboundry/core/server').BrowserRelyingApplicationAdapter;
+  authBoundryTenantId?: string;
   authenticator?: import('./auth.js').Authenticator;
   appportPath?: string;
   appPortServices?: import('@appport/services').AppPortServices;
