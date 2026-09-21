@@ -203,27 +203,28 @@ test('AppPort Services returns 403 when an authenticated principal is denied', a
     assert.match(body.error.message, /Configuration request failed \(403\).*Request ID: cfg_test-denied/);
     assert.equal(response.headers.get('x-request-id'), 'cfg_test-denied');
   });
+});
 
-  test('configuration request correlation is forwarded to AuthBoundry', async () => {
-    let observedRequestId: string | undefined;
-    const authenticator: Authenticator = {
-      async authenticate(request) {
-        observedRequestId = request.headers['x-request-id'];
-        return {
-          principal: 'operator-1', tenant: 'tenant-a', claims: {}, session: { id: 'session-1' }, delegation: null,
-          boundaryVerified: true, authorizedCapabilities: ['configuration.read'],
-        };
-      },
-    };
-    await withServicesServer(authenticator, async (origin) => {
-      const response = await fetch(`${origin}/v1/configuration`, {
-        headers: { 'x-request-id': 'cfg_traceability' },
-      });
-      assert.equal(response.status, 200);
-      assert.equal(response.headers.get('x-request-id'), 'cfg_traceability');
+test('configuration request correlation is forwarded to AuthBoundry', async () => {
+  let observedRequestId: string | undefined;
+  const authenticator: Authenticator = {
+    async authenticate(request) {
+      const requestId = request.headers['x-request-id'];
+      observedRequestId = typeof requestId === 'string' ? requestId : undefined;
+      return {
+        principal: 'operator-1', tenant: 'tenant-a', claims: {}, session: { id: 'session-1' }, delegation: null,
+        boundaryVerified: true, authorizedCapabilities: ['configuration.read'],
+      };
+    },
+  };
+  await withServicesServer(authenticator, async (origin) => {
+    const response = await fetch(`${origin}/v1/configuration`, {
+      headers: { 'x-request-id': 'cfg_traceability' },
     });
-    assert.equal(observedRequestId, 'cfg_traceability');
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-request-id'), 'cfg_traceability');
   });
+  assert.equal(observedRequestId, 'cfg_traceability');
 });
 
 test('AppPort Services returns 401 when no AuthBoundry session exists', async () => {
