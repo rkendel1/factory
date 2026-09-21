@@ -21,7 +21,7 @@ configuration store, secret resolver, or management screen. Secret values are
 accepted only by the service operation and are omitted from UI discovery,
 configuration list responses, Factory contracts, evidence, and logs.
 
-`@appport/services@0.4.2` is covered through its real FeltDB-backed CRUD path:
+`@appport/services@0.4.3` is covered through its real FeltDB-backed CRUD path:
 variables can be created, edited, listed, and deleted; secrets can be created,
 rotated, listed as metadata, and deleted. The host supplies the application and
 environment defaults, while AuthBoundry supplies principal, tenant, and

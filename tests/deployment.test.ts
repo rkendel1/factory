@@ -39,7 +39,7 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.match(workflow, /fly deploy --config fly\.toml --remote-only --strategy rolling/);
   assert.match(workflow, /FLY_API_TOKEN: \$\{\{ secrets\.FLY_API_TOKEN \}\}/);
   assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
-  assert.equal(packageJson.dependencies['@appport/services'], '^0.4.2');
+  assert.equal(packageJson.dependencies['@appport/services'], '^0.4.3');
   assert.equal(packageJson.overrides['@appport/services'], '$@appport/services');
 });
 

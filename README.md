@@ -132,7 +132,7 @@ credentials, webhooks, provider persistence, and normalized provider behavior.
 | FeltDB | `@feltdb/core@0.11.5` | Durable Factory and service authority |
 | AuthBoundry | `@authboundry/core@1.15.1` | Identity and authorization client |
 | AppPort contracts/UI | `@appport/sdk`, `@appport/client`, `@appport/protocol` | Contract projection and generic UI composition |
-| AppPort Services | `@appport/services@0.4.2` | Thin authenticated router mount; package owns state and screens |
+| AppPort Services | `@appport/services@0.4.3` | Thin authenticated router mount; package owns state and screens |
 | AppBoundry | `@appport/appboundry@1.0.10` | Certified application identity |
 | GitHub | vendored `@rkendel1/github-integration@1.0.1` package artifact | Thin operation adapter only |
 | PAX | external executable | Bounded execution engine |

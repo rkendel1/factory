@@ -266,7 +266,7 @@ test('Factory keeps GitHub behind the packaged integration root and owns no GitH
     packageJson.dependencies['@rkendel1/github-integration'],
     'file:vendor/rkendel1-github-integration-1.0.1.tgz',
   );
-  assert.equal(packageJson.dependencies['@appport/services'], '^0.4.2');
+  assert.equal(packageJson.dependencies['@appport/services'], '^0.4.3');
   assert.match(packageJson.dependencies.express, /^\^4\./);
   assert.equal(packageJson.dependencies['@octokit/rest'], undefined);
   const sourceFiles = ['server.ts', 'types.ts', 'integrations/github.ts'];

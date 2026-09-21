@@ -1,6 +1,8 @@
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
 import {
+  API_KEY_MANAGEMENT_CAPABILITIES,
   createConfigurationManagementRouter,
+  createManagementRouter,
   createServices,
   configurationErrorHandler,
   type AppPortServices,
@@ -14,11 +16,16 @@ import type { UiContributor } from './ui.js';
 
 export const appPortServicesUiContribution: UiContribution = validateUiContribution({
   protocol: UI_PROTOCOL_ID,
-  product: { id: 'appport-services', version: '0.4.2' },
+  product: { id: 'appport-services', version: '0.4.3' },
   surfaces: [
     { id: 'configuration', title: 'Configuration', route: '/configuration', capabilities: ['configuration.read'] },
     { id: 'secrets', title: 'Secrets', route: '/secrets', capabilities: ['configuration.read'] },
-    { id: 'api-keys', title: 'API Keys', route: '/api-keys', capabilities: ['apikeys.read'] },
+    {
+      id: 'api-keys',
+      title: 'API Keys',
+      route: '/api-keys',
+      capabilities: Object.values(API_KEY_MANAGEMENT_CAPABILITIES),
+    },
     { id: 'notifications', title: 'Notifications', route: '/notifications', capabilities: ['notifications.read'] },
     { id: 'webhooks', title: 'Webhooks', route: '/webhooks', capabilities: ['webhooks.read'] },
     { id: 'jobs', title: 'Jobs', route: '/jobs', capabilities: ['jobs.read'] },
@@ -39,13 +46,18 @@ const managementPaths = new Set([
 ]);
 
 function requestedCapability(request: Request): string {
+  if (request.path === '/_appport/api/keys') {
+    if (request.method === 'POST') return API_KEY_MANAGEMENT_CAPABILITIES.create;
+    return API_KEY_MANAGEMENT_CAPABILITIES.read;
+  }
+  if (request.path.startsWith('/_appport/api/keys/')) return API_KEY_MANAGEMENT_CAPABILITIES.revoke;
   if (request.path.startsWith('/v1/configuration')) {
     if (request.method === 'GET') return 'configuration.read';
     if (request.method === 'PUT' && request.path.includes('/secrets/')) return 'secret.rotate';
     if (request.method === 'DELETE') return 'configuration.delete';
     return 'configuration.write';
   }
-  if (request.path === '/api-keys') return 'apikeys.read';
+  if (request.path === '/api-keys') return API_KEY_MANAGEMENT_CAPABILITIES.read;
   if (request.path === '/notifications') return 'notifications.read';
   if (request.path === '/webhooks') return 'webhooks.read';
   if (request.path === '/jobs' || request.path === '/schedules') return 'jobs.read';
@@ -90,6 +102,20 @@ export function createFactoryAppPortServices(options: {
       response.status(401).json({ error: 'AuthBoundry authentication or authorization failed' });
     }
   }) as RequestHandler);
+  application.use(createManagementRouter({
+    services: { apiKeys: services.apiKeys },
+    authenticate: (request) => request.auth ?? null,
+    authorize: async (capability, { request }) => {
+      try {
+        await options.authenticator().authenticate(request, capability);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    includeConfiguration: false,
+    includeUi: false,
+  }));
   application.use(createConfigurationManagementRouter(services.configuration));
   // The published handler has a three-argument signature, so wrap it in the
   // four-argument Express error-middleware contract instead of reimplementing it.
@@ -101,7 +127,9 @@ export function createFactoryAppPortServices(options: {
     services,
     ui: { contribution: () => appPortServicesUiContribution },
     handles(pathname) {
-      return pathname.startsWith('/v1/configuration') || managementPaths.has(pathname);
+      return pathname.startsWith('/v1/configuration')
+        || pathname.startsWith('/_appport/api/keys')
+        || managementPaths.has(pathname);
     },
     handle(request, response) {
       return new Promise<void>((resolve) => {

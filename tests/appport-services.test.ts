@@ -29,7 +29,7 @@ async function withServicesServer(
 
 function authorized(seen: string[], allowed = [
   'configuration.read', 'configuration.write', 'configuration.delete', 'secret.rotate',
-  'apikeys.read', 'notifications.read', 'webhooks.read', 'jobs.read',
+  'apikeys.read', 'apikeys.create', 'apikeys.revoke', 'notifications.read', 'webhooks.read', 'jobs.read',
 ]): Authenticator {
   return {
     async authenticate(_request, operation) {
@@ -116,6 +116,36 @@ test('packaged management screens are mounted rather than recreated by Factory',
     assert.match(html, /<option>development<\/option>/);
     assert.doesNotMatch(html, /localStorage|sessionStorage|secret-value-that-must-not-be-returned/);
   });
+});
+
+test('packaged API-key management routes use explicit AuthBoundry capabilities', async () => {
+  const seen: string[] = [];
+  const services = createServices({ memory: true, namespace: `api-key-management-${Date.now()}` });
+  await withServicesServer(authorized(seen), async (origin) => {
+    const createdResponse = await fetch(`${origin}/_appport/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'deployment', scopes: ['configuration.read'] }),
+    });
+    const createdText = await createdResponse.text();
+    assert.equal(createdResponse.status, 201, createdText);
+    const created = JSON.parse(createdText) as { id: string; secret: string };
+    assert.ok(created.id);
+    assert.ok(created.secret);
+
+    const listedResponse = await fetch(`${origin}/_appport/api/keys`);
+    assert.equal(listedResponse.status, 200);
+    const listedText = await listedResponse.text();
+    assert.match(listedText, /deployment/);
+    assert.doesNotMatch(listedText, new RegExp(created.secret));
+    assert.doesNotMatch(listedText, /secretHash/);
+
+    assert.equal((await fetch(`${origin}/_appport/api/keys/${created.id}`, { method: 'DELETE' })).status, 204);
+    assert.deepEqual(await (await fetch(`${origin}/_appport/api/keys`)).json(), []);
+    assert.ok(seen.includes('apikeys.create'));
+    assert.ok(seen.includes('apikeys.read'));
+    assert.ok(seen.includes('apikeys.revoke'));
+  }, services);
 });
 
 test('service API defaults to the host application and environment context', async () => {

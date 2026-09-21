@@ -10,7 +10,8 @@ import type { Authenticator } from '../src/auth.js';
 
 const capabilities = [
   'repository.read', 'evidence.write', 'artifact.write',
-  'configuration.read', 'apikeys.read', 'notifications.read', 'webhooks.read', 'jobs.read',
+  'configuration.read', 'apikeys.read', 'apikeys.create', 'apikeys.revoke',
+  'notifications.read', 'webhooks.read', 'jobs.read',
 ];
 
 test('Factory and AppPort Services publish valid AppPort/ui/1 contributions', () => {

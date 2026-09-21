@@ -1,5 +1,8 @@
 # AppPort Services API-key administration integration defect
 
+Status: fixed upstream in `@appport/services@0.4.3` and consumed by Factory's
+authenticated management adapter. The original `0.4.2` finding follows.
+
 Verified 2026-09-21 with `@appport/services@0.4.2`, the current npm latest
 release.
 
@@ -59,4 +62,3 @@ After the package exports this contract, Factory should mount it beside the
 existing configuration router and translate verified AuthBoundry context into
 the package principal type. Factory should not copy `runtime/platform.js`, call
 package internals, or build a parallel API-key service.
-
