@@ -1,10 +1,12 @@
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
+import { randomUUID } from 'node:crypto';
 import {
   API_KEY_MANAGEMENT_CAPABILITIES,
+  ConfigurationAuthorizationError,
+  ConfigurationValidationError,
   createConfigurationManagementRouter,
   createManagementRouter,
   createServices,
-  configurationErrorHandler,
   type AppPortServices,
   type AuthenticatedPrincipal,
   type CreateServicesOptions,
@@ -69,6 +71,63 @@ function requestedCapability(request: Request): string {
   return 'configuration.read';
 }
 
+function requestId(request: Request): string {
+  const candidate = request.header('x-request-id');
+  return candidate && /^[A-Za-z0-9._:-]{1,128}$/.test(candidate)
+    ? candidate
+    : `cfg_${randomUUID()}`;
+}
+
+function configurationError(error: unknown, request: Request): {
+  status: number;
+  code: string;
+  message: string;
+} {
+  const errorName = error instanceof Error ? error.constructor.name : '';
+  const status = typeof error === 'object' && error !== null && 'status' in error
+    && typeof error.status === 'number' && error.status >= 400 && error.status < 600
+    ? error.status
+    : error instanceof ConfigurationAuthorizationError
+      ? 403
+      : error instanceof ConfigurationValidationError
+        ? 400
+        : 500;
+  const knownMessage = error instanceof ConfigurationAuthorizationError
+    || error instanceof ConfigurationValidationError;
+  const message = knownMessage && error instanceof Error
+    ? error.message
+    : status >= 500
+      ? 'AppPort Services could not complete the configuration request.'
+      : 'Configuration request was rejected.';
+  const code = status === 401
+    ? 'APPPORT_AUTHENTICATION_REQUIRED'
+    : status === 403
+      ? 'APPPORT_AUTHORIZATION_DENIED'
+      : status === 404
+        ? 'APPPORT_RESOURCE_NOT_FOUND'
+        : status === 409
+          ? 'APPPORT_CONFIGURATION_CONFLICT'
+          : status === 422
+            ? 'APPPORT_CONFIGURATION_INVALID'
+            : status >= 500
+              ? 'APPPORT_SERVICES_FAILURE'
+              : errorName === 'ConfigurationValidationError'
+                ? 'INVALID_CONFIGURATION'
+                : 'CONFIGURATION_REQUEST_FAILED';
+  return { status, code, message };
+}
+
+function sendConfigurationError(
+  response: express.Response,
+  detail: { status: number; code: string; message: string; requestId: string },
+): void {
+  const clientMessage = `Configuration request failed (${detail.status}) ${detail.code}: ${detail.message} Request ID: ${detail.requestId}`;
+  response.status(detail.status).json({
+    error: { ...detail, message: clientMessage },
+    ...detail,
+  });
+}
+
 export interface FactoryAppPortServices {
   readonly services: AppPortServices;
   readonly ui: UiContributor;
@@ -87,6 +146,9 @@ export function createFactoryAppPortServices(options: {
   const application = express();
   application.use(express.json());
   application.use((async (request, response, next) => {
+    const correlationId = requestId(request);
+    response.setHeader('x-request-id', correlationId);
+    request.headers['x-request-id'] = correlationId;
     const capability = requestedCapability(request);
     try {
       const context = await options.authenticator().authenticate(request, capability);
@@ -104,13 +166,25 @@ export function createFactoryAppPortServices(options: {
       next();
     } catch (error) {
       if (error instanceof AuthBoundryAuthorizationError) {
-        response.status(403).json({ error: error.message, code: 'FORBIDDEN' });
+        const detail = {
+          status: 403,
+          code: 'APPPORT_AUTHORIZATION_DENIED',
+          message: error.message,
+          requestId: correlationId,
+        };
+        sendConfigurationError(response, detail);
         return;
       }
       const message = error instanceof AuthBoundryAuthenticationError
         ? error.message
         : 'AuthBoundry authentication failed';
-      response.status(401).json({ error: message, code: 'UNAUTHENTICATED' });
+      const detail = {
+        status: 401,
+        code: 'APPPORT_AUTHENTICATION_REQUIRED',
+        message,
+        requestId: correlationId,
+      };
+      sendConfigurationError(response, detail);
     }
   }) as RequestHandler);
   application.use(createManagementRouter({
@@ -128,10 +202,9 @@ export function createFactoryAppPortServices(options: {
     includeUi: false,
   }));
   application.use(createConfigurationManagementRouter(services.configuration));
-  // The published handler has a three-argument signature, so wrap it in the
-  // four-argument Express error-middleware contract instead of reimplementing it.
   application.use(((error, request, response, _next) => {
-    configurationErrorHandler(error, request, response);
+    const detail = { ...configurationError(error, request), requestId: requestId(request) };
+    sendConfigurationError(response, detail);
   }) as ErrorRequestHandler);
 
   return {

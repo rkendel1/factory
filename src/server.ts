@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { loadFactoryFlow, createFactoryDB, COLLECTIONS } from './felt.js';
 import { authorizeExecution, getOperationAuthorities } from './authority.js';
@@ -606,6 +606,13 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      const suppliedRequestId = request.headers['x-request-id'];
+      const requestId = typeof suppliedRequestId === 'string'
+        && /^[A-Za-z0-9._:-]{1,128}$/.test(suppliedRequestId)
+        ? suppliedRequestId
+        : `cfg_${randomUUID()}`;
+      request.headers['x-request-id'] = requestId;
+      response.setHeader('x-request-id', requestId);
 
       if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/') {
         try {
