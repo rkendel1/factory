@@ -91,6 +91,14 @@ Production verification after deployment:
   returns 400, and an unrelated AuthBoundry control-plane route returns 404.
 - Fly's configured health check passes on the deployed image.
 
+The subsequent GitHub administration audit found two owning-product blockers:
+the deployed AuthBoundry GitHub browser flow cannot return a session to the
+Factory origin or grant the required application capabilities, and AppPort
+Services does not export a mountable, externally authorized API-key management
+handler. See [authboundry-github-factory-administration-defect.md](authboundry-github-factory-administration-defect.md)
+and [appport-services-api-key-administration-defect.md](appport-services-api-key-administration-defect.md).
+Factory intentionally contains no workaround for either authority boundary.
+
 ## Verification commands
 
 Local and artifact verification:
