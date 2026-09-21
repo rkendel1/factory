@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "commit": "fe9a1977f0354b079fe5a5fd47196c1caf8b5ab2",
-    "tree": "71976936121d12d1b7e05c893dd0b90522a64530",
+    "commit": "30ddee1f4c77b4a62fc6605dbe03084ad54f0b6e",
+    "tree": "926b414bc5e7129051dfb428626dd5560313518c",
     "clean": true,
     "preview": false,
     "flowPath": ".flow",
@@ -51,9 +51,9 @@
     "githubIntegrationTests": "Not distributed in the package artifact. When the canonical sibling checkout is available, its source and test LOC are recorded as external metrics."
   },
   "loc": {
-    "factoryApplication": 2221,
-    "factoryIntegrationAdapters": 979,
-    "factoryTests": 1383,
+    "factoryApplication": 2313,
+    "factoryIntegrationAdapters": 1045,
+    "factoryTests": 1501,
     "flow": 239,
     "githubIntegrationPackagedRuntime": 694,
     "githubIntegrationSource": 1221,
@@ -63,7 +63,7 @@
       "src/application-contract.ts": 114,
       "src/appport-services.ts": 107,
       "src/appport.ts": 55,
-      "src/auth.ts": 66,
+      "src/auth.ts": 132,
       "src/authority.ts": 263,
       "src/bootstrap.ts": 50,
       "src/contract.ts": 41,
@@ -71,7 +71,7 @@
       "src/execution.ts": 183,
       "src/felt.ts": 65,
       "src/integrations/github.ts": 89,
-      "src/server.ts": 663,
+      "src/server.ts": 689,
       "src/types.ts": 244,
       "src/ui.ts": 37,
       "src/workspace.ts": 85
@@ -80,7 +80,7 @@
       "src/application-contract.ts": 114,
       "src/appport.ts": 55,
       "src/appport-services.ts": 107,
-      "src/auth.ts": 66,
+      "src/auth.ts": 132,
       "src/authority.ts": 263,
       "src/execution.ts": 183,
       "src/felt.ts": 65,
@@ -92,6 +92,7 @@
       "tests/appport.test.ts": 63,
       "tests/authboundry.test.ts": 88,
       "tests/authority.test.ts": 86,
+      "tests/browser-entrypoint.test.ts": 118,
       "tests/deployment.test.ts": 114,
       "tests/evidence.test.ts": 76,
       "tests/execution.test.ts": 115,
