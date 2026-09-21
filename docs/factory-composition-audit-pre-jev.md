@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Clean commit `34982827cdd88116bda370dead68e8b4a783f291`, tree `8a727947649dd48f906bff63567085b74ad76fad`.
+Clean commit `fe9a1977f0354b079fe5a5fd47196c1caf8b5ab2`, tree `71976936121d12d1b7e05c893dd0b90522a64530`.
 
 - JEV integrated: **NO**
 - JEV authority: **NO**
@@ -14,9 +14,9 @@ Clean commit `34982827cdd88116bda370dead68e8b4a783f291`, tree `8a727947649dd48f9
 
 | Measure | LOC |
 | --- | ---: |
-| Factory application source | 2220 |
+| Factory application source | 2221 |
 | Factory integration/adapter subset | 979 |
-| Factory tests | 1372 |
+| Factory tests | 1383 |
 | `.flow` | 239 |
 | Packaged GitHub integration runtime (separate) | 694 |
 | GitHub integration source checkout (separate) | 1221 |

@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "commit": "34982827cdd88116bda370dead68e8b4a783f291",
-    "tree": "8a727947649dd48f906bff63567085b74ad76fad",
+    "commit": "fe9a1977f0354b079fe5a5fd47196c1caf8b5ab2",
+    "tree": "71976936121d12d1b7e05c893dd0b90522a64530",
     "clean": true,
     "preview": false,
     "flowPath": ".flow",
@@ -51,14 +51,14 @@
     "githubIntegrationTests": "Not distributed in the package artifact. When the canonical sibling checkout is available, its source and test LOC are recorded as external metrics."
   },
   "loc": {
-    "factoryApplication": 2220,
+    "factoryApplication": 2221,
     "factoryIntegrationAdapters": 979,
-    "factoryTests": 1372,
+    "factoryTests": 1383,
     "flow": 239,
     "githubIntegrationPackagedRuntime": 694,
     "githubIntegrationSource": 1221,
     "githubIntegrationTests": 362,
-    "githubIntegrationRepositoryCommit": "21c53145707d5fe5de889a93ddc792dc976d16d1",
+    "githubIntegrationRepositoryCommit": "03d7f98b4edf4222c8defce6e0651249e99c0b35",
     "productionFiles": {
       "src/application-contract.ts": 114,
       "src/appport-services.ts": 107,
@@ -71,7 +71,7 @@
       "src/execution.ts": 183,
       "src/felt.ts": 65,
       "src/integrations/github.ts": 89,
-      "src/server.ts": 662,
+      "src/server.ts": 663,
       "src/types.ts": 244,
       "src/ui.ts": 37,
       "src/workspace.ts": 85
@@ -92,7 +92,7 @@
       "tests/appport.test.ts": 63,
       "tests/authboundry.test.ts": 88,
       "tests/authority.test.ts": 86,
-      "tests/deployment.test.ts": 103,
+      "tests/deployment.test.ts": 114,
       "tests/evidence.test.ts": 76,
       "tests/execution.test.ts": 115,
       "tests/failure.test.ts": 164,
@@ -179,6 +179,26 @@
         "factoryDirect": true,
         "integrationTransitive": "0.4.1"
       }
+    }
+  },
+  "deployment": {
+    "app": "factory-idvhpa",
+    "primaryRegion": "iad",
+    "internalPort": 3000,
+    "forceHttps": true,
+    "healthPath": "/health",
+    "factoryHost": "0.0.0.0",
+    "feltDbUrl": "http://feltdb.internal:7700",
+    "authBoundryUrl": "https://authboundry-api.fly.dev",
+    "httpServiceCount": 1,
+    "legacyServiceCount": 0,
+    "secretValuesRecorded": false,
+    "packageVersions": {
+      "appPortServices": "0.4.2",
+      "feltDbCore": "0.11.4",
+      "authBoundryCore": "1.15.1",
+      "appBoundry": "1.1.0",
+      "githubIntegration": "1.0.1"
     }
   },
   "authorityInventory": [
