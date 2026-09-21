@@ -99,14 +99,19 @@ Application capability policy and relying-application registration remain
 deployment-owned AuthBoundry state.
 
 The Factory consumer now uses `@authboundry/core@1.15.2`'s supported server
-adapter. Production deployment remains intentionally blocked until the
-AuthBoundry service registers relying application `factory` with callback
-`/api/auth/callback`: after the 2026-09-21 AuthBoundry upgrade, the live route
-works for registered application `portal` but returns HTTP 400
-`unknown_application` for `factory`. Factory also has no
-`AUTHBOUNDRY_BROWSER_COOKIE_SECRET` Fly secret yet. Do not deploy the consumer
-until both deployment-owned prerequisites exist; the current release fails
-closed rather than restoring the former proxy workaround.
+adapter. After AuthBoundry registered relying application `factory`, Factory
+image `deployment-01M32K3FGNVTR42XEBVP086R9K` was deployed with server-only
+`AUTHBOUNDRY_BROWSER_COOKIE_SECRET` sealing material. Production verification
+confirmed that login redirects through the registered AuthBoundry application
+to GitHub, the pending transaction cookie is `HttpOnly; Secure; SameSite=Lax`,
+unsafe returns and callbacks without a browser transaction return 400, and
+unauthenticated `/_appport/api/keys` returns 401. The Fly health check passes.
+
+The deployed container resolves `@authboundry/core@1.15.2`,
+`@appport/services@0.4.3`, and `@feltdb/core@0.11.5`. Interactive GitHub consent,
+callback completion, authenticated management mutations, logout, and restart
+persistence still require a human browser session and are not claimed by this
+non-interactive smoke test.
 
 ## Verification commands
 
