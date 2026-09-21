@@ -264,7 +264,7 @@ export async function authorizeExecution(
       ...(authority.integration === 'github' ? {
         github: {
           package: '@rkendel1/github-integration' as const,
-          packageVersion: '1.0.0' as const,
+          packageVersion: '1.0.1' as const,
           connectionId: work.githubConnectionId!,
           operation: authority.githubOperation as 'repositories.list' | 'pull_request.merge',
           capability: authority.appportCapability as 'github.repository.read' | 'github.pull_request.merge',

@@ -1,6 +1,6 @@
 # GitHub integration
 
-Factory consumes `@rkendel1/github-integration@1.0.0` as its only GitHub boundary. Factory owns run orchestration, authorization sequencing, immutable execution contracts, lifecycle transitions, and Factory evidence. The integration owns GitHub transport, SDK behavior, normalized provider models, connections, credentials, provider evidence, webhooks, and its FeltDB state.
+Factory consumes `@rkendel1/github-integration@1.0.1` as its only GitHub boundary. Factory owns run orchestration, authorization sequencing, immutable execution contracts, lifecycle transitions, and Factory evidence. The integration owns GitHub transport, SDK behavior, normalized provider models, connections, credentials, provider evidence, webhooks, and its FeltDB state.
 
 ```text
                   .flow
@@ -36,7 +36,7 @@ Work state holds only the integration-owned `connectionId`. The contract records
 
 ## Evidence and failures
 
-Factory evidence records the run ID, contract fingerprint, application and authenticated context, connection ID, normalized operation and resource, normalized result, and `@rkendel1/github-integration@1.0.0` provenance. It does not copy the integration's internal evidence model. The integration persists its provider-specific operation/evidence records in its own FeltDB collections.
+Factory evidence records the run ID, contract fingerprint, application and authenticated context, connection ID, normalized operation and resource, normalized result, and `@rkendel1/github-integration@1.0.1` provenance. It does not copy the integration's internal evidence model. The integration persists its provider-specific operation/evidence records in its own FeltDB collections.
 
 Provider or authorization errors flow through the normal Factory lifecycle and produce failed Factory evidence. They do not create a second GitHub error authority or bypass `accepted → authorized → allocated → preparing → executing → verifying → completed/failed/cancelled`.
 
@@ -48,10 +48,10 @@ Factory is not a GitHub webhook endpoint and does not verify webhook signatures.
 
 ## Package resolution
 
-The integration repository provides a verified `1.0.0` package artifact, but its documentation does not yet assert npm publication. Factory therefore vendors only that immutable tarball at `vendor/rkendel1-github-integration-1.0.0.tgz` and resolves it with `file:vendor/rkendel1-github-integration-1.0.0.tgz`. No integration source is copied into Factory, and Node enforces the package's normal exports.
+The integration repository provides a verified `1.0.1` package artifact, but its documentation does not yet assert npm publication. Factory therefore vendors only that immutable tarball at `vendor/rkendel1-github-integration-1.0.1.tgz` and resolves it with `file:vendor/rkendel1-github-integration-1.0.1.tgz`. No integration source is copied into Factory, and Node enforces the package's normal exports.
 
 After npm publication, migration is limited to changing the dependency value to the exact registry version:
 
 ```json
-"@rkendel1/github-integration": "1.0.0"
+"@rkendel1/github-integration": "1.0.1"
 ```

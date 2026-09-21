@@ -133,7 +133,7 @@ credentials, webhooks, provider persistence, and normalized provider behavior.
 | AppPort contracts/UI | `@appport/sdk`, `@appport/client`, `@appport/protocol` | Contract projection and generic UI composition |
 | AppPort Services | `@appport/services@0.4.1` | Thin authenticated router mount; package owns state and screens |
 | AppBoundry | `@appport/appboundry@1.0.10` | Certified application identity |
-| GitHub | vendored `@rkendel1/github-integration@1.0.0` package artifact | Thin operation adapter only |
+| GitHub | vendored `@rkendel1/github-integration@1.0.1` package artifact | Thin operation adapter only |
 | PAX | external executable | Bounded execution engine |
 
 ## Development

@@ -89,7 +89,7 @@ export interface ExecutionContract {
   };
   github?: {
     package: '@rkendel1/github-integration';
-    packageVersion: '1.0.0';
+    packageVersion: '1.0.1';
     connectionId: string;
     operation: 'repositories.list' | 'pull_request.merge';
     capability: 'github.repository.read' | 'github.pull_request.merge';
@@ -196,7 +196,7 @@ export interface StructuredEvidence {
   executionMode?: 'pax' | 'native' | 'integration';
   github?: {
     package: '@rkendel1/github-integration';
-    packageVersion: '1.0.0';
+    packageVersion: '1.0.1';
     connectionId: string;
     operation: 'repositories.list' | 'pull_request.merge';
     capability: 'github.repository.read' | 'github.pull_request.merge';

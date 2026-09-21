@@ -30,7 +30,7 @@
     "@appport/services": "^0.4.1",
     "@authboundry/core": "^1.15.1",
     "@feltdb/core": "0.11.4",
-    "@rkendel1/github-integration": "file:vendor/rkendel1-github-integration-1.0.0.tgz",
+    "@rkendel1/github-integration": "file:vendor/rkendel1-github-integration-1.0.1.tgz",
     "express": "^4.22.3"
   },
   "overrides": {

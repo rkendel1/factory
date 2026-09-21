@@ -19,6 +19,8 @@ const capabilities: GitHubCapabilityName[] = [
   'github.pull_request.merge',
 ];
 
+const testNamespace = (name: string) => `${name}-${Date.now()}-${Math.random()}`;
+
 async function createIntegration() {
   const integration = createGitHubIntegration({
     authority: {
@@ -105,7 +107,7 @@ async function withGitHubFetch<T>(callback: () => Promise<T>): Promise<T> {
 test('repositories.list runs through the standalone integration and durable Factory evidence', async () => {
   await withGitHubFetch(async () => {
     const integration = await createIntegration();
-    const service = await createService({ githubIntegration: integration, namespace: 'github-read' });
+    const service = await createService({ githubIntegration: integration, namespace: testNamespace('github-read') });
     await seedWork(service, {
       operation: 'repositories.list',
       repositoryProvider: 'github',
@@ -128,7 +130,7 @@ test('repositories.list runs through the standalone integration and durable Fact
     tampered.github!.connectionId = 'attacker-connection';
     assert.throws(() => assertContractIntegrity(tampered), /fingerprint validation failed/i);
     assert.equal(evidence?.github?.package, '@rkendel1/github-integration');
-    assert.equal(evidence?.github?.packageVersion, '1.0.0');
+    assert.equal(evidence?.github?.packageVersion, '1.0.1');
     assert.deepEqual(evidence?.github?.result, [{
       id: 42,
       nodeId: 'R_42',
@@ -147,7 +149,7 @@ test('repositories.list runs through the standalone integration and durable Fact
 test('pull_request.merge uses its mutation capability and preserves normalized result', async () => {
   await withGitHubFetch(async () => {
     const integration = await createIntegration();
-    const service = await createService({ githubIntegration: integration, namespace: 'github-merge' });
+    const service = await createService({ githubIntegration: integration, namespace: testNamespace('github-merge') });
     await seedWork(service, {
       operation: 'pull_request.merge',
       repositoryProvider: 'github',
@@ -176,7 +178,7 @@ test('GitHub provider failures use the normal failed run and evidence path', asy
   });
   try {
     const integration = await createIntegration();
-    const service = await createService({ githubIntegration: integration, namespace: 'github-failure' });
+    const service = await createService({ githubIntegration: integration, namespace: testNamespace('github-failure') });
     await seedWork(service, {
       operation: 'repositories.list',
       repositoryProvider: 'github',
@@ -262,7 +264,7 @@ test('Factory keeps GitHub behind the packaged integration root and owns no GitH
   };
   assert.equal(
     packageJson.dependencies['@rkendel1/github-integration'],
-    'file:vendor/rkendel1-github-integration-1.0.0.tgz',
+    'file:vendor/rkendel1-github-integration-1.0.1.tgz',
   );
   assert.equal(packageJson.dependencies['@appport/services'], '^0.4.1');
   assert.match(packageJson.dependencies.express, /^\^4\./);

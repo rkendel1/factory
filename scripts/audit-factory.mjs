@@ -139,7 +139,7 @@ const report = {
     testScope: 'tests/**/*.ts',
     integrationScope: integrationFiles,
     excludedFromFactory: ['node_modules', 'dist', 'vendored package artifacts', 'lockfiles'],
-    githubIntegrationRuntime: 'Compiled JavaScript shipped by the installed 1.0.0 artifact; reported separately and never counted as Factory LOC.',
+    githubIntegrationRuntime: 'Compiled JavaScript shipped by the installed 1.0.1 artifact; reported separately and never counted as Factory LOC.',
     githubIntegrationTests: 'Not distributed in the package artifact. When the canonical sibling checkout is available, its source and test LOC are recorded as external metrics.',
   },
   loc: {
