@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { createServices, type AppPortServices } from '@appport/services';
 import type { StateFirstDB } from '@feltdb/core';
+import { resolveAppPortServicesDeployment } from '../src/appport-services.js';
 import { createHttpServer } from '../src/server.js';
 import { createTempWorkspace } from './helpers.js';
 import {
@@ -255,5 +257,62 @@ test('service unavailability returns a sanitized failure without a local fallbac
     assert.match(body.message, /could not complete/);
     assert.match(body.error.message, /Request ID: cfg_/);
     assert.doesNotMatch(JSON.stringify(body), /backend unavailable|secret-value/);
+  }, services);
+});
+
+test('AppPort Services state stays on the Factory FeltDB surface, not the canonical application service', async () => {
+  const requested: string[] = [];
+  const authority = createServer((request, response) => {
+    requested.push(`${request.method} ${request.url}`);
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ records: [], nextCursor: null }));
+  });
+  await new Promise<void>((resolve) => authority.listen(0, resolve));
+  const address = authority.address();
+  assert.ok(address && typeof address !== 'string');
+
+  const deployment = resolveAppPortServicesDeployment({
+    mode: 'remote',
+    namespace: 'software-factory-appport-services',
+    environment: 'production',
+    serverUrl: `http://127.0.0.1:${address.port}`,
+    serverToken: 'authority-token',
+  });
+  assert.equal(deployment.applicationId, undefined);
+
+  try {
+    const listed = await createServices(deployment).configuration.list(
+      { tenantId: 'tenant-a', applicationId: 'software_factory', environment: 'production' },
+      {
+        principalId: 'operator-1', principalType: 'api_key', tenantId: 'tenant-a',
+        scopes: ['configuration.read'], credentialId: 'authboundry',
+      },
+    );
+    assert.deepEqual(listed, { variables: [], secrets: [], declarations: [] });
+  } finally {
+    await new Promise<void>((resolve, reject) => authority.close((error) => error ? reject(error) : resolve()));
+  }
+
+  // The canonical application service resolves an application revision that
+  // Factory never registers, and answered every configuration request with 404.
+  assert.deepEqual(requested.filter((entry) => entry.includes('/v1/')), []);
+  assert.ok(requested.includes('POST /query'));
+});
+
+test('a durable authority failure is reported as an upstream failure, not a missing resource', async () => {
+  const workingDirectory = await createTempWorkspace('factory-services-authority');
+  const services = createServices({ mode: 'local', namespace: 'authority-failure', path: workingDirectory });
+  services.configuration.list = async () => {
+    throw Object.assign(new Error(`application not found: ${secret}`), {
+      status: 404, code: 'NOT_FOUND', requestId: 'felt_authority_1',
+    });
+  };
+  await withServicesServer(authorized([]), async (origin) => {
+    const response = await fetch(`${origin}/v1/configuration`);
+    assert.equal(response.status, 502);
+    const body = await response.json() as { code: string; message: string; error: { message: string } };
+    assert.equal(body.code, 'APPPORT_AUTHORITY_UNAVAILABLE');
+    assert.match(body.error.message, /Configuration request failed \(502\) APPPORT_AUTHORITY_UNAVAILABLE/);
+    assert.doesNotMatch(JSON.stringify(body), /APPPORT_RESOURCE_NOT_FOUND|application not found|secret-value/);
   }, services);
 });

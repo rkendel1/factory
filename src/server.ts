@@ -18,7 +18,11 @@ import { BrowserAdapterError, type BrowserRedirectResult } from '@authboundry/co
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
 import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
-import { createFactoryAppPortServices, type FactoryAppPortServices } from './appport-services.js';
+import {
+  createFactoryAppPortServices,
+  resolveAppPortServicesDeployment,
+  type FactoryAppPortServices,
+} from './appport-services.js';
 import { composeProductUi, factoryUiContribution, factoryUiContributor, type UiContributor } from './ui.js';
 import type { AppPortUiContext, ComposedUi } from '@appport/client';
 import { filterUiContribution, type UiDiscoveryDocument } from '@appport/protocol';
@@ -136,20 +140,14 @@ export class FactoryService {
     });
     this.appPortServices = createFactoryAppPortServices({
       ...(config.appPortServices ? { services: config.appPortServices } : {}),
-      deployment: config.mode === 'remote'
-        ? {
-            mode: 'remote',
-            namespace: `${config.namespace ?? 'software-factory'}-appport-services`,
-            url: config.serverUrl,
-            token: config.serverToken,
-            applicationId: application.identity.id,
-            environment: this.environmentId,
-          }
-        : {
-            mode: 'local',
-            namespace: `${config.namespace ?? 'software-factory'}-appport-services`,
-            path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
-          },
+      deployment: resolveAppPortServicesDeployment({
+        mode: config.mode === 'remote' ? 'remote' : 'local',
+        namespace: `${config.namespace ?? 'software-factory'}-appport-services`,
+        environment: this.environmentId,
+        serverUrl: config.serverUrl,
+        serverToken: config.serverToken,
+        path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
+      }),
       authenticator: () => config.authenticator ?? createAuthBoundryAuthenticator(config),
       applicationId: application.identity.id,
       environment: this.environmentId,
