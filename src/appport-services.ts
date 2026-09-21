@@ -64,6 +64,8 @@ export function createFactoryAppPortServices(options: {
   services?: AppPortServices;
   deployment: CreateServicesOptions;
   authenticator: () => Authenticator;
+  applicationId: string;
+  environment: string;
 }): FactoryAppPortServices {
   const services = options.services ?? createServices(options.deployment);
   const application = express();
@@ -79,6 +81,10 @@ export function createFactoryAppPortServices(options: {
         scopes: [...new Set([capability, ...(context.authorizedCapabilities ?? [])])],
         credentialId: typeof context.session?.id === 'string' ? context.session.id : 'authboundry',
       } satisfies AuthenticatedPrincipal;
+      if (request.path.startsWith('/v1/configuration')) {
+        if (typeof request.query.application !== 'string') request.query.application = options.applicationId;
+        if (typeof request.query.environment !== 'string') request.query.environment = options.environment;
+      }
       next();
     } catch {
       response.status(401).json({ error: 'AuthBoundry authentication or authorization failed' });

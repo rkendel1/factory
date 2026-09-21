@@ -10,8 +10,9 @@ import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
 import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
 import { createFactoryAppPortServices, type FactoryAppPortServices } from './appport-services.js';
-import { composeProductUi, factoryUiContributor, type UiContributor } from './ui.js';
+import { composeProductUi, factoryUiContribution, factoryUiContributor, type UiContributor } from './ui.js';
 import type { AppPortUiContext, ComposedUi } from '@appport/client';
+import { filterUiContribution, type UiDiscoveryDocument } from '@appport/protocol';
 import {
   formatDeploymentConfigDiagnostics,
   readDeploymentConfig,
@@ -93,6 +94,7 @@ export class FactoryService {
   private readonly github: FactoryGitHubAdapter;
   private readonly uiContributors: readonly UiContributor[];
   private readonly applicationId: string;
+  private readonly environmentId: string;
   private paxVersion?: string;
   private shuttingDown = false;
 
@@ -103,6 +105,7 @@ export class FactoryService {
     this.flowSpec = loadFactoryFlow(config.flowPath);
     const application = createCanonicalApplicationContract(this.flowSpec);
     this.applicationId = application.identity.id;
+    this.environmentId = config.environmentId ?? (config.mode === 'remote' ? 'production' : 'development');
     this.appPort = createAppPortAdapter({
       application,
     });
@@ -123,6 +126,8 @@ export class FactoryService {
             path: config.appportPath ?? `${config.workingDirectory ?? process.cwd()}/appport-services`,
           },
       authenticator: () => config.authenticator ?? createAuthBoundryAuthenticator(config),
+      applicationId: application.identity.id,
+      environment: this.environmentId,
     });
     this.uiContributors = [factoryUiContributor, this.appPortServices.ui];
     this.github = createFactoryGitHubAdapter({
@@ -194,10 +199,14 @@ export class FactoryService {
       principal: { id: context.principal },
       tenant: context.tenant,
       application: this.applicationId,
-      environment: this.config.environmentId ?? (this.config.mode === 'remote' ? 'production' : 'local'),
+      environment: this.environmentId,
       capabilities: context.authorizedCapabilities ?? [],
     };
     return composeProductUi(this.uiContributors, uiContext);
+  }
+
+  discoverUi(context: AuthenticatedContext): UiDiscoveryDocument {
+    return filterUiContribution(factoryUiContribution, context.authorizedCapabilities ?? []);
   }
 
   handlesAppPortServices(pathname: string): boolean {
@@ -586,7 +595,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           writeJson(response, 401, { error: 'AuthBoundry authentication or authorization failed' });
           return;
         }
-        writeJson(response, 200, await service.composeUi(context));
+        writeJson(response, 200, service.discoverUi(context));
         return;
       }
 

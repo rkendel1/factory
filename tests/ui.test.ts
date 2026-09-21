@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { discoverUi } from '@appport/client';
 import { UI_PROTOCOL_ID, validateUiContribution } from '@appport/protocol';
 import { appPortServicesUiContribution } from '../src/appport-services.js';
 import { composeProductUi, factoryUiContribution, factoryUiContributor } from '../src/ui.js';
@@ -19,6 +20,8 @@ test('Factory and AppPort Services publish valid AppPort/ui/1 contributions', ()
     assert.equal(new Set(contribution.navigation.map(({ id }) => id)).size, contribution.navigation.length);
     assert.deepEqual(contribution.composition.requires, ['identity', 'tenant', 'application', 'environment']);
   }
+  assert.deepEqual(factoryUiContribution.product, { id: 'software_factory', version: '1.0.0' });
+  assert.ok(factoryUiContribution.surfaces.every(({ route }) => route.startsWith('/') && !route.startsWith('//')));
 });
 
 test('generic product composition preserves shared context and only granted capabilities', async () => {
@@ -40,6 +43,22 @@ test('generic product composition preserves shared context and only granted capa
   assert.ok(composed.surfaces.some(({ route }) => route === '/factory/runs'));
   assert.ok(composed.surfaces.some(({ route }) => route === '/configuration'));
   assert.ok(composed.surfaces.every(({ capabilities: required }) => required.every((capability) => capabilities.includes(capability))));
+  assert.equal(new Set(composed.surfaces.map(({ id }) => id)).size, composed.surfaces.length);
+  assert.equal(new Set(composed.navigation.map(({ id }) => id)).size, composed.navigation.length);
+  assert.ok(composed.navigation.some(({ product }) => product.id === 'software_factory'));
+  assert.ok(composed.navigation.some(({ product }) => product.id === 'appport-services'));
+});
+
+test('single-product composition works for either independently owned product', async () => {
+  const context = {
+    principal: { id: 'operator-1' }, tenant: 'tenant-a', application: 'software_factory', environment: 'test', capabilities,
+  } as const;
+  const factoryOnly = await composeProductUi([factoryUiContributor], context);
+  const servicesOnly = await composeProductUi([{ contribution: () => appPortServicesUiContribution }], context);
+  assert.deepEqual(factoryOnly.products.map(({ id }) => id), ['software_factory']);
+  assert.deepEqual(servicesOnly.products.map(({ id }) => id), ['appport-services']);
+  assert.ok(factoryOnly.navigation.length > 0);
+  assert.ok(servicesOnly.navigation.length > 0);
 });
 
 test('composition filters unauthorized surfaces and never contains secret values', async () => {
@@ -58,7 +77,7 @@ test('composition filters unauthorized surfaces and never contains secret values
   assert.doesNotMatch(JSON.stringify(composed), new RegExp(marker));
 });
 
-test('authenticated UI discovery composes Factory with packaged service UI', async () => {
+test('authenticated AppPort discovery returns a filtered Factory contribution', async () => {
   const workingDirectory = await createTempWorkspace('factory-ui');
   const seen: string[] = [];
   const authenticator: Authenticator = {
@@ -75,11 +94,11 @@ test('authenticated UI discovery composes Factory with packaged service UI', asy
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/v1/ui`);
-    assert.equal(response.status, 200);
-    const body = await response.json() as { products: Array<{ id: string }>; context: { tenant: string; application: string; environment: string } };
-    assert.deepEqual(body.products.map(({ id }) => id), ['software_factory', 'appport-services']);
-    assert.deepEqual(body.context, { principal: { id: 'operator-1' }, tenant: 'tenant-a', application: 'software_factory', environment: 'test', capabilities });
+    const body = await discoverUi(`http://127.0.0.1:${address.port}`);
+    assert.equal(body.protocol, UI_PROTOCOL_ID);
+    assert.deepEqual(body.product, { id: 'software_factory', version: '1.0.0' });
+    assert.deepEqual(body.surfaces.map(({ id }) => id), ['work', 'runs', 'evidence', 'artifacts']);
+    assert.deepEqual(body.capabilities, ['artifact.write', 'evidence.write', 'repository.read']);
     assert.deepEqual(seen, ['factory.ui.read']);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
