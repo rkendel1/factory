@@ -241,7 +241,7 @@ The packaged integration is not Factory code. The historical Factory GitHub foot
 | --- | --- | --- |
 ${dependencyRows}
 
-Factory directly consumes \`@appport/services\` for package-owned configuration, secret, API-key, notification, webhook, job, and management-UI capabilities. Express is direct only because the published service package exports Express routers while declaring Express as a development dependency. The GitHub integration independently declares \`@appport/services@${githubPackage.dependencies['@appport/services']}\` for its own provider state.
+Factory directly consumes \`@appport/services\` for package-owned configuration, secret, API-key, notification, webhook, job, and management-UI capabilities. Express remains direct because Factory mounts the package's exported Express router into its HTTP server; AppPort Services also declares Express as a runtime dependency. The GitHub integration independently declares \`@appport/services@${githubPackage.dependencies['@appport/services']}\` for its own provider state.
 
 ## Boundary inventory
 

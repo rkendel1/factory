@@ -14,7 +14,7 @@ import type { UiContributor } from './ui.js';
 
 export const appPortServicesUiContribution: UiContribution = validateUiContribution({
   protocol: UI_PROTOCOL_ID,
-  product: { id: 'appport-services', version: '0.4.1' },
+  product: { id: 'appport-services', version: '0.4.2' },
   surfaces: [
     { id: 'configuration', title: 'Configuration', route: '/configuration', capabilities: ['configuration.read'] },
     { id: 'secrets', title: 'Secrets', route: '/secrets', capabilities: ['configuration.read'] },

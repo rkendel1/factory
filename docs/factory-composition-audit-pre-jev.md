@@ -2,7 +2,7 @@
 
 ## Baseline
 
-Clean commit `f244071640b48f923eeb14f15d4b9b5a0108da19`, tree `f7d824f207ccc8831ed34a76a64d69eaab6003a8`.
+Working-tree preview based on HEAD `3b56daae6a691e37fce0f6e829daa16dd3efd5e7`. Rerun after committing to record the clean baseline commit and tree.
 
 - JEV integrated: **NO**
 - JEV authority: **NO**
@@ -14,9 +14,9 @@ Clean commit `f244071640b48f923eeb14f15d4b9b5a0108da19`, tree `f7d824f207ccc8831
 
 | Measure | LOC |
 | --- | ---: |
-| Factory application source | 2206 |
-| Factory integration/adapter subset | 973 |
-| Factory tests | 1297 |
+| Factory application source | 2220 |
+| Factory integration/adapter subset | 979 |
+| Factory tests | 1372 |
 | `.flow` | 239 |
 | Packaged GitHub integration runtime (separate) | 694 |
 | GitHub integration source checkout (separate) | 1221 |
@@ -32,13 +32,13 @@ The packaged integration is not Factory code. The historical Factory GitHub foot
 | `@appport/client` | `1.0.0` | `sha512-x5EdpDN4GpOwwT5vs7xIdsLyRxzqGDT382zecpGYjH+Oo6XSIn1w5HTQnSpbPHcCPV1P8/gh1uoFohRTsS5b6Q==` |
 | `@appport/protocol` | `1.0.0` | `sha512-8+wh6XJTZ4aObwKrvGtVSZR0lE+SwWb2wui1jf8dPJNHYKNzkFV8E//UaOe9+nE6Q3KKIhTbzavnncBnC38yyQ==` |
 | `@appport/sdk` | `1.1.19` | `sha512-eXM3OJUGMgecVfjEj5mrANTWLVRcgInKQ+GnUtvQZ6N9OuLhZTttQuVBNC1xA7Uvk2P+bFOF4j0p04RJPOJ3AA==` |
-| `@appport/services` | `0.4.1` | `sha512-HOxCAusqrLldl+FgJLVqDNyTo004vcjSJJ9yTISCO7PB82BbXgFA2zVzGtWJPvjd1e3Ot+jvRNOU8hajuhW10Q==` |
+| `@appport/services` | `0.4.2` | `sha512-UwtpvmuvdUkyvwkud7dolUCH5awOlLgN8IOzqTqz7D+Z3grdBgNKXwL9e57z70ZrMaf4RXKwbxnHLLGiMqFOhA==` |
 | `@authboundry/core` | `1.15.1` | `sha512-O+sIQmWIpGNASiOt0sEQjQejlVKnBoUW/RLF/8JA6paj0EK14jGMCzIZqJai36pzSCww9NBnthuSCw6khTLkTw==` |
 | `@feltdb/core` | `0.11.4` | `sha512-g0T/m66jdYYouarLdR8gxXYrbYP9pKoPtibNrpL3sUGdtyRKZ6CAoIIyHBBy8PQb5jxpXHYj0DJ4FrBcudt6zQ==` |
 | `@rkendel1/github-integration` | `1.0.1` | `sha512-T/VjLs1JA3yp/3zDP5c4Iw2vCaRS4JldiSnICzD/oLx9MePdXJOZr5f32BBVmZyIH9UCz+hsLT+FE/xAl9ujwg==` |
 | `express` | `4.22.3` | `sha512-Bdcs4+3qlpVlx2NRn6fgX2Ue2/gGRaPeawebgclM0ERSCqDpA+owF1fdPwjJUTAJWMTuAaxjDf+hzb0/4eKvvw==` |
 
-Factory directly consumes `@appport/services` for package-owned configuration, secret, API-key, notification, webhook, job, and management-UI capabilities. Express is direct only because the published service package exports Express routers while declaring Express as a development dependency. The GitHub integration independently declares `@appport/services@0.4.1` for its own provider state.
+Factory directly consumes `@appport/services` for package-owned configuration, secret, API-key, notification, webhook, job, and management-UI capabilities. Express remains direct because Factory mounts the package's exported Express router into its HTTP server; AppPort Services also declares Express as a runtime dependency. The GitHub integration independently declares `@appport/services@0.4.1` for its own provider state.
 
 ## Boundary inventory
 

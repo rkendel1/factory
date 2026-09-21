@@ -1,5 +1,8 @@
 # AppPort Services configuration CRUD defect
 
+Status: fixed upstream in `@appport/services@0.4.2` and verified by Factory's
+real-store CRUD integration test.
+
 ## Summary
 
 `@appport/services@0.4.1` can create and list configuration records, but its

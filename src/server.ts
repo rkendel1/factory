@@ -177,7 +177,7 @@ export class FactoryService {
       },
       appportServices: {
         product: 'appport-services',
-        version: '0.4.1',
+        version: '0.4.2',
         managementUi: true,
       },
       runtime,
