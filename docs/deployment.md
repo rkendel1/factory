@@ -49,7 +49,12 @@ the moment an authorized operation is spawned; see
 
 ```sh
 fly secrets set FLY_API_TOKEN="..." -a factory-idvhpa
+fly secrets set GITHUB_TOKEN="..." -a factory-idvhpa   # read access to the project's private GitHub repositories
 ```
+
+Repositories are cloned from their remote at execution time, so the deployed
+Factory needs no `FACTORY_REPOSITORY_ROOT`; a repository shows as
+**connected** on the project's Repositories tab once `git ls-remote` reaches it.
 
 Deploy and verify:
 

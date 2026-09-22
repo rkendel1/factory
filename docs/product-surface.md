@@ -189,7 +189,7 @@ identity.
 
 | Provider | Capabilities | Needs |
 | --- | --- | --- |
-| git | `repository.inspect`, `repository.checkout` | git on PATH |
+| git | `repository.inspect`, `repository.checkout` | git on PATH, a connected repository (or a mirror under `FACTORY_REPOSITORY_ROOT`), `GITHUB_TOKEN` for a private GitHub remote |
 | local | `build.run`, `test.run` | npm on PATH |
 | fly | `deployment.create`, `environment.inspect`, `environment.health` | fly CLI, `FLY_API_TOKEN` |
 

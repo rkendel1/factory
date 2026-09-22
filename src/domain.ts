@@ -11,6 +11,7 @@ import type {
   OperationalWorkEventRecord,
   OperationalWorkRecord,
   ProjectRecord,
+  ReconciliationCycleRecord,
   ReconciliationRecord,
   ReconciliationStatus,
   RepositoryRecord,
@@ -39,6 +40,7 @@ export class FactoryDomain {
   private runRecords() { return this.db.collection<RunRecord>(COLLECTIONS.runs); }
   private operationalWork() { return this.db.collection<OperationalWorkRecord>(COLLECTIONS.operationalWork); }
   private operationalWorkEvents() { return this.db.collection<OperationalWorkEventRecord>(COLLECTIONS.operationalWorkEvents); }
+  private cycles() { return this.db.collection<ReconciliationCycleRecord>(COLLECTIONS.reconciliationCycles); }
 
   // -- Projects ------------------------------------------------------------
 
@@ -130,6 +132,14 @@ export class FactoryDomain {
   async getRepository(tenantId: string, projectId: string, id: string): Promise<RepositoryRecord | null> {
     const record = await this.repositories().get(id);
     return record && record.tenantId === tenantId && record.projectId === projectId ? record : null;
+  }
+
+  async setRepositoryConnection(tenantId: string, projectId: string, repositoryId: string, connection: RepositoryRecord['connection']): Promise<RepositoryRecord | null> {
+    const current = await this.repositories().get(repositoryId);
+    if (!current || current.tenantId !== tenantId || current.projectId !== projectId) return null;
+    const next: RepositoryRecord = { ...current, ...(connection ? { connection } : {}) };
+    await this.repositories().put(next, next.id);
+    return next;
   }
 
   async removeRepository(tenantId: string, projectId: string, id: string): Promise<boolean> {
@@ -400,6 +410,12 @@ export class FactoryDomain {
     return released;
   }
 
+  /** Reconciliation Actions on an environment whose external outcome is still unknown. */
+  async unknownActionsForEnvironment(tenantId: string, environmentId: string): Promise<ActionRecord[]> {
+    const actions = await this.actionRecords().find({ tenantId, environmentId, status: 'unknown' });
+    return actions.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
   /** An Action already doing this work, so reconciliation does not duplicate it. */
   async findOpenActionByFingerprint(
     tenantId: string,
@@ -443,6 +459,19 @@ export class FactoryDomain {
   async graphActions(tenantId: string, graphId: string): Promise<ActionRecord[]> {
     const actions = await this.actionRecords().find({ tenantId, graphId });
     return actions.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || left.id.localeCompare(right.id));
+  }
+
+  // -- Reconciliation cycles (append-only history) --------------------------
+
+  async appendReconciliationCycle(record: Omit<ReconciliationCycleRecord, 'id' | 'createdAt'>): Promise<ReconciliationCycleRecord> {
+    const cycle: ReconciliationCycleRecord = { id: `cyc_${randomUUID()}`, createdAt: new Date().toISOString(), ...record };
+    await this.cycles().insert(cycle, cycle.id);
+    return cycle;
+  }
+
+  async listReconciliationCycles(tenantId: string, projectId: string, environmentId: string, limit = 50): Promise<ReconciliationCycleRecord[]> {
+    const cycles = await this.cycles().find({ tenantId, projectId, environmentId });
+    return cycles.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)).slice(0, limit);
   }
 
   // -- Operational work (Attn ↔ Factory) -----------------------------------

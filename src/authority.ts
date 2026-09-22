@@ -300,6 +300,7 @@ export async function authorizeExecution(
         // The revision the Action asked to reach; recorded as requested, and
         // reality is whatever the checkout then reports.
         ...(request.repository.commit ? { commit: request.repository.commit } : {}),
+        ...(request.repository.url ? { url: request.repository.url } : {}),
       },
       operation: request.operation,
       capabilities: authority.capabilities,

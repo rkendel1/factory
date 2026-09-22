@@ -2,6 +2,7 @@ import { cp, mkdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { RepositoryRef } from './types.js';
+import { gitFailureReason } from './repository-connection.js';
 
 export interface WorkspaceHandle {
   rootPath: string;
@@ -12,7 +13,7 @@ export interface WorkspaceHandle {
   evidencePath: string;
 }
 
-async function runProcess(command: string, args: string[], cwd?: string): Promise<string> {
+async function runProcess(command: string, args: string[], cwd?: string, env: Record<string, string> = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -20,6 +21,7 @@ async function runProcess(command: string, args: string[], cwd?: string): Promis
         PATH: process.env.PATH ?? '',
         HOME: process.env.HOME ?? '',
         GIT_TERMINAL_PROMPT: '0',
+        ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -34,7 +36,7 @@ async function runProcess(command: string, args: string[], cwd?: string): Promis
         resolve(stdout.trim());
         return;
       }
-      reject(new Error(`${command} ${args.join(' ')} failed: ${stderr.trim() || stdout.trim()}`));
+      reject(new Error(`${command} ${args.join(' ')} failed: ${gitFailureReason(stderr) ?? gitFailureReason(stdout) ?? `exited ${code}`}`));
     });
   });
 }
@@ -57,6 +59,17 @@ export async function createWorkspace(runId: string, workspaceRoot = '/tmp/softw
   return handle;
 }
 
+async function checkout(destinationPath: string, ref?: string, commit?: string, env: Record<string, string> = {}): Promise<string> {
+  if (commit) {
+    // The real checkout. A revision the repository does not have fails here,
+    // with git's own reason, before anything runs against the workspace.
+    await runProcess('git', ['-c', 'advice.detachedHead=false', 'checkout', '--detach', commit], destinationPath, env);
+  } else if (ref) {
+    await runProcess('git', ['checkout', ref], destinationPath, env);
+  }
+  return await runProcess('git', ['rev-parse', 'HEAD'], destinationPath, env);
+}
+
 async function copyRepository(sourcePath: string, destinationPath: string, ref?: string, commit?: string): Promise<string | undefined> {
   try {
     await stat(path.join(sourcePath, '.git'));
@@ -71,27 +84,39 @@ async function copyRepository(sourcePath: string, destinationPath: string, ref?:
 
   // A requested commit needs history; a branch needs only its tip.
   await runProcess('git', commit ? ['clone', sourcePath, destinationPath] : ['clone', '--depth', '1', sourcePath, destinationPath]);
-  if (commit) {
-    // The real checkout. A revision the repository does not have fails here,
-    // with git's own reason, before anything runs against the workspace.
-    await runProcess('git', ['-c', 'advice.detachedHead=false', 'checkout', '--detach', commit], destinationPath);
-  } else if (ref) {
-    await runProcess('git', ['checkout', ref], destinationPath);
-  }
-  return await runProcess('git', ['rev-parse', 'HEAD'], destinationPath);
+  return checkout(destinationPath, ref, commit);
+}
+
+/** Clone the connected remote. The credential travels only in git's environment. */
+async function cloneRemote(url: string, destinationPath: string, ref?: string, commit?: string, env: Record<string, string> = {}): Promise<string> {
+  const args = commit
+    ? ['clone', '--no-checkout', url, destinationPath]
+    : ['clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), url, destinationPath];
+  await runProcess('git', args, undefined, env);
+  return checkout(destinationPath, commit ? undefined : ref, commit, env);
+}
+
+export interface MaterializeOptions {
+  /** Git environment carrying the repository credential, resolved at the boundary. */
+  credentialEnv?: Record<string, string>;
 }
 
 export async function materializeRepository(
   repository: RepositoryRef,
   workspace: WorkspaceHandle,
   repositoryRoot?: string,
+  options: MaterializeOptions = {},
 ): Promise<{ commit?: string }> {
   const sourcePath = repository.path ?? repositoryRoot;
-  if (!sourcePath) {
-    throw new Error('No local repository mirror is configured for this execution request');
+  let commit: string | undefined;
+  if (sourcePath && (await stat(sourcePath).then(() => true, () => false))) {
+    commit = await copyRepository(sourcePath, workspace.repositoryPath, repository.ref, repository.commit);
+  } else if (repository.url) {
+    commit = await cloneRemote(repository.url, workspace.repositoryPath, repository.ref, repository.commit, options.credentialEnv);
+  } else {
+    throw new Error(`repository ${repository.owner}/${repository.name} is not connected: no local mirror and no remote URL`);
   }
 
-  const commit = await copyRepository(sourcePath, workspace.repositoryPath, repository.ref, repository.commit);
   // The commit is what git reports after the checkout, never what was asked
   // for. A requested commit the checkout did not reach is a failure, not a fact.
   if (repository.commit && commit && commit !== repository.commit && !commit.startsWith(repository.commit)) {

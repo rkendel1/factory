@@ -156,8 +156,8 @@ pretends otherwise.
 
 | Capability | Provider | Real operation | Resource | Credential | Verification | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `repository.inspect` | git | `git status --porcelain=v2 --branch` in a fresh clone of the configured repository | repository (`git:<provider>:<owner>/<name>`) | none | HEAD, branch, upstream and clean/dirty state as git reports them; the inspected HEAD must match the checked-out revision | executable |
-| `repository.checkout` | git | clone, then `git checkout --detach <revision>` (the Action's `parameters.revision`) or the desired branch; `git rev-parse --verify HEAD` | repository | none | the resulting HEAD, and that it equals the requested revision when one was requested | executable |
+| `repository.inspect` | git | `git status --porcelain=v2 --branch` in a fresh clone of the connected repository | repository (`git:<provider>:<owner>/<name>`) | `GITHUB_TOKEN` for a private GitHub remote | HEAD, branch, upstream and clean/dirty state as git reports them; the inspected HEAD must match the checked-out revision | executable |
+| `repository.checkout` | git | clone, then `git checkout --detach <revision>` (the Action's `parameters.revision`) or the desired branch; `git rev-parse --verify HEAD` | repository | `GITHUB_TOKEN` for a private GitHub remote | the resulting HEAD, and that it equals the requested revision when one was requested | executable |
 | `build.run` | local | `npm run build --if-present` in the ephemeral workspace | workspace of the repository | none | the declared build script exited 0; new top-level artifacts are recorded; a repository without a build script is `verification-unavailable` | executable |
 | `test.run` | local | `npm run test --if-present` | workspace of the repository | none | the declared test script's own result | executable |
 | `deployment.create` | fly | `fly deploy --remote-only --yes` with `FLY_APP` bound from the environment | environment → `fly:app:<app>` | `FLY_API_TOKEN` | the release fly printed, **and** a live HTTP probe of the environment's health URL | executable when the fly CLI and credential are present |
@@ -181,6 +181,94 @@ boundary and a live health endpoint); the same work requested through the
 Operational Work contract; a real provider failure; a verification failure; an
 unknown outcome; idempotent execution; and the whole state reopened after a
 Factory restart.
+
+## The operational control loop
+
+Factory's loop has one implementation, `reconcileEnvironment`, which the
+worker, the "Reconcile Now" button and the smoke test all call:
+
+```
+Desired State → Observe Reality → Compare → drift? → Action → AuthBoundry
+  → Execute → Verify → Persist Evidence → Observe Reality → Compare → reconciled / drift
+```
+
+**Observation is real, and its absence is not drift.** Reconciliation is the
+one writer of an environment's current state. When the environment configures
+`configuration.healthUrl`, the resource itself is asked: its health, and the
+revision it reports (`version`, `revision` or `commit` in its health body) are
+written as the observed state, marked `observation.kind = observed`. When it
+configures nothing to observe, the evidence of the last verified operation
+stands, marked `recorded`. When it is configured but cannot be reached, the
+observation is `provider-unavailable`; when nothing binds, `resource-unavailable`.
+`compareReality` turns any of those into the drift status `unavailable`, with
+no field marked drifted and no Action proposed: an environment Factory cannot
+see is never remediated. An environment that answers with an error is
+`observed` and `unhealthy` — a fact, not an outage. API reads mutate nothing.
+
+**Drift is deterministic.** The same desired state and the same observed state
+produce the same result: `reconciled`, `drifted`, `unknown` (never observed)
+or `unavailable` (could not be observed now).
+
+**One Action per drift.** Drift has a fingerprint (project, environment,
+desired revision, observed revision, action type). An open Action for it —
+planned, awaiting approval, running, verifying or unknown — is adopted, and
+the cycle reports `awaiting-approval`, `executing` or `duplicate-suppressed`
+rather than planning again. An Action on the environment whose outcome is
+unknown is resolved through observation before any new operation is started;
+while reality cannot say, the cycle reports `unknown` and starts nothing.
+
+**Failures back off durably.** `execution-failed`, `verification-failed`,
+`provider-unavailable` and `error` advance `retry` on the Reconciliation
+record: attempts, last result, last Action and the next eligible time
+(interval × 2^attempt, capped at a day). Until then, and after three attempts
+until desired state or reality changes, the cycle reports `retry-suspended`
+and plans nothing. `autonomy-denied` and `authority-unavailable` leave the
+Action waiting for a person and are not retried by the loop.
+
+**Convergence is re-observed.** After an Action succeeds, the environment is
+observed again and compared again; only a match lets the cycle report
+`executed`. A deployment is verified against the revision the environment
+reports, not only against health. Environment health always comes from the
+last observation, never from the last Run: a failed Run on a healthy,
+matching environment is `converged`; a succeeded Run on an unhealthy one is
+drift.
+
+**Every cycle is durable evidence.** `ReconciliationCycle` records
+(`GET /v1/projects/:p/environments/:e/reconciliation/cycles`) keep each
+outcome: the observation, the drift determination, the fingerprint, the
+Action, Run and Evidence, the authority, and the re-observation. Cycle
+results: `converged`, `unobserved`, `unavailable`, `drift-detected`,
+`awaiting-approval`, `autonomy-denied`, `authority-unavailable`, `executing`,
+`unknown`, `executed`, `execution-failed`, `verification-failed`,
+`provider-unavailable`, `retry-suspended`, `duplicate-suppressed`, `error`.
+
+**Scheduling is durable.** Enabled, interval, next due time, lease owner and
+lease expiry live on the Reconciliation record; the worker's timer only asks
+FeltDB what is due. A restart resumes the schedule (nothing runs early), a
+dead worker's lease is reclaimed after it expires, and two workers cannot
+claim one record because claiming is a compare-and-swap.
+
+**No hidden operational state.** Process memory holds only ephemeral handles:
+the cancel handle of a process this worker is running, the correlation of an
+in-flight AppPort request, and heartbeat timers. Action, Run, graph,
+reconciliation, desired, observed, lease and retry state are FeltDB records,
+and every API answer is read from them.
+
+The controlled real-resource proof is `tests/control-loop.test.ts`: a service
+whose health endpoint reports the revision it serves, changed for real by the
+deployment, observed by Factory and inspected directly by the test. The
+production check is `scripts/smoke-control-loop.mjs`:
+
+```sh
+FACTORY_URL=https://factory.example FACTORY_AUTHORIZATION="Bearer …" \
+FACTORY_PROJECT=<project> FACTORY_ENVIRONMENT=<environment> \
+[FACTORY_OPERATION=fly.deployment.create] node scripts/smoke-control-loop.mjs
+```
+
+It identifies the project, repository and environment, reads desired state,
+observes reality, runs one reconciliation cycle, follows the Action through
+authorization, execution, verification and evidence, re-observes reality, and
+exits non-zero if Factory claims convergence that reality does not show.
 
 ## Durable execution ownership and uncertain outcomes
 
@@ -276,12 +364,12 @@ stored, logged or returned:
 
 | Provider | Credential names | Notes |
 | --- | --- | --- |
-| git | none | reads the mirrored repository |
+| git | `GITHUB_TOKEN` (GitHub repositories) | handed to git through its environment as an `http.extraheader`, never as an argument; a public remote needs none |
 | local | none | runs the repository's own scripts in an ephemeral workspace |
 | fly | `FLY_API_TOKEN` | read by the fly CLI from its process environment |
 
 In production, set provider credentials as platform secrets (for the Fly
-deployment, `fly secrets set FLY_API_TOKEN=... -a <factory-app>`). Factory's own
+deployment, `fly secrets set FLY_API_TOKEN=... GITHUB_TOKEN=... -a <factory-app>`). Factory's own
 process environment is the default credential resolver; a deployment can supply
 a different `credentialResolver` (for example one backed by a secrets manager)
 without any other part of Factory changing.
@@ -290,9 +378,30 @@ without any other part of Factory changing.
 
 | Provider | Requirement |
 | --- | --- |
-| git | `git` on `PATH` |
+| git | `git` on `PATH`; the repository must be **connected** (below) or mirrored under `FACTORY_REPOSITORY_ROOT` |
 | local | `npm` on `PATH` |
 | fly | `fly` CLI on `PATH` for `deployment.create` and `environment.inspect`; `environment.health` probes over HTTPS from Factory itself |
+
+**Repository connection** — a repository is connected when Factory can reach
+it, not when a record names it. Adding a repository verifies the remote with
+`git ls-remote` and records the result on the repository as `connection`:
+
+| Status | Meaning |
+| --- | --- |
+| `connected` | the remote answered; its HEAD, its default branch and the tip of the configured branch are recorded, and desired state compares against that tip |
+| `unreachable` | the remote did not answer, refused the credential, or has no such branch; the detail is git's own reason with any credential redacted |
+| `unconfigured` | no remote is known; a non-GitHub provider needs `repositoryUrl` |
+
+The remote is `repositoryUrl` when given, otherwise
+`https://github.com/<owner>/<name>.git` for a GitHub repository. Execution
+clones the connected remote into the ephemeral workspace; a local mirror under
+`FACTORY_REPOSITORY_ROOT/<owner>/<name>` is used instead when one exists.
+A repository that is not connected cannot be planned against its real commit
+and cannot execute: the Action fails with `execution-failed` and git's reason.
+`POST /v1/projects/:id/repositories/:repositoryId/verify` (the **Verify**
+button on the project's Repositories tab) re-checks the remote, and
+reconciliation refreshes the connection before each cycle so drift compares
+against what the remote holds now.
 
 **Project and environment resource configuration** — how a Factory resource
 binds to a provider resource, kept in FeltDB on the environment:

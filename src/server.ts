@@ -40,10 +40,12 @@ import {
   workPage,
 } from './product-ui.js';
 import { discoverRepository, planFromDiscovery } from './discovery.js';
+import { repositoryRemoteUrl, verifyRepositoryConnection } from './repository-connection.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
 import { createReconciliationScheduler, type SchedulerHandle } from './scheduler.js';
 import {
   interpretOperation,
+  observeEnvironmentLive,
   planOperation,
   providerExecution,
   ProviderRegistry,
@@ -135,9 +137,12 @@ import type {
   ReconciliationOutcome,
   ReconciliationRecord,
   ReconciliationResult,
+  ReconciliationRetryState,
+  EnvironmentObservation,
   EnvironmentRecord,
   ExecutionContractRecord,
   ExecutionRequestRecord,
+  RepositoryDiscovery,
   RepositoryRecord,
   VerificationCheck,
   FactoryServiceConfig,
@@ -157,7 +162,7 @@ function isTerminal(status: RunRecord['status']): boolean {
 }
 
 const requestKeys = new Set(['workId', 'repository', 'operation', 'idempotencyKey', 'github']);
-const repositoryKeys = new Set(['provider', 'owner', 'name', 'ref', 'commit']);
+const repositoryKeys = new Set(['provider', 'owner', 'name', 'ref', 'commit', 'url']);
 const githubKeys = new Set(['pullNumber', 'mergeMethod']);
 const validTransitions: Record<RunRecord['status'], RunRecord['status'][]> = {
   accepted: ['authorized', 'failed', 'cancelled'],
@@ -253,15 +258,26 @@ const RECONCILIATION_STATUS: Record<ReconciliationResult, ReconciliationRecord['
   converged: 'healthy',
   executed: 'healthy',
   unobserved: 'enabled',
+  // Not seeing the environment is not the environment being wrong.
+  unavailable: 'enabled',
   'drift-detected': 'drifted',
   'awaiting-approval': 'drifted',
   'autonomy-denied': 'drifted',
   'duplicate-suppressed': 'drifted',
+  executing: 'drifted',
+  unknown: 'drifted',
+  'retry-suspended': 'drifted',
   'authority-unavailable': 'failed',
   'execution-failed': 'failed',
   'verification-failed': 'failed',
+  'provider-unavailable': 'failed',
   error: 'failed',
 };
+
+/** Failures of the same drift back off: interval × 2^attempt, capped, then suspended. */
+const RETRY_MAX_ATTEMPTS = 3;
+const RETRY_MAX_BACKOFF_MS = 24 * 60 * 60_000;
+const RETRYABLE: ReadonlySet<ReconciliationResult> = new Set(['execution-failed', 'verification-failed', 'provider-unavailable', 'error']);
 
 export class FactoryService {
   private readonly flowSpec;
@@ -498,9 +514,7 @@ export class FactoryService {
     ]);
     const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId)
       ?? repositories[0] ?? null;
-    const discovery = this.config.repositoryRoot
-      ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
-      : null;
+    const discovery = await this.discover(repository);
 
     return environments.map((environment) => compareReality({
       project,
@@ -614,23 +628,55 @@ export class FactoryService {
     if (!environment) throw new DomainValidationError(`environment ${environmentId} was not found`);
 
     const desiredState = await this.domain.getDesiredState(tenantId, projectId);
+    /*
+     * Observe first. Reconciliation is the one writer of current state, and it
+     * writes what the resource itself reported when the environment can be
+     * observed live; when it cannot, the recorded state of the last verified
+     * operation stands, marked as such. A failed observation is recorded as a
+     * failed observation, never as drift.
+     */
+    if (!this.config.repositoryRoot) {
+      // Desired state names a branch; what that branch is at is what the
+      // remote says now, not what a record said when it was added.
+      const repositories = await this.domain.listRepositories(tenantId, projectId);
+      const source = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0];
+      if (source) await this.connectRepository(context, projectId, source.id);
+    }
+    const observation = await this.observeEnvironmentNow(tenantId, projectId, environment, desiredState);
     const reports = await this.observeReality(context, projectId);
     const drift = reports.find((report) => report.environmentId === environmentId);
     if (!drift) throw new DomainValidationError(`environment ${environmentId} was not observed`);
 
-    const current = observeEnvironment(environment);
+    const current = observeEnvironment((await this.domain.getEnvironment(tenantId, projectId, environmentId)) ?? environment);
     const revisions = {
       desiredStateRevision: desiredStateRevision(desiredState),
       observedStateRevision: observedStateRevision(current),
     };
+    const driftSummary = {
+      status: drift.status,
+      fields: drift.fields.map((field) => ({ field: field.field, desired: field.desired, current: field.current, drifted: field.drifted })),
+    };
     explanation.push(...drift.explanation);
 
-    // An environment Factory has not observed is not a drifted one.
+    // An environment Factory has not observed is not a drifted one, and one
+    // it could not observe this time is not one either.
     if (drift.status === 'unknown') {
-      return finish('unobserved', revisions);
+      return finish('unobserved', { ...revisions, observation, drift: driftSummary });
+    }
+    if (drift.status === 'unavailable') {
+      return finish('unavailable', { ...revisions, observation, drift: driftSummary });
     }
     if (drift.status === 'reconciled') {
-      return finish('converged', revisions);
+      /*
+       * Reality matches. An Action whose outcome was unknown is resolved from
+       * that fact rather than left uncertain forever: the provider is never
+       * asked again, only reality, which has just answered.
+       */
+      for (const uncertain of await this.domain.unknownActionsForEnvironment(tenantId, environmentId)) {
+        const resolved = await this.resolveUncertainAction(context, uncertain.id);
+        explanation.push(`Action ${uncertain.id} had an unknown outcome; reality now matches, and it was resolved by observation as ${resolved.status}.`);
+      }
+      return finish('converged', { ...revisions, observation, drift: driftSummary });
     }
 
     const actionType = options.operation ?? 'repo-echo';
@@ -644,17 +690,67 @@ export class FactoryService {
     // Identical drift already has work in flight; adopt it rather than fork it.
     const existing = await this.domain.findOpenActionByFingerprint(tenantId, fingerprint);
     if (existing) {
+      const adopted = {
+        ...revisions,
+        observation,
+        drift: driftSummary,
+        fingerprint,
+        actionId: existing.id,
+        ...(existing.graphId ? { graphId: existing.graphId } : {}),
+        ...(existing.autonomy ? { autonomy: existing.autonomy } : {}),
+        ...(existing.runId ? { runId: existing.runId } : {}),
+      };
+      if (existing.status === 'unknown') {
+        // Reality, not the provider, is asked about an unknown outcome.
+        const resolved = await this.resolveUncertainAction(context, existing.id);
+        explanation.push(`Action ${existing.id} has an unknown outcome; reality was observed before any retry: ${resolved.failure?.reason ?? resolved.status}.`);
+        if (resolved.status === 'succeeded') {
+          const reobservation = await this.observeEnvironmentNow(tenantId, projectId, environment, desiredState);
+          const after = (await this.observeReality(context, projectId)).find((report) => report.environmentId === environmentId);
+          return finish(after?.status === 'reconciled' ? 'executed' : 'drift-detected', { ...adopted, reobservation });
+        }
+        return finish(resolved.status === 'unknown' ? 'unknown' : resolved.status === 'planned' ? 'duplicate-suppressed' : 'execution-failed', adopted);
+      }
       explanation.push(`Action ${existing.id} is already open for this drift.`);
+      const inFlight = existing.status === 'running' || existing.status === 'authorized' || existing.status === 'executed' || existing.status === 'verifying';
       return finish(
-        existing.status === 'awaiting-approval' ? 'awaiting-approval' : 'duplicate-suppressed',
-        {
-          ...revisions,
-          fingerprint,
-          actionId: existing.id,
-          ...(existing.graphId ? { graphId: existing.graphId } : {}),
-          ...(existing.autonomy ? { autonomy: existing.autonomy } : {}),
-        },
+        existing.status === 'awaiting-approval' ? 'awaiting-approval' : inFlight ? 'executing' : 'duplicate-suppressed',
+        adopted,
       );
+    }
+
+    /*
+     * An Action on this environment whose outcome is unknown means the
+     * provider may already have acted. Reality is asked about it first, and
+     * while reality cannot say, no new operation is started against the same
+     * environment: that would be the blind duplicate the uncertainty exists
+     * to prevent.
+     */
+    for (const uncertain of await this.domain.unknownActionsForEnvironment(tenantId, environmentId)) {
+      const resolved = await this.resolveUncertainAction(context, uncertain.id);
+      explanation.push(`Action ${uncertain.id} has an unknown outcome; reality was observed before any new operation: ${resolved.status}.`);
+      if (resolved.status === 'unknown') {
+        return finish('unknown', { ...revisions, observation, drift: driftSummary, fingerprint, actionId: uncertain.id, ...(uncertain.runId ? { runId: uncertain.runId } : {}) });
+      }
+    }
+
+    /*
+     * The same drift failing again and again is not remediated by planning
+     * again and again. The durable retry state on the reconciliation record
+     * decides whether this drift is eligible for another attempt now.
+     */
+    const record = await this.domain.getReconciliation(tenantId, projectId, environmentId);
+    const retry = record?.retry;
+    if (retry && retry.fingerprint === fingerprint) {
+      const now = Date.now();
+      if (retry.suspended) {
+        explanation.push(`This drift has failed ${retry.attempts} time(s) (last: ${retry.lastResult}); no new Action until desired state or reality changes.`);
+        return finish('retry-suspended', { ...revisions, observation, drift: driftSummary, fingerprint, ...(retry.lastActionId ? { actionId: retry.lastActionId } : {}) });
+      }
+      if (Date.parse(retry.nextEligibleAt) > now) {
+        explanation.push(`This drift failed ${retry.attempts} time(s) (last: ${retry.lastResult}); the next attempt is eligible at ${retry.nextEligibleAt}.`);
+        return finish('retry-suspended', { ...revisions, observation, drift: driftSummary, fingerprint, ...(retry.lastActionId ? { actionId: retry.lastActionId } : {}) });
+      }
     }
 
     /*
@@ -713,6 +809,8 @@ export class FactoryService {
       await this.domain.patchGraph(tenantId, graph.id, { status: 'blocked' });
       return finish(unreachable ? 'authority-unavailable' : 'autonomy-denied', {
         ...revisions,
+        observation,
+        drift: driftSummary,
         fingerprint,
         actionId: action.id,
         graphId: graph.id,
@@ -736,6 +834,8 @@ export class FactoryService {
 
     const base: Partial<ReconciliationOutcome> = {
       ...revisions,
+      observation,
+      drift: driftSummary,
       fingerprint,
       actionId: executed.id,
       graphId: graph.id,
@@ -747,28 +847,105 @@ export class FactoryService {
 
     if (executed.status === 'succeeded') {
       /*
-       * Completion is not convergence. Reality is observed again, from the
-       * state the run's verification recorded, and only a comparison that
-       * finds no drift lets the pass say the environment was reconciled.
+       * Completion is not convergence. Reality is observed again — live, when
+       * the environment can be observed — and only a comparison that finds no
+       * drift lets the pass say the environment was reconciled.
        */
+      const reobservation = await this.observeEnvironmentNow(tenantId, projectId, environment, desiredState);
       const after = (await this.observeReality(context, projectId)).find((report) => report.environmentId === environmentId);
       if (after?.status === 'reconciled') {
         explanation.push(`${environment.name} re-observed after execution: it matches the declared state.`);
-        return finish('executed', base);
+        return finish('executed', { ...base, reobservation });
       }
       explanation.push(`${environment.name} re-observed after execution: ${after?.explanation.join(' ') ?? 'it could not be observed'}`);
-      return finish('drift-detected', base);
+      return finish(after?.status === 'unavailable' ? 'unavailable' : 'drift-detected', { ...base, reobservation });
+    }
+    if (executed.status === 'unknown') {
+      explanation.push('The external outcome is unknown; reality will be observed before any retry.');
+      return finish('unknown', base);
+    }
+    if (executed.outcome === 'provider-unavailable' || executed.outcome === 'resource-unavailable' || executed.outcome === 'credential-unavailable') {
+      explanation.push(`The provider could not be used: ${executed.failure?.reason ?? executed.outcome}.`);
+      return finish('provider-unavailable', base);
     }
     if (run && run.status !== 'completed') {
-      explanation.push(`Execution failed: ${run.error ?? 'the run did not complete'}.`);
+      explanation.push(`Execution failed: ${executed.failure?.reason ?? run.error ?? 'the run did not complete'}.`);
       return finish('execution-failed', base);
     }
-    if (failedVerification) {
-      explanation.push('Execution completed but verification did not pass.');
-      return finish('verification-failed', base);
+    if (failedVerification || executed.outcome === 'verification-unavailable') {
+      explanation.push(`Execution completed but verification did not establish the desired state: ${executed.failure?.reason ?? 'verification did not pass'}.`);
+      // Reality is what decides; it is re-observed so the next pass compares
+      // against what is, not against what the run said.
+      const reobservation = await this.observeEnvironmentNow(tenantId, projectId, environment, desiredState);
+      return finish('verification-failed', { ...base, reobservation });
     }
     explanation.push('Reconciliation did not converge.');
     return finish('error', base);
+  }
+
+  /**
+   * Observe the environment now, and record what was seen.
+   *
+   * This is the one writer of current state. A live answer from the resource
+   * replaces health and, when the resource reports it, the running revision;
+   * a failed observation is recorded as such and changes no fact about the
+   * environment; an environment nothing can observe keeps the recorded state
+   * of the last verified operation, marked `recorded`.
+   */
+  private async observeEnvironmentNow(
+    tenantId: string,
+    projectId: string,
+    environment: EnvironmentRecord,
+    desiredState: DesiredStateRecord | null,
+  ): Promise<EnvironmentObservation> {
+    const repositories = await this.domain.listRepositories(tenantId, projectId);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
+    const providerId = environment.provider ?? desiredState?.targetProvider ?? null;
+    const adapter = providerId ? this.registry.adapter(providerId) : null;
+    const live = await observeEnvironmentLive(adapter, { repository, environment, desiredState, discovery: null, idempotencyKey: `observe:${environment.id}` });
+    const at = new Date().toISOString();
+    const previous = (await this.domain.getEnvironment(tenantId, projectId, environment.id))?.currentState ?? environment.currentState;
+    const observation: EnvironmentObservation = live.kind === 'unsupported' && previous
+      ? { kind: 'recorded', at, detail: `${live.detail}; current state is the evidence of run ${previous.reconciledRunId ?? 'unknown'}` }
+      : { kind: live.kind, at, detail: live.detail, ...(live.source ? { source: live.source } : {}), ...(live.reported ? { reported: live.reported } : {}) };
+
+    if (live.kind === 'observed') {
+      await this.domain.setEnvironmentState(tenantId, projectId, environment.id, {
+        ...(previous ?? {}),
+        observedAt: at,
+        ...(live.reported?.revision ? { sourceCommit: live.reported.revision } : {}),
+        ...(desiredState?.targetProvider ?? environment.provider ? { provider: desiredState?.targetProvider ?? environment.provider! } : {}),
+        health: live.reported?.health ?? 'unknown',
+        observation,
+      });
+    } else if (previous) {
+      await this.domain.setEnvironmentState(tenantId, projectId, environment.id, { ...previous, observation });
+    } else if (live.kind !== 'unsupported') {
+      // Nothing recorded and nothing observable now: the state says only that.
+      await this.domain.setEnvironmentState(tenantId, projectId, environment.id, { observedAt: at, health: 'unknown', observation });
+    }
+    return observation;
+  }
+
+  /** Apply the durable retry policy to a pass's outcome. */
+  private retryStateAfter(record: ReconciliationRecord, outcome: ReconciliationOutcome, now: number): ReconciliationRetryState | undefined {
+    if (!outcome.fingerprint) return record.retry;
+    const previous = record.retry?.fingerprint === outcome.fingerprint ? record.retry : undefined;
+    if (RETRYABLE.has(outcome.result)) {
+      const attempts = (previous?.attempts ?? 0) + 1;
+      const backoff = Math.min(RETRY_MAX_BACKOFF_MS, Math.max(record.intervalMs, 60_000) * 2 ** Math.max(0, attempts - 1));
+      return {
+        fingerprint: outcome.fingerprint,
+        attempts,
+        lastResult: outcome.result,
+        ...(outcome.actionId ? { lastActionId: outcome.actionId } : {}),
+        lastAttemptAt: new Date(now).toISOString(),
+        nextEligibleAt: new Date(now + backoff).toISOString(),
+        suspended: attempts >= RETRY_MAX_ATTEMPTS,
+      };
+    }
+    if (outcome.result === 'converged' || outcome.result === 'executed') return undefined;
+    return previous;
   }
 
   /**
@@ -797,16 +974,22 @@ export class FactoryService {
     }
 
     const status = RECONCILIATION_STATUS[outcome.result];
+    const retry = this.retryStateAfter(record, outcome, now);
     const released = await this.domain.releaseReconciliation(record.id, {
       status,
       lastObservedAt: outcome.observedAt,
-      ...(outcome.result === 'executed' ? { lastReconciledAt: outcome.observedAt } : {}),
+      ...(outcome.result === 'executed' || outcome.result === 'converged' ? { lastReconciledAt: outcome.observedAt } : {}),
       ...(outcome.actionId ? { lastActionId: outcome.actionId } : {}),
       ...(outcome.runId ? { lastRunId: outcome.runId } : {}),
       ...(outcome.fingerprint ? { lastFingerprint: outcome.fingerprint } : {}),
       lastOutcome: outcome,
       lastError: status === 'failed' ? outcome.explanation[outcome.explanation.length - 1] ?? 'unknown error' : '',
       nextDueAt: nextDueAt(record, now),
+      retry,
+    });
+    await this.domain.appendReconciliationCycle({
+      reconciliationId: record.id, tenantId: record.tenantId, projectId: record.projectId, environmentId: record.environmentId,
+      workerId: record.leaseOwner ?? this.workerId, outcome,
     });
     return { record: released ?? record, outcome };
   }
@@ -861,6 +1044,10 @@ export class FactoryService {
         explanation: record.lastOutcome?.explanation ?? [],
         graphId: record.lastOutcome?.graphId ?? null,
         currentState: environment?.currentState ?? null,
+        observation: environment?.currentState?.observation ?? record.lastOutcome?.observation ?? null,
+        retry: record.retry ?? null,
+        lastVerification: action?.verification ?? null,
+        run: action?.runId ? await this.domain.getRun(tenantId, action.runId) : null,
         action: action
           ? {
               id: action.id,
@@ -887,10 +1074,14 @@ export class FactoryService {
     now = Date.now(),
   ): Promise<ReconciliationRecord | null> {
     const status = RECONCILIATION_STATUS[outcome.result];
+    await this.domain.appendReconciliationCycle({
+      reconciliationId: record.id, tenantId: record.tenantId, projectId: record.projectId, environmentId: record.environmentId,
+      workerId: this.workerId, outcome,
+    });
     return this.domain.patchReconciliation(record.tenantId, record.id, {
       status,
       lastObservedAt: outcome.observedAt,
-      ...(outcome.result === 'executed' ? { lastReconciledAt: outcome.observedAt } : {}),
+      ...(outcome.result === 'executed' || outcome.result === 'converged' ? { lastReconciledAt: outcome.observedAt } : {}),
       ...(outcome.actionId ? { lastActionId: outcome.actionId } : {}),
       ...(outcome.runId ? { lastRunId: outcome.runId } : {}),
       ...(outcome.fingerprint ? { lastFingerprint: outcome.fingerprint } : {}),
@@ -899,6 +1090,7 @@ export class FactoryService {
         ? outcome.explanation[outcome.explanation.length - 1] ?? 'unknown error'
         : '',
       nextDueAt: nextDueAt(record, now),
+      retry: this.retryStateAfter(record, outcome, now),
     });
   }
 
@@ -1431,6 +1623,32 @@ export class FactoryService {
     return operationalWorkResult({ work: current, graph, actions, evidence, status });
   }
 
+  /**
+   * What the repository looks like: from the local mirror when one is
+   * configured, else from what the connected remote last reported. Nothing
+   * is invented for a repository Factory cannot reach.
+   */
+  private async discover(repository: RepositoryRecord | null): Promise<RepositoryDiscovery | null> {
+    if (this.config.repositoryRoot) return discoverRepository(this.config.repositoryRoot, repository ?? undefined);
+    const connection = repository?.connection;
+    if (!repository || !connection || connection.status !== 'connected') return null;
+    const headCommit = connection.branchCommit ?? connection.headCommit;
+    return { inspectedAt: connection.checkedAt, repositoryId: repository.id, files: [], signals: { ...(headCommit ? { headCommit } : {}) } };
+  }
+
+  /**
+   * Verify that a repository can be reached and record what the remote
+   * reports. Called when a repository is added, on demand, and by each
+   * reconciliation cycle so drift compares against the remote's real tip.
+   */
+  async connectRepository(context: AuthenticatedContext, projectId: string, repositoryId: string): Promise<RepositoryRecord | null> {
+    const tenantId = context.tenant;
+    const repository = (await this.domain.listRepositories(tenantId, projectId)).find((candidate) => candidate.id === repositoryId);
+    if (!repository) return null;
+    const connection = await verifyRepositoryConnection(repository, this.credentialResolver);
+    return this.domain.setRepositoryConnection(tenantId, projectId, repositoryId, connection);
+  }
+
   private async providerContext(
     tenantId: string,
     action: ActionRecord,
@@ -1441,9 +1659,7 @@ export class FactoryService {
     const environment = action.environmentId
       ? await this.domain.getEnvironment(tenantId, action.projectId, action.environmentId)
       : null;
-    const discovery = this.config.repositoryRoot
-      ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
-      : null;
+    const discovery = await this.discover(repository);
     return { repository, environment, desiredState, discovery, idempotencyKey };
   }
 
@@ -1633,9 +1849,7 @@ export class FactoryService {
       if (!environment) throw new DomainValidationError(`environment ${input.environmentId} was not found`);
     }
 
-    const discovery = this.config.repositoryRoot
-      ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
-      : null;
+    const discovery = await this.discover(repository);
 
     // Provider resolution is deterministic and never falls back. A capability
     // no `.flow` operation declares is refused; a capability whose configured
@@ -1885,6 +2099,7 @@ export class FactoryService {
         name: repository.name,
         ref: desiredState?.sourceBranch ?? repository.defaultBranch,
         ...(revision ? { commit: revision } : {}),
+        ...(!this.config.repositoryRoot && repositoryRemoteUrl(repository) ? { url: repositoryRemoteUrl(repository)! } : {}),
       },
       operation: action.operation ?? action.type,
       // A retried Action is admitted as a new Run; the earlier Run is history.
@@ -2117,8 +2332,14 @@ export class FactoryService {
     const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
     const providerContext = await this.providerContext(tenantId, action, repository, desiredState, run.idempotencyKey);
     const adapter = action.provider ? this.registry.adapter(action.provider) : null;
+    const recorded = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(run.id);
+    // What the operation meant to leave behind: the revision the lost run
+    // checked out when it is on record, else the repository head the desired
+    // branch resolves to — the same revision a run of this Action deploys.
+    const intendedRevision = recorded?.revision?.observed ?? recorded?.revision?.requested ?? recorded?.repository.commit
+      ?? providerContext.discovery?.signals.headCommit;
     const observation = adapter && isOperationalCapability(action.capability)
-      ? await adapter.observe(action.capability, providerContext)
+      ? await adapter.observe(action.capability, providerContext, intendedRevision ? { revision: intendedRevision } : undefined)
       : run.uncertainty?.retrySafe
         ? { outcome: 'retry-safe' as const, detail: 'the operation has no external effect', checks: [], observed: {} }
         : { outcome: 'undetermined' as const, detail: 'no adapter can observe this operation', checks: [], observed: {} };
