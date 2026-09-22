@@ -55,6 +55,24 @@ AppPort Services. AppPort Services remains the infrastructure and configuration
 area and stays reachable from the navigation, but it is no longer where a new
 user lands.
 
+The loop that makes Factory an orchestrator rather than an execution dashboard
+is reality, not intent alone:
+
+```text
+Reality → compare → drift → plan → authorize → execute → verify → reconcile
+```
+
+An operator says what production should look like. Factory observes what it
+currently looks like, explains the difference in plain sentences, and proposes
+the Action that would close it. Reality is observed from the repository and from
+the durable evidence of the run that last reconciled the environment; a field
+Factory cannot observe is reported as unknown rather than assumed.
+
+Whether an Action may run without a person is AuthBoundry's decision, asked as
+the `factory.action.autonomous` capability, not a rule Factory holds. Factory
+determines what needs to happen; AuthBoundry determines what may cause it to
+happen without a human.
+
 The product model keeps four questions in four records, because collapsing them
 loses exactly what the product exists to answer:
 
@@ -97,6 +115,8 @@ connection because `AUTHBOUNDRY_URL` is set.
 - `GET|POST /v1/projects/:id/repositories`, `DELETE /v1/projects/:id/repositories/:repositoryId`
 - `GET|POST /v1/projects/:id/environments`, `GET /v1/projects/:id/environments/:environmentId`
 - `GET|PUT /v1/projects/:id/desired-state`
+- `GET /v1/projects/:id/reality`, `GET /v1/projects/:id/environments/:environmentId/reality`
+- `POST /v1/projects/:id/environments/:environmentId/reconcile`
 - `GET|POST /v1/projects/:id/actions`, `GET /v1/actions/:id`, `POST /v1/actions/:id/run`
 - `GET /v1/projects/:id/runs`
 - `GET /v1/providers`

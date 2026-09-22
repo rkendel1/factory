@@ -1,4 +1,5 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type {
   ActionPlanStep,
@@ -29,6 +30,31 @@ async function exists(root: string, relativePath: string): Promise<boolean> {
   }
 }
 
+/**
+ * The commit the checkout is actually at.
+ *
+ * This is the "desired" side of a commit comparison: what the repository holds
+ * now. A directory that is not a git checkout has no commit, and reports none
+ * rather than a placeholder.
+ */
+async function headCommit(root: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', GIT_TERMINAL_PROMPT: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    const done = setTimeout(() => { child.kill('SIGKILL'); resolve(undefined); }, 5000);
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.on('error', () => { clearTimeout(done); resolve(undefined); });
+    child.on('close', (code) => {
+      clearTimeout(done);
+      resolve(code === 0 && /^[0-9a-f]{7,40}$/.test(output.trim()) ? output.trim() : undefined);
+    });
+  });
+}
+
 async function workflows(root: string): Promise<string[]> {
   try {
     const entries = await readdir(path.join(root, '.github', 'workflows'));
@@ -54,6 +80,7 @@ export async function discoverRepository(
     if (await exists(root, candidate)) found.push(candidate);
   }
   const githubWorkflows = await workflows(root);
+  const commit = await headCommit(root);
 
   let packageManager: string | undefined;
   let scripts: string[] | undefined;
@@ -81,6 +108,7 @@ export async function discoverRepository(
       ...(packageManager ? { packageManager } : {}),
       ...(scripts ? { scripts } : {}),
       containerized: found.includes('Dockerfile'),
+      ...(commit ? { headCommit: commit } : {}),
       flyConfigured: found.includes('fly.toml'),
       vercelConfigured: found.includes('vercel.json') || found.includes('.vercel/project.json'),
       ...(githubWorkflows.length ? { githubWorkflows } : {}),

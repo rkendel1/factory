@@ -235,6 +235,9 @@ app software_factory {
     intent: text
     plan: json?
     discovery: json?
+    drift: json?
+    autonomy: json?
+    approvedBy: text?
     operation: text?
     executionProvider: text?
     status: text

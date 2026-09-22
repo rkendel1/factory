@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FactoryService } from './server.js';
-import type { AuthenticatedContext, Authenticator } from './auth.js';
+import { AuthBoundryAuthorizationError, type AuthenticatedContext, type Authenticator, type CapabilityProbe } from './auth.js';
 import { DomainValidationError } from './domain.js';
 import type { ProjectRecord } from './types.js';
 
@@ -29,6 +29,8 @@ export interface ProductRoute {
     params: string[];
     body: unknown;
     url: URL;
+    /** Asks AuthBoundry a capability question whose "no" is meaningful. */
+    probe: CapabilityProbe;
   }): Promise<{ status: number; body: unknown }>;
 }
 
@@ -216,7 +218,7 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     method: 'POST',
     pattern: /^\/v1\/projects\/([^/]+)\/actions$/,
     capability: PRODUCT_CAPABILITIES.write,
-    async handle({ service, context, params, body }) {
+    async handle({ service, context, params, body, probe }) {
       const input = asRecord(body);
       return json(201, await service.createAction(context, params[0]!, {
         type: text(input.type, 'type')!,
@@ -224,7 +226,7 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
         ...(input.environmentId === undefined ? {} : { environmentId: text(input.environmentId, 'environmentId')! }),
         ...(input.repositoryId === undefined ? {} : { repositoryId: text(input.repositoryId, 'repositoryId')! }),
         ...(input.operation === undefined ? {} : { operation: text(input.operation, 'operation')! }),
-      }));
+      }, probe));
     },
   },
   {
@@ -240,8 +242,14 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     method: 'POST',
     pattern: /^\/v1\/actions\/([^/]+)\/run$/,
     capability: PRODUCT_CAPABILITIES.execute,
-    async handle({ service, context, params }) {
-      return json(202, await service.runAction(context, params[0]!));
+    async handle({ service, context, params, body, probe }) {
+      const input = body === undefined ? {} : asRecord(body);
+      // `autonomous` means Factory is acting on its own and must hold the
+      // authority to. A person driving the Action is the approval itself.
+      return json(202, await service.runAction(context, params[0]!, {
+        probe,
+        autonomous: input.autonomous === true,
+      }));
     },
   },
   {
@@ -258,6 +266,38 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     capability: PRODUCT_CAPABILITIES.read,
     async handle({ service, context, params }) {
       return json(200, { runs: await service.projects().listRuns(context.tenant, params[0]!) });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/projects\/([^/]+)\/reality$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      return json(200, { environments: await service.observeReality(context, params[0]!) });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reality$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const reports = await service.observeReality(context, params[0]!);
+      const report = reports.find((candidate) => candidate.environmentId === params[1]);
+      return report ? json(200, report) : json(404, { error: 'Environment not found' });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reconcile$/,
+    capability: PRODUCT_CAPABILITIES.write,
+    async handle({ service, context, params, body, probe }) {
+      const input = body === undefined ? {} : asRecord(body);
+      const result = await service.planReconciliation(context, params[0]!, params[1]!, {
+        probe,
+        ...(input.operation === undefined ? {} : { operation: text(input.operation, 'operation')! }),
+      });
+      // No drift is not an error: there is simply nothing to do.
+      return json(result.action ? 201 : 200, result);
     },
   },
   {
@@ -299,12 +339,31 @@ export async function handleProductRoute(input: {
   const matched = matchProductRoute(input.request.method ?? 'GET', input.url.pathname);
   if (!matched) return false;
   const context = await input.authenticator().authenticate(input.request, matched.route.capability);
+
+  /*
+   * A second question to the same authority with the same credentials. A
+   * denial is an answer here, not a failure, so it is returned rather than
+   * thrown; anything else is a real failure and still is one.
+   */
+  const probe: CapabilityProbe = async (capability) => {
+    try {
+      await input.authenticator().authenticate(input.request, capability);
+      return { allowed: true, reason: `AuthBoundry authorized ${capability}` };
+    } catch (error) {
+      if (error instanceof AuthBoundryAuthorizationError) {
+        return { allowed: false, reason: error.message };
+      }
+      throw error;
+    }
+  };
+
   const result = await matched.route.handle({
     service: input.service,
     context,
     params: matched.params,
     body: input.body,
     url: input.url,
+    probe,
   });
   input.response.statusCode = result.status;
   if (result.status === 204 || result.body === null) {

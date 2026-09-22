@@ -45,14 +45,61 @@ Each step cites the desired-state field or repository file that produced it, and
 discovery reports only what it found: a desired state with deployment disabled
 produces a step that says so instead of a deployment step.
 
+## Reality and reconciliation
+
+Desired state alone makes Factory an execution dashboard. The loop that makes it
+an orchestrator is:
+
+```text
+Reality → compare → drift → plan → authorize → execute → verify → reconcile
+```
+
+**Reality is observed, never assumed.** Every field comes from something Factory
+can actually see: the repository's head commit, and the durable evidence of the
+run that last reconciled the environment. A field Factory cannot observe is
+reported as unknown rather than filled in with the desired value, because a
+reality that quietly mirrors desire can never drift.
+
+**Current state has exactly one writer** — reconciliation, from run evidence.
+Reality is not re-derived from runs at read time: two derivations of one fact
+disagree the moment they are computed differently, and the one that silently
+won would decide whether drift exists.
+
+**Drift needs both sides known.** A field is drifted only when desired and
+current are both known and differ. An environment nothing has reconciled reports
+`unknown`, which is a different problem from the environment being wrong;
+conflating them would invent drift on every new environment.
+
+**Reconciliation is the absence of work.** An environment that matches produces
+no Action — not a run that confirms nothing changed.
+
+An Action planned from drift carries the drift it exists to close, so a reviewer
+reads why Factory wants to act before reading what it will do:
+
+```text
+production is running abc123def456. Repository main is def456abc123.
+```
+
 ## What waits for a person
 
-An Action whose project has deployment enabled in desired state is created as
-`awaiting-approval` rather than `planned`, and refuses to run until someone
-approves it. That is deliberately the only gate: deployment is the operator's
-own statement that this project changes a running environment. Everything else
-is planned and runs when someone chooses to. Approved or not, the Overview's
-attention list is the answer to "what requires human attention".
+Whether an Action waits for a person is the authority's decision, not a rule
+Factory holds. Factory asks AuthBoundry for `factory.action.autonomous`:
+
+- **granted** → the Action is `planned` and Factory may run it on its own
+- **denied** → the Action is `awaiting-approval` and a person must drive it
+
+The default answer is the safe one and needs no coordination: an authority that
+does not grant the capability denies it, so Actions wait for a person until
+someone deliberately grants autonomy. Factory could not ask at all — no session
+— is also a denial.
+
+The question is asked again at execution time rather than trusting the answer
+stored at planning time, because a grant can be given or revoked in between and
+what matters is whether this may run now. A person driving an Action is the
+human judgement the authority asked for, and their approval is recorded on it.
+
+> Factory determines what needs to happen. AuthBoundry determines what may cause
+> it to happen without a human.
 
 ## Providers
 
