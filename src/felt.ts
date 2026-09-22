@@ -17,6 +17,7 @@ export const COLLECTIONS = {
   environments: 'Environment',
   desiredState: 'DesiredState',
   actions: 'Action',
+  reconciliations: 'Reconciliation',
 } as const;
 
 const DEFAULT_NAMESPACE = 'software-factory';

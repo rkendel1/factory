@@ -80,6 +80,61 @@ reads why Factory wants to act before reading what it will do:
 production is running abc123def456. Repository main is def456abc123.
 ```
 
+## Continuous reconciliation
+
+Factory can keep an environment in the state it was declared to be in, rather
+than running a command every N minutes. The scheduler triggers a pass; the
+reconciliation engine decides whether any work is actually required.
+
+One pass, always the same fourteen steps: load the project, environment and
+desired state; observe reality; compare; stop if reality is unknown; do nothing
+if there is no drift; otherwise plan a typed Action, ask AuthBoundry whether it
+may run without a person, execute through the existing run path if it may,
+verify, reconcile the evidence, and record the result.
+
+**The manual button and the scheduler call the same function.** `Reconcile Now`
+is not a shortcut past the comparison — it is the same comparison run sooner.
+
+**The scheduler is not an authority.** It holds no state of its own: it asks
+FeltDB which records are due, claims one with a compare-and-set on the record,
+and writes back everything it learns. Two Factory instances cannot act on one
+environment, a worker that dies releases its claim when the lease expires, and a
+restart resumes the durable schedule instead of sweeping every environment
+because a process booted.
+
+**There is no hidden loop.** Every worker is a durable `Reconciliation` record
+carrying its status, schedule, last observation, last reconciliation, current
+Action and last error. If Factory is keeping something in sync, the record says
+so; if a pass failed, it says why.
+
+**Passes are idempotent.** A reconciliation fingerprint is derived from the
+project, environment, desired-state revision, observed-state revision and Action
+type — from the work, never from when it was planned. Repeating a pass over
+unchanged inputs recognises the Action already open and adopts it; any real
+change to desire or reality earns a new one.
+
+**Failures stay distinguishable.** `autonomy-denied`, `authority-unavailable`,
+`awaiting-approval`, `execution-failed` and `verification-failed` are separate
+results, because they call for different responses and a single `failed` would
+hide which happened.
+
+The worker runs only when Factory has a credential to act under
+(`FACTORY_SERVICE_CREDENTIAL`). Without one there is no authority to ask whether
+it may act, and an autonomous loop acting on nobody's behalf is the thing this
+design exists to prevent. Configuration and history stay durable either way, so
+adding the credential later resumes rather than restarts.
+
+### Reconciliation API
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/reconciliation` | What Factory is currently keeping in sync |
+| `POST\|GET\|PATCH\|DELETE /v1/projects/:id/environments/:environmentId/reconciliation` | Configure it |
+| `POST /v1/projects/:id/environments/:environmentId/reconcile-now` | Run one pass now |
+
+Intervals are clamped between one minute and one day: how often Factory talks to
+a repository, an authority and a provider is not arbitrary caller input.
+
 ## What waits for a person
 
 Whether an Action waits for a person is the authority's decision, not a rule

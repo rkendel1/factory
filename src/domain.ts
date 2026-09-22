@@ -8,6 +8,8 @@ import type {
   EnvironmentCurrentState,
   EnvironmentRecord,
   ProjectRecord,
+  ReconciliationRecord,
+  ReconciliationStatus,
   RepositoryRecord,
   RunRecord,
 } from './types.js';
@@ -249,6 +251,160 @@ export class FactoryDomain {
     return this.patchAction(tenantId, id, { status });
   }
 
+  // -- Reconciliation ------------------------------------------------------
+
+  private reconciliations() {
+    return this.db.collection<ReconciliationRecord>(COLLECTIONS.reconciliations);
+  }
+
+  async listReconciliations(tenantId: string, projectId?: string): Promise<ReconciliationRecord[]> {
+    const records = await this.reconciliations()
+      .find(projectId ? { tenantId, projectId } : { tenantId });
+    return records.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async getReconciliation(
+    tenantId: string,
+    projectId: string,
+    environmentId: string,
+  ): Promise<ReconciliationRecord | null> {
+    const records = await this.reconciliations().find({ tenantId, projectId, environmentId });
+    return records[0] ?? null;
+  }
+
+  /**
+   * One reconciliation record per environment, created or updated in place.
+   *
+   * Configuration is durable state, not scheduler memory, so enabling
+   * reconciliation twice configures the same record rather than starting a
+   * second loop over the same environment.
+   */
+  async putReconciliation(input: {
+    tenantId: string;
+    projectId: string;
+    environmentId: string;
+    enabled?: boolean;
+    interval?: string;
+    intervalMs?: number;
+  }): Promise<ReconciliationRecord> {
+    const current = await this.getReconciliation(input.tenantId, input.projectId, input.environmentId);
+    const timestamp = new Date().toISOString();
+    const enabled = input.enabled ?? current?.enabled ?? true;
+    const intervalMs = input.intervalMs ?? current?.intervalMs ?? 0;
+    const record: ReconciliationRecord = {
+      id: current?.id ?? `rec_${randomUUID()}`,
+      projectId: input.projectId,
+      environmentId: input.environmentId,
+      tenantId: input.tenantId,
+      status: enabled ? (current && current.enabled ? current.status : 'enabled') : 'disabled',
+      interval: input.interval ?? current?.interval ?? '15m',
+      intervalMs,
+      enabled,
+      ...(current?.lastObservedAt ? { lastObservedAt: current.lastObservedAt } : {}),
+      ...(current?.lastReconciledAt ? { lastReconciledAt: current.lastReconciledAt } : {}),
+      ...(current?.lastActionId ? { lastActionId: current.lastActionId } : {}),
+      ...(current?.lastRunId ? { lastRunId: current.lastRunId } : {}),
+      ...(current?.lastError ? { lastError: current.lastError } : {}),
+      ...(current?.lastFingerprint ? { lastFingerprint: current.lastFingerprint } : {}),
+      ...(current?.lastOutcome ? { lastOutcome: current.lastOutcome } : {}),
+      // A newly enabled record is due now; an existing one keeps its schedule.
+      ...(enabled
+        ? { nextDueAt: current?.nextDueAt ?? timestamp }
+        : {}),
+      createdAt: current?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+      ...(current?.__version === undefined ? {} : { __version: current.__version }),
+    };
+    await this.reconciliations().put(record, record.id);
+    return record;
+  }
+
+  async patchReconciliation(
+    tenantId: string,
+    id: string,
+    patch: Partial<ReconciliationRecord>,
+  ): Promise<ReconciliationRecord | null> {
+    const current = await this.reconciliations().get(id);
+    if (!current || current.tenantId !== tenantId) return null;
+    const next: ReconciliationRecord = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await this.reconciliations().put(next, next.id);
+    return next;
+  }
+
+  async deleteReconciliation(tenantId: string, projectId: string, environmentId: string): Promise<boolean> {
+    const current = await this.getReconciliation(tenantId, projectId, environmentId);
+    if (!current) return false;
+    await this.reconciliations().delete(current.id);
+    return true;
+  }
+
+  /** Every enabled record across every tenant, for the scheduler to filter. */
+  async dueReconciliations(now: number): Promise<ReconciliationRecord[]> {
+    const records = await this.reconciliations().all();
+    return records
+      .filter((record) => record.enabled)
+      .filter((record) => !record.nextDueAt || Date.parse(record.nextDueAt) <= now)
+      .filter((record) => !isLeased(record, now))
+      .sort((left, right) => (left.nextDueAt ?? '').localeCompare(right.nextDueAt ?? ''));
+  }
+
+  /**
+   * Claim a reconciliation for one worker.
+   *
+   * The claim is a compare-and-set on the record's version, so two workers that
+   * read the same due record cannot both win: the second write is refused and
+   * that worker moves on. An expired lease is reclaimable, so a worker that
+   * died mid-pass does not block the environment forever.
+   */
+  async claimReconciliation(
+    id: string,
+    owner: string,
+    now: number,
+    leaseMs: number,
+  ): Promise<ReconciliationRecord | null> {
+    const current = await this.reconciliations().get(id);
+    if (!current || !current.enabled || isLeased(current, now)) return null;
+    const claimed: ReconciliationRecord = {
+      ...current,
+      status: 'running',
+      leaseOwner: owner,
+      leaseExpiresAt: new Date(now + leaseMs).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    };
+    const result = await this.reconciliations()
+      .updateIfVersion(id, current.__version ?? 1, claimed);
+    return result.updated ? (result.item ?? claimed) : null;
+  }
+
+  async releaseReconciliation(
+    id: string,
+    patch: Partial<ReconciliationRecord>,
+  ): Promise<ReconciliationRecord | null> {
+    const current = await this.reconciliations().get(id);
+    if (!current) return null;
+    const released: ReconciliationRecord = {
+      ...current,
+      ...patch,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    delete released.leaseOwner;
+    delete released.leaseExpiresAt;
+    await this.reconciliations().put(released, released.id);
+    return released;
+  }
+
+  /** An Action already doing this work, so reconciliation does not duplicate it. */
+  async findOpenActionByFingerprint(
+    tenantId: string,
+    fingerprint: string,
+  ): Promise<ActionRecord | null> {
+    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running'];
+    const actions = await this.actionRecords().find({ tenantId, reconciliationFingerprint: fingerprint });
+    return actions.find((action) => open.includes(action.status)) ?? null;
+  }
+
   // -- Runs ----------------------------------------------------------------
 
   async listRuns(tenantId: string, projectId?: string): Promise<RunRecord[]> {
@@ -260,6 +416,10 @@ export class FactoryDomain {
     const run = await this.runRecords().get(id);
     return run && run.tenantId === tenantId ? run : null;
   }
+}
+
+export function isLeased(record: ReconciliationRecord, now: number): boolean {
+  return Boolean(record.leaseExpiresAt && Date.parse(record.leaseExpiresAt) > now);
 }
 
 export class DomainValidationError extends Error {

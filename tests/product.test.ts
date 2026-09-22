@@ -1,7 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { createHttpServer, FactoryService } from '../src/server.js';
+import {
+  actionPage,
+  actionsPage,
+  overviewPage,
+  projectPage,
+  projectsPage,
+  providersPage,
+  runPage,
+  runsPage,
+  settingsPage,
+} from '../src/product-ui.js';
 import { createRepository, createTempWorkspace } from './helpers.js';
 import { COLLECTIONS } from '../src/felt.js';
 import { factoryAssociation } from '../src/association.js';
@@ -452,5 +465,36 @@ test('the product surface is the landing page and AppPort Services still works b
     assert.equal((await fetch(`${origin}/services`)).status, 200);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('every product page script parses as an ES module', async () => {
+  // The browser never reports a page whose script failed to parse: it simply
+  // never runs, and every section stays at "Loading…". Parsing each page's
+  // script the way a browser would is what catches that before a deploy does.
+  const workingDirectory = await createTempWorkspace('factory-page-scripts');
+  const pages: [string, string][] = [
+    ['overview', overviewPage()],
+    ['projects', projectsPage()],
+    ['project', projectPage('prj_example')],
+    ['actions', actionsPage()],
+    ['action', actionPage('act_example')],
+    ['runs', runsPage()],
+    ['run', runPage('run_example')],
+    ['providers', providersPage()],
+    ['settings', settingsPage()],
+  ];
+  for (const [name, html] of pages) {
+    const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(script, `${name} page has a module script`);
+    const file = path.join(workingDirectory, `${name}.mjs`);
+    writeFileSync(file, script);
+    assert.doesNotThrow(
+      () => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' }),
+      (error: unknown) => {
+        const detail = error instanceof Error && 'stderr' in error ? String((error as { stderr: Buffer }).stderr) : String(error);
+        assert.fail(`${name} page script does not parse:\n${detail}`);
+      },
+    );
   }
 });

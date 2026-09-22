@@ -321,6 +321,12 @@ export interface ActionRecord {
   verification?: VerificationCheck[];
   authority?: AuthorityContextRecord;
   autonomy?: AutonomyDecision;
+  /** How this Action came to exist. Continuous reconciliation says so here. */
+  origin?: 'manual' | 'continuous-reconciliation';
+  desiredStateRevision?: string;
+  observedStateRevision?: string;
+  /** Deterministic identity of the drift this Action closes. */
+  reconciliationFingerprint?: string;
   /** The drift this Action exists to close, when reconciliation planned it. */
   drift?: {
     status: string;
@@ -334,6 +340,85 @@ export interface ActionRecord {
   createdAt: string;
   updatedAt: string;
   __version?: number;
+}
+
+/**
+ * Continuous reconciliation of one environment.
+ *
+ * This record is the whole of the scheduler's state. There is no reconciliation
+ * loop that exists only in process memory: a worker asks FeltDB which records
+ * are due, and everything it learns is written back here, so a restart resumes
+ * rather than starts over and a reader can always say why something happened.
+ */
+export type ReconciliationStatus =
+  | 'enabled'
+  | 'disabled'
+  | 'running'
+  | 'healthy'
+  | 'drifted'
+  | 'failed';
+
+export interface ReconciliationRecord {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  tenantId: string;
+  status: ReconciliationStatus;
+  /** Human-readable interval, e.g. `15m`. */
+  interval: string;
+  intervalMs: number;
+  enabled: boolean;
+  lastObservedAt?: string;
+  lastReconciledAt?: string;
+  lastActionId?: string;
+  lastRunId?: string;
+  lastError?: string;
+  /** The drift identity of the last pass, used to avoid duplicate work. */
+  lastFingerprint?: string;
+  lastOutcome?: ReconciliationOutcome;
+  nextDueAt?: string;
+  /** Claim held by the worker currently running this pass. */
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  __version?: number;
+}
+
+/**
+ * Why a reconciliation pass ended where it did.
+ *
+ * These are deliberately not collapsed into one failure: "AuthBoundry said no",
+ * "AuthBoundry could not be reached", "a human has to decide", "the run failed"
+ * and "the run passed but verification did not" call for different responses,
+ * and a single `failed` would hide which one happened.
+ */
+export type ReconciliationResult =
+  | 'converged'
+  | 'unobserved'
+  | 'drift-detected'
+  | 'awaiting-approval'
+  | 'autonomy-denied'
+  | 'authority-unavailable'
+  | 'executed'
+  | 'execution-failed'
+  | 'verification-failed'
+  | 'duplicate-suppressed'
+  | 'error';
+
+export interface ReconciliationOutcome {
+  result: ReconciliationResult;
+  observedAt: string;
+  /** Plain sentences explaining what happened, in order. */
+  explanation: string[];
+  fingerprint?: string;
+  desiredStateRevision?: string;
+  observedStateRevision?: string;
+  actionId?: string;
+  runId?: string;
+  autonomy?: AutonomyDecision;
+  authority?: AuthorityContextRecord;
+  evidenceId?: string;
 }
 
 export interface RunEventRecord {
@@ -477,6 +562,12 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   authBoundryOperatorCredential?: string;
   /** The principal whose authority the Factory application delegation narrows. */
   authBoundryDelegator?: string;
+  /**
+   * Credential the continuous reconciliation worker presents to AuthBoundry.
+   * Absent, Factory runs no autonomous loop.
+   */
+  factoryServiceCredential?: string;
+  reconciliationTickMs?: number;
   authBoundryControlPlane?: import('./provisioning.js').AuthBoundryControlPlane;
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;

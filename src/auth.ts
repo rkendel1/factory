@@ -9,8 +9,22 @@ import type { FactoryServiceConfig } from './types.js';
 export const FACTORY_BROWSER_APPLICATION_ID = 'factory';
 export const FACTORY_BROWSER_CALLBACK_PATH = '/api/auth/callback';
 export const FACTORY_BROWSER_RETURN_PATHS = [
-  '/', '/configuration', '/api-keys', '/v1/ui', '/runs', '/work', '/factory/runs', '/factory/work',
+  '/', '/configuration', '/api-keys', '/v1/ui', '/runs', '/work',
+  '/factory', '/factory/projects', '/factory/actions', '/factory/runs', '/factory/providers',
+  '/factory/settings', '/factory/work',
 ] as const;
+
+/**
+ * Where a login may return a browser to, for a product page.
+ *
+ * The adapter allows only exact registered paths, so a detail page returns to
+ * its section rather than to itself. A path that is not a product page returns
+ * to the landing surface.
+ */
+export function factoryReturnPath(pathname: string): string {
+  const section = pathname.match(/^\/factory(?:\/(projects|actions|runs|providers|settings))?/);
+  return section ? `/factory${section[1] ? `/${section[1]}` : ''}` : '/factory';
+}
 
 export interface AuthenticatedContext {
   principal: string;
@@ -203,6 +217,48 @@ export function createAuthBoundryAuthenticator(config: FactoryServiceConfig): Au
         ...(grant.authority === undefined ? {} : { authority: grant.authority }),
         delegationId: grant.delegationId,
       };
+    },
+  };
+}
+
+/**
+ * The credentials the reconciliation worker acts under.
+ *
+ * The worker authenticates exactly as any other caller does — a bearer
+ * credential presented to AuthBoundry — so it passes through the same session,
+ * association and authorization checks. Factory holds no separate service
+ * identity of its own.
+ *
+ * Without a credential there is no worker. An autonomous loop that could not
+ * ask an authority anything would be acting on nobody's behalf.
+ */
+export function createServiceSession(
+  authenticator: Authenticator,
+  credential: string,
+): {
+  context: () => Promise<AuthenticatedContext>;
+  probe: CapabilityProbe;
+} {
+  const request = { headers: { authorization: `Bearer ${credential}` } } as IncomingMessage;
+  return {
+    context: () => authenticator.authenticate(request, 'factory.run'),
+    probe: async (capability) => {
+      try {
+        await authenticator.authenticate(request, capability);
+        return { allowed: true, reason: `AuthBoundry authorized ${capability}` };
+      } catch (error) {
+        if (error instanceof AuthBoundryAuthorizationError) {
+          return { allowed: false, reason: error.message };
+        }
+        // An authority that cannot be reached is not a grant. The caller reads
+        // this as unavailable and fails closed on it.
+        return {
+          allowed: false,
+          reason: error instanceof Error
+            ? `AuthBoundry unavailable: ${error.message}`
+            : 'AuthBoundry unavailable',
+        };
+      }
     },
   };
 }

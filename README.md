@@ -68,6 +68,11 @@ the Action that would close it. Reality is observed from the repository and from
 the durable evidence of the run that last reconciled the environment; a field
 Factory cannot observe is reported as unknown rather than assumed.
 
+With continuous reconciliation enabled for an environment, Factory runs that
+loop on a schedule: observe, compare, and act only when desire and reality
+actually disagree. The scheduler triggers a pass; the engine decides whether
+work is required. `Reconcile Now` calls the same function, just sooner.
+
 Whether an Action may run without a person is AuthBoundry's decision, asked as
 the `factory.action.autonomous` capability, not a rule Factory holds. Factory
 determines what needs to happen; AuthBoundry determines what may cause it to
@@ -119,6 +124,9 @@ connection because `AUTHBOUNDRY_URL` is set.
 - `POST /v1/projects/:id/environments/:environmentId/reconcile`
 - `GET|POST /v1/projects/:id/actions`, `GET /v1/actions/:id`, `POST /v1/actions/:id/run`
 - `GET /v1/projects/:id/runs`
+- `GET /v1/reconciliation`
+- `GET|POST|PATCH|DELETE /v1/projects/:id/environments/:environmentId/reconciliation`
+- `POST /v1/projects/:id/environments/:environmentId/reconcile-now`
 - `GET /v1/providers`
 - `POST /v1/runs`
 - `GET /v1/runs/:runId`
