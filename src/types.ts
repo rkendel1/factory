@@ -146,9 +146,150 @@ export interface RunRecord {
   authorizationDecisionId?: string;
   contractId?: string;
   evidenceId?: string;
+  /* Product linkage. One Run concept: the Action's run is the execution run. */
+  actionId?: string;
+  projectId?: string;
+  environmentId?: string;
+  applicationId?: string;
+  delegationId?: string;
+  executionProvider?: string;
+  result?: Record<string, unknown>;
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  __version?: number;
+}
+
+/* -------------------------------------------------------------------------
+ * Factory product model.
+ *
+ * Desired State is what should be true, an Action is what Factory will do to
+ * make it true, a Run is what happened, and Evidence is what proves it. They
+ * stay four records because collapsing them loses exactly the questions the
+ * product exists to answer.
+ * ---------------------------------------------------------------------- */
+
+export type ProjectStatus = 'active' | 'paused' | 'archived';
+
+export interface ProjectRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  status: ProjectStatus;
+  createdAt: string;
+  updatedAt: string;
+  __version?: number;
+}
+
+export interface RepositoryRecord {
+  id: string;
+  projectId: string;
+  tenantId: string;
+  provider: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  repositoryUrl?: string;
+  createdAt: string;
+  __version?: number;
+}
+
+export interface EnvironmentRecord {
+  id: string;
+  projectId: string;
+  tenantId: string;
+  name: string;
+  provider?: string;
+  configuration?: Record<string, unknown>;
+  currentState?: Record<string, unknown>;
+  desiredState?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  __version?: number;
+}
+
+/** What Factory should keep true. Never implementation steps. */
+export interface DesiredStateRecord {
+  id: string;
+  projectId: string;
+  tenantId: string;
+  sourceRepositoryId?: string;
+  sourceBranch?: string;
+  deploymentEnabled?: boolean;
+  targetProvider?: string;
+  healthRequirement?: string;
+  updatedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  __version?: number;
+}
+
+export type ActionStatus =
+  | 'planned'
+  | 'awaiting-approval'
+  | 'authorized'
+  | 'running'
+  | 'succeeded'
+  | 'failed';
+
+export interface ActionPlanStep {
+  order: number;
+  summary: string;
+  detail?: string;
+  /** What in the repository or desired state produced this step. */
+  basis?: string;
+}
+
+export interface RepositoryDiscovery {
+  inspectedAt: string;
+  repositoryId?: string;
+  files: string[];
+  signals: {
+    packageManager?: string;
+    scripts?: string[];
+    containerized?: boolean;
+    flyConfigured?: boolean;
+    vercelConfigured?: boolean;
+    githubWorkflows?: string[];
+  };
+}
+
+/** The authority context an Action or Run acted under, as AuthBoundry resolved it. */
+export interface AuthorityContextRecord {
+  application?: string;
+  resource?: string;
+  tenant?: string;
+  principal?: string;
+  delegation?: string | null;
+  authorizationDecisionId?: string;
+  authority?: string;
+}
+
+export interface VerificationCheck {
+  name: string;
+  status: 'passed' | 'failed' | 'skipped';
+  detail?: string;
+}
+
+export interface ActionRecord {
+  id: string;
+  projectId: string;
+  environmentId?: string;
+  tenantId: string;
+  type: string;
+  intent: string;
+  plan: ActionPlanStep[];
+  discovery?: RepositoryDiscovery;
+  operation?: string;
+  executionProvider?: string;
+  status: ActionStatus;
+  runId?: string;
+  verification?: VerificationCheck[];
+  authority?: AuthorityContextRecord;
+  createdBy?: string;
   createdAt: string;
   updatedAt: string;
   __version?: number;

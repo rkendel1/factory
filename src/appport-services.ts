@@ -37,12 +37,12 @@ export const appPortServicesUiContribution: UiContribution = validateUiContribut
     { id: 'jobs', title: 'Jobs', route: '/jobs', capabilities: ['jobs.read'] },
   ],
   navigation: [
-    { id: 'configuration', label: 'Configuration', group: 'services', order: 100, surface: 'configuration' },
-    { id: 'secrets', label: 'Secrets', group: 'services', order: 110, surface: 'secrets' },
-    { id: 'api-keys', label: 'API Keys', group: 'services', order: 120, surface: 'api-keys' },
-    { id: 'notifications', label: 'Notifications', group: 'services', order: 130, surface: 'notifications' },
-    { id: 'webhooks', label: 'Webhooks', group: 'services', order: 140, surface: 'webhooks' },
-    { id: 'jobs', label: 'Jobs', group: 'services', order: 150, surface: 'jobs' },
+    { id: 'configuration', label: 'Configuration', group: 'infrastructure', order: 200, surface: 'configuration' },
+    { id: 'secrets', label: 'Secrets', group: 'infrastructure', order: 210, surface: 'secrets' },
+    { id: 'api-keys', label: 'API Keys', group: 'infrastructure', order: 220, surface: 'api-keys' },
+    { id: 'notifications', label: 'Notifications', group: 'infrastructure', order: 230, surface: 'notifications' },
+    { id: 'webhooks', label: 'Webhooks', group: 'infrastructure', order: 240, surface: 'webhooks' },
+    { id: 'jobs', label: 'Jobs', group: 'infrastructure', order: 250, surface: 'jobs' },
   ],
   composition: { requires: ['identity', 'tenant', 'application', 'environment'] },
 });

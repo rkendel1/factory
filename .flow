@@ -67,6 +67,13 @@ app software_factory {
     authorizationDecisionId: ref AuthorizationDecision?
     contractId: ref ExecutionContract?
     evidenceId: ref Evidence?
+    actionId: ref Action?
+    projectId: ref Project?
+    environmentId: ref Environment?
+    applicationId: text?
+    delegationId: text?
+    executionProvider: text?
+    result: json?
     error: text?
     startedAt: datetime?
     completed_at: datetime
@@ -155,6 +162,95 @@ app software_factory {
     index runId using hash(runId)
   }
 
+  collection Project {
+    tenant_id: text
+    tenantId: text?
+    name: text
+    description: text?
+    status: text
+    createdAt: datetime?
+    updatedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index tenant_id using hash(tenant_id)
+    index tenantId using hash(tenantId)
+  }
+
+  collection Repository {
+    project_id: text
+    projectId: ref Project?
+    tenantId: text?
+    provider: text
+    owner: text
+    name: text
+    defaultBranch: text?
+    repositoryUrl: text?
+    createdAt: datetime?
+    created_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+  }
+
+  collection Environment {
+    project_id: text
+    projectId: ref Project?
+    tenantId: text?
+    name: text
+    provider: text?
+    configuration: json?
+    currentState: json?
+    desiredState: json?
+    createdAt: datetime?
+    updatedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+  }
+
+  collection DesiredState {
+    project_id: text
+    projectId: ref Project?
+    tenantId: text?
+    sourceRepositoryId: text?
+    sourceBranch: text?
+    deploymentEnabled: boolean?
+    targetProvider: text?
+    healthRequirement: text?
+    updatedBy: text?
+    createdAt: datetime?
+    updatedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+  }
+
+  collection Action {
+    project_id: text
+    projectId: ref Project?
+    environmentId: ref Environment?
+    tenantId: text?
+    type: text
+    intent: text
+    plan: json?
+    discovery: json?
+    operation: text?
+    executionProvider: text?
+    status: text
+    runId: ref Run?
+    verification: json?
+    authority: json?
+    createdBy: text?
+    createdAt: datetime?
+    updatedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+    index status using hash(status)
+  }
+
   capability FactoryApplicationAccess {
     visibility internal
     application factory
@@ -228,6 +324,31 @@ app software_factory {
     appport_service github
     appport_capability github.pull_request.merge
     jev bounded
+  }
+
+  policy Project {
+    read: authenticated
+    write: none
+  }
+
+  policy Repository {
+    read: authenticated
+    write: none
+  }
+
+  policy Environment {
+    read: authenticated
+    write: none
+  }
+
+  policy DesiredState {
+    read: authenticated
+    write: none
+  }
+
+  policy Action {
+    read: authenticated
+    write: none
   }
 
   policy Work {

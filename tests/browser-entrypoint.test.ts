@@ -54,7 +54,7 @@ test('public root enters AuthBoundry without weakening protected routes or retur
   }
 });
 
-test('authenticated root redirects to the existing AppPort Services entry surface', async () => {
+test('authenticated root redirects to the Factory product surface', async () => {
   const authenticator: Authenticator = {
     async session() { return context; },
     async authenticate() { return context; },
@@ -67,7 +67,10 @@ test('authenticated root redirects to the existing AppPort Services entry surfac
   try {
     const response = await fetch(`${origin}/`, { redirect: 'manual' });
     assert.equal(response.status, 302);
-    assert.equal(response.headers.get('location'), '/configuration');
+    // Factory's own product surface is the landing page. AppPort Services is
+    // still reachable, but it is no longer where an authenticated user arrives.
+    assert.equal(response.headers.get('location'), '/factory');
+    assert.equal((await fetch(`${origin}/factory`)).status, 200);
     assert.equal((await fetch(`${origin}/configuration`)).status, 200);
   } finally {
     await close(server);
@@ -158,7 +161,7 @@ test('Factory uses the AuthBoundry relying-application adapter for login, sessio
     assert.match(callback.headers.getSetCookie().join(' '), /HttpOnly.*SameSite=Lax/);
 
     const root = await fetch(`${origin}/`, { redirect: 'manual', headers: { cookie: sessionCookie } });
-    assert.equal(root.headers.get('location'), '/configuration');
+    assert.equal(root.headers.get('location'), '/factory');
 
     const logout = await fetch(`${origin}/auth/logout`, {
       redirect: 'manual', headers: { cookie: sessionCookie },

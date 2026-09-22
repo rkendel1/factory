@@ -58,3 +58,23 @@ The association itself is created by AuthBoundry once its own
 - `GET /v1/connection` — the association as AuthBoundry reports it. Returns 503
   while the status is not `associated`.
 - `GET /health` — `authorities.authBoundry` carries the same status.
+
+## Product routes
+
+Factory's product surface (`/factory`, `/v1/projects`, `/v1/actions`, …) uses the
+same authenticator as the rest of Factory, so the association check applies to
+every route. It asks for capability names the association already carries:
+
+| Operation | Capability |
+| --- | --- |
+| Product reads | `factory.ui.read` |
+| Project, repository, environment, desired-state and Action writes | `configuration.write` |
+| Repository removal | `configuration.delete` |
+| Executing an Action | `factory.run` |
+
+Factory declares no capability of its own for these routes. A new name would
+have to exist in AuthBoundry's `FACTORY_APPLICATION_CAPABILITIES` to be
+grantable, and inventing one Factory alone recognises would be a second
+authorization vocabulary. If product writes should be distinguishable from
+AppPort Services configuration writes, the capability has to be added upstream
+first and then used here.

@@ -12,6 +12,11 @@ export const COLLECTIONS = {
   artifacts: 'Artifact',
   evidence: 'Evidence',
   authorizationDecisions: 'AuthorizationDecision',
+  projects: 'Project',
+  repositories: 'Repository',
+  environments: 'Environment',
+  desiredState: 'DesiredState',
+  actions: 'Action',
 } as const;
 
 const DEFAULT_NAMESPACE = 'software-factory';
