@@ -66,6 +66,8 @@ tr.drift td,tr.drift th{background:color-mix(in srgb,var(--warn) 12%,transparent
 .banner{border:1px solid var(--line);border-left-width:3px;border-radius:8px;padding:.75rem;background:var(--panel)}
 .banner p{margin:.25rem 0}
 .banner.drift{border-left-color:var(--warn)}
+.recon{margin-top:.75rem;border:1px solid var(--line);border-radius:8px;padding:.75rem;background:var(--panel)}
+.recon h3{margin:0 0 .4rem;font-size:.95rem}
 @media (max-width:640px){main{padding:1rem}table{font-size:.86rem}}
 `;
 
@@ -111,27 +113,35 @@ export function escapeHtml(value: unknown): string {
  * from anything the page remembered.
  */
 const CLIENT = `
-export const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-export async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) },
-  });
-  if (response.status === 204) return null;
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || body.message || ('Request failed with HTTP ' + response.status));
-  return body;
-}
-export function statusPill(status) {
-  const tone = ['succeeded','completed','associated','passed','ready'].includes(status) ? 'ok'
-    : ['failed','unassociated','unverified'].includes(status) ? 'bad'
-    : ['awaiting-approval','requires-connection','requires-executable'].includes(status) ? 'warn' : '';
-  return '<span class="pill ' + tone + '">' + esc(status) + '</span>';
-}
-export function fail(node, error) {
-  node.innerHTML = '<div class="empty">' + esc(error.message) + '</div>';
-}
-window.factory = { api, esc, statusPill, fail };
+/*
+ * Shared helpers live only on window.factory. Each page script then takes the
+ * ones it uses with a single top-level declaration. Declaring them here at
+ * module scope as well would redeclare them in the same module, which is a
+ * parse error that stops the whole page script before its first line runs.
+ */
+window.factory = (() => {
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) },
+    });
+    if (response.status === 204) return null;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || body.message || ('Request failed with HTTP ' + response.status));
+    return body;
+  }
+  function statusPill(status) {
+    const tone = ['succeeded','completed','associated','passed','ready','healthy','reconciled','executed','converged'].includes(status) ? 'ok'
+      : ['failed','unassociated','unverified','execution-failed','verification-failed','error'].includes(status) ? 'bad'
+      : ['awaiting-approval','requires-connection','requires-executable','drifted','autonomy-denied','authority-unavailable','unknown'].includes(status) ? 'warn' : '';
+    return '<span class="pill ' + tone + '">' + esc(status) + '</span>';
+  }
+  function fail(node, error) {
+    node.innerHTML = '<div class="empty">' + esc(error.message) + '</div>';
+  }
+  return { api, esc, statusPill, fail };
+})();
 `;
 
 export function overviewPage(): string {
@@ -139,6 +149,7 @@ export function overviewPage(): string {
 <h1>Overview</h1>
 <p class="lede">What Factory is keeping true, what it is changing, and on whose authority.</p>
 <section><h2>Authority</h2><div id="authority"><p class="muted">Loading…</p></div></section>
+<section><h2>Keeping in sync</h2><div id="sync"><p class="muted">Loading…</p></div></section>
 <section><h2>Projects</h2><div id="projects"><p class="muted">Loading…</p></div></section>
 <section><h2>Active Actions</h2><div id="active"><p class="muted">Loading…</p></div></section>
 <section><h2>Needs attention</h2><div id="attention"><p class="muted">Loading…</p></div></section>
@@ -152,6 +163,24 @@ try {
     '<div class="card"><h3>' + esc(authority.application) + ' ' + statusPill(authority.state) + '</h3>'
     + '<p class="muted">' + (authority.principals || []).map(esc).join(', ') + '</p>'
     + '<p class="muted">' + esc(authority.reason || (authority.resource + ' in tenant ' + authority.tenant)) + '</p></div>';
+
+  const sync = await api('/v1/reconciliation').catch(() => null);
+  document.querySelector('#sync').innerHTML = sync && sync.environments.length
+    ? '<p>' + sync.summary.total + ' environments · ' + sync.summary.healthy + ' healthy · '
+      + sync.summary.drifted + ' drifted · ' + sync.summary.awaitingApproval + ' awaiting approval · '
+      + sync.summary.failed + ' failed · ' + sync.summary.disabled + ' disabled</p>'
+      + '<table><thead><tr><th>Environment</th><th>Status</th><th>Schedule</th><th>Last observed</th><th>Action</th></tr></thead><tbody>'
+      + sync.environments.map((entry) =>
+        '<tr><td><a href="/factory/projects/' + esc(entry.projectId) + '#Reality">'
+        + esc(entry.projectName || entry.projectId) + ' / ' + esc(entry.environmentName || entry.environmentId) + '</a></td>'
+        + '<td>' + statusPill(entry.enabled ? entry.status : 'disabled') + '</td>'
+        + '<td class="muted">' + esc(entry.schedule) + '</td>'
+        + '<td class="muted">' + esc(entry.lastObservedAt || 'never') + '</td>'
+        + '<td>' + (entry.action
+            ? '<a href="/factory/actions/' + esc(entry.action.id) + '">' + esc(entry.action.status) + '</a>'
+            : '—') + '</td></tr>').join('')
+      + '</tbody></table>'
+    : '<div class="empty">Factory is not continuously reconciling anything yet.</div>';
 
   document.querySelector('#projects').innerHTML = data.projects.length
     ? '<div class="grid">' + data.projects.map((project) =>
@@ -283,8 +312,68 @@ async function render() {
           + (report.proposal
             ? '<p><strong>Action available</strong><br>' + esc(report.proposal.intent) + '</p>'
               + '<button data-reconcile="' + esc(report.environmentId) + '">Review Action</button>'
-            : '') + '</div></section>';
+            : '') + '</div>'
+          + '<div class="recon" data-env="' + esc(report.environmentId) + '"></div></section>';
       }).join('') : '<div class="empty">No environments yet.</div>';
+      const { environments: records } = await api('/v1/reconciliation');
+      environments.forEach((report) => {
+        const record = records.find((entry) => entry.environmentId === report.environmentId);
+        const host = panel.querySelector('[data-env="' + report.environmentId + '"]');
+        if (!host) return;
+        host.innerHTML = '<h3>Reconciliation</h3>'
+          + (record
+            ? '<p>' + statusPill(record.enabled ? record.status : 'disabled') + ' ' + esc(record.schedule) + '</p>'
+              + '<p class="muted">Last observed: ' + esc(record.lastObservedAt || 'never')
+              + '<br>Last reconciled: ' + esc(record.lastReconciledAt || 'never')
+              + '<br>Next due: ' + esc(record.nextDueAt || '—') + '</p>'
+              + (record.lastError ? '<p class="muted">' + esc(record.lastError) + '</p>' : '')
+              + (record.action
+                ? '<p><strong>Action</strong><br><a href="/factory/actions/' + esc(record.action.id) + '">'
+                  + esc(record.action.intent) + '</a> ' + statusPill(record.action.status) + '</p>'
+                  + '<p class="muted">Autonomy: '
+                  + esc(record.action.autonomy ? (record.action.autonomy.allowed ? 'authorized' : 'denied') : 'not asked')
+                  + '</p>'
+                : '')
+              + '<p><button data-toggle="' + esc(report.environmentId) + '" data-enabled="' + record.enabled + '">'
+              + (record.enabled ? 'Disable' : 'Enable') + '</button> '
+              + '<button data-now="' + esc(report.environmentId) + '">Reconcile Now</button></p>'
+            : '<p class="muted">Not continuously reconciled.</p>'
+              + '<form data-enable="' + esc(report.environmentId) + '">'
+              + '<input name="interval" placeholder="15m" value="15m">'
+              + '<button>Enable continuous reconciliation</button></form>');
+      });
+      panel.querySelectorAll('[data-enable]').forEach((form) => {
+        form.onsubmit = async (event) => {
+          event.preventDefault();
+          try {
+            await api('/v1/projects/' + projectId + '/environments/' + form.dataset.enable + '/reconciliation',
+              { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) });
+            await render();
+          } catch (error) { fail(panel, error); }
+        };
+      });
+      panel.querySelectorAll('[data-toggle]').forEach((button) => {
+        button.onclick = async () => {
+          button.disabled = true;
+          try {
+            await api('/v1/projects/' + projectId + '/environments/' + button.dataset.toggle + '/reconciliation',
+              { method: 'PATCH', body: JSON.stringify({ enabled: button.dataset.enabled !== 'true' }) });
+            await render();
+          } catch (error) { fail(panel, error); }
+        };
+      });
+      panel.querySelectorAll('[data-now]').forEach((button) => {
+        button.onclick = async () => {
+          button.disabled = true;
+          button.textContent = 'Reconciling…';
+          try {
+            // The same engine the scheduler calls, asked to run now.
+            await api('/v1/projects/' + projectId + '/environments/' + button.dataset.now + '/reconcile-now',
+              { method: 'POST', body: JSON.stringify({}) });
+            await render();
+          } catch (error) { fail(panel, error); }
+        };
+      });
       panel.querySelectorAll('[data-reconcile]').forEach((button) => {
         button.onclick = async () => {
           button.disabled = true;
@@ -437,7 +526,21 @@ async function render() {
     const authority = action.authority || {};
     const verification = action.verification || [];
     const drift = action.drift;
+    const autonomyState = !action.autonomy ? 'not asked'
+      : action.autonomy.allowed ? 'authorized'
+      : /unavailable|unreachable|could not|no AuthBoundry session/i.test(action.autonomy.reason)
+        ? 'AuthBoundry unavailable' : 'denied';
+    const origin = action.origin === 'continuous-reconciliation'
+      ? 'Continuous reconciliation' : 'Manual';
     detail.innerHTML =
+      '<h2>Origin</h2><div class="grid">'
+        + '<div class="card"><h3>Origin</h3><p>' + esc(origin) + '</p></div>'
+        + '<div class="card"><h3>Desired state revision</h3><p class="muted">'
+          + esc(action.desiredStateRevision || '—') + '</p></div>'
+        + '<div class="card"><h3>Observed reality revision</h3><p class="muted">'
+          + esc(action.observedStateRevision || '—') + '</p></div>'
+      + '</div>'
+      +
       (drift ? '<h2>Why</h2><div class="banner drift">'
         + drift.explanation.map((line) => '<p>' + esc(line) + '</p>').join('')
         + '<p class="muted">Observed ' + esc(drift.observedAt) + '</p></div>' : '')
@@ -447,8 +550,10 @@ async function render() {
       + '</ol>'
       + '<h2>Authority</h2><div class="grid">'
         + '<div class="card"><h3>Autonomous execution</h3><p>'
-          + statusPill(action.autonomy ? (action.autonomy.allowed ? 'ready' : 'awaiting-approval') : 'unknown')
-          + '</p><p class="muted">' + esc(action.autonomy?.reason || 'not asked') + '</p></div>'
+          + statusPill(autonomyState === 'authorized' ? 'ready'
+              : autonomyState === 'not asked' ? 'unknown' : 'awaiting-approval')
+          + ' ' + esc(autonomyState) + '</p>'
+          + '<p class="muted">' + esc(action.autonomy?.reason || 'not asked') + '</p></div>'
         + (action.approvedBy ? '<div class="card"><h3>Approved by</h3><p>' + esc(action.approvedBy) + '</p></div>' : '')
         + '<div class="card"><h3>Principal</h3><p>' + esc(authority.principal || '—') + '</p></div>'
         + '<div class="card"><h3>Application</h3><p>' + esc(authority.application || '—') + '</p></div>'
@@ -469,8 +574,11 @@ async function render() {
         ? '<p><a href="/factory/runs/' + esc(action.runId) + '">Run ' + esc(action.runId) + '</a> · '
           + '<a href="/v1/runs/' + esc(action.runId) + '/evidence">durable evidence</a></p>'
         : '<div class="empty">No run yet.</div>')
-      + (['planned','awaiting-approval'].includes(action.status)
-        ? '<p><button id="run">Authorize and run</button></p>' : '')
+      + (action.status === 'awaiting-approval'
+        ? '<div class="banner drift"><p><strong>Autonomous execution not authorized</strong></p>'
+          + '<p class="muted">' + esc(action.autonomy?.reason || 'Factory could not ask the authority.') + '</p>'
+          + '<p><button id="run">Approve &amp; Run</button></p></div>'
+        : action.status === 'planned' ? '<p><button id="run">Run</button></p>' : '')
       + (action.discovery ? '<details><summary>Repository discovery</summary><pre>'
         + esc(JSON.stringify(action.discovery, null, 2)) + '</pre></details>' : '');
     const run = detail.querySelector('#run');

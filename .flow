@@ -238,6 +238,10 @@ app software_factory {
     drift: json?
     autonomy: json?
     approvedBy: text?
+    origin: text?
+    desiredStateRevision: text?
+    observedStateRevision: text?
+    reconciliationFingerprint: text?
     operation: text?
     executionProvider: text?
     status: text
@@ -245,6 +249,34 @@ app software_factory {
     verification: json?
     authority: json?
     createdBy: text?
+    createdAt: datetime?
+    updatedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+    index status using hash(status)
+  }
+
+  collection Reconciliation {
+    project_id: text
+    projectId: ref Project?
+    environmentId: ref Environment?
+    tenantId: text?
+    status: text
+    interval: text?
+    intervalMs: integer?
+    enabled: boolean?
+    lastObservedAt: datetime?
+    lastReconciledAt: datetime?
+    lastActionId: ref Action?
+    lastRunId: ref Run?
+    lastError: text?
+    lastFingerprint: text?
+    lastOutcome: json?
+    nextDueAt: datetime?
+    leaseOwner: text?
+    leaseExpiresAt: datetime?
     createdAt: datetime?
     updatedAt: datetime?
     created_at: datetime
@@ -327,6 +359,11 @@ app software_factory {
     appport_service github
     appport_capability github.pull_request.merge
     jev bounded
+  }
+
+  policy Reconciliation {
+    read: authenticated
+    write: none
   }
 
   policy Project {

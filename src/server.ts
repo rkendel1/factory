@@ -8,6 +8,8 @@ import { assertContractIntegrity } from './contract.js';
 import {
   createFactoryBrowserAdapter,
   createAuthBoundryAuthenticator,
+  createServiceSession,
+  factoryReturnPath,
   FACTORY_BROWSER_APPLICATION_ID,
   FACTORY_BROWSER_CALLBACK_PATH,
   AuthBoundryAuthenticationError,
@@ -35,7 +37,17 @@ import {
 } from './product-ui.js';
 import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
+import { createReconciliationScheduler, type SchedulerHandle } from './scheduler.js';
 import { compareReality, observeEnvironment, reconciledState, type DriftReport } from './reality.js';
+import {
+  describeSchedule,
+  desiredStateRevision,
+  IntervalError,
+  nextDueAt,
+  observedStateRevision,
+  parseInterval,
+  reconciliationFingerprint,
+} from './reconciliation.js';
 import {
   assertFactoryAssociation,
   authorizedApplicationContext,
@@ -69,6 +81,9 @@ import type {
   ActionRecord,
   AuthorityContextRecord,
   AutonomyDecision,
+  ReconciliationOutcome,
+  ReconciliationRecord,
+  ReconciliationResult,
   EnvironmentRecord,
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -166,6 +181,27 @@ function writeBrowserRedirect(response: ServerResponse, result: BrowserRedirectR
   response.end();
 }
 
+/**
+ * How a pass's result reads on the reconciliation record.
+ *
+ * Several distinct results share the `drifted` status because the environment
+ * really is drifted in all of them; the result on the outcome says which one,
+ * so the distinction is never lost.
+ */
+const RECONCILIATION_STATUS: Record<ReconciliationResult, ReconciliationRecord['status']> = {
+  converged: 'healthy',
+  executed: 'healthy',
+  unobserved: 'enabled',
+  'drift-detected': 'drifted',
+  'awaiting-approval': 'drifted',
+  'autonomy-denied': 'drifted',
+  'duplicate-suppressed': 'drifted',
+  'authority-unavailable': 'failed',
+  'execution-failed': 'failed',
+  'verification-failed': 'failed',
+  error: 'failed',
+};
+
 export class FactoryService {
   private readonly flowSpec;
 
@@ -184,6 +220,7 @@ export class FactoryService {
     reason: 'the Factory application association has not been checked yet',
   };
   private paxVersion?: string;
+  private scheduler: SchedulerHandle | null = null;
   private shuttingDown = false;
 
   private constructor(
@@ -423,7 +460,7 @@ export class FactoryService {
    * from desired state: an environment that reports what was wanted rather than
    * what happened could never drift again.
    */
-  private async reconcileEnvironment(
+  private async recordReconciledState(
     tenantId: string,
     projectId: string,
     environmentId: string,
@@ -439,6 +476,311 @@ export class FactoryService {
       evidence: evidence ?? null,
       desiredState: await this.domain.getDesiredState(tenantId, projectId),
     }));
+  }
+
+  /**
+   * One reconciliation pass over one environment.
+   *
+   * This is the whole engine, and the manual "Reconcile Now" button and the
+   * scheduler both call exactly this: a manual pass is not a shortcut past the
+   * comparison, it is the same comparison run sooner.
+   *
+   * The pass is safe to repeat. A converged environment plans nothing, an
+   * unobserved one invents nothing, and drift that already has an open Action
+   * adopts it rather than planning a second. Work only happens when desire and
+   * reality actually disagree and nothing is already closing the gap.
+   */
+  async reconcileEnvironment(
+    context: AuthenticatedContext,
+    projectId: string,
+    environmentId: string,
+    options: { probe?: CapabilityProbe; operation?: string } = {},
+  ): Promise<ReconciliationOutcome> {
+    const tenantId = context.tenant;
+    const explanation: string[] = [];
+    const finish = (
+      result: ReconciliationResult,
+      extra: Partial<ReconciliationOutcome> = {},
+    ): ReconciliationOutcome => ({
+      result,
+      observedAt: new Date().toISOString(),
+      explanation,
+      ...extra,
+    });
+
+    const project = await this.domain.getProject(tenantId, projectId);
+    if (!project) throw new DomainValidationError(`project ${projectId} was not found`);
+    const environment = await this.domain.getEnvironment(tenantId, projectId, environmentId);
+    if (!environment) throw new DomainValidationError(`environment ${environmentId} was not found`);
+
+    const desiredState = await this.domain.getDesiredState(tenantId, projectId);
+    const reports = await this.observeReality(context, projectId);
+    const drift = reports.find((report) => report.environmentId === environmentId);
+    if (!drift) throw new DomainValidationError(`environment ${environmentId} was not observed`);
+
+    const current = observeEnvironment(environment);
+    const revisions = {
+      desiredStateRevision: desiredStateRevision(desiredState),
+      observedStateRevision: observedStateRevision(current),
+    };
+    explanation.push(...drift.explanation);
+
+    // An environment Factory has not observed is not a drifted one.
+    if (drift.status === 'unknown') {
+      return finish('unobserved', revisions);
+    }
+    if (drift.status === 'reconciled') {
+      return finish('converged', revisions);
+    }
+
+    const actionType = options.operation ?? 'repo-echo';
+    const fingerprint = reconciliationFingerprint({
+      projectId,
+      environmentId,
+      ...revisions,
+      actionType,
+    });
+
+    // Identical drift already has work in flight; adopt it rather than fork it.
+    const existing = await this.domain.findOpenActionByFingerprint(tenantId, fingerprint);
+    if (existing) {
+      explanation.push(`Action ${existing.id} is already open for this drift.`);
+      return finish(
+        existing.status === 'awaiting-approval' ? 'awaiting-approval' : 'duplicate-suppressed',
+        { ...revisions, fingerprint, actionId: existing.id, ...(existing.autonomy ? { autonomy: existing.autonomy } : {}) },
+      );
+    }
+
+    const planned = await this.createAction(context, projectId, {
+      type: actionType,
+      intent: drift.proposal?.intent ?? `Reconcile ${environment.name}`,
+      environmentId,
+      ...(options.operation ? { operation: options.operation } : {}),
+    }, options.probe);
+
+    const action = await this.domain.patchAction(tenantId, planned.id, {
+      origin: 'continuous-reconciliation',
+      reconciliationFingerprint: fingerprint,
+      ...revisions,
+      drift: {
+        status: drift.status,
+        observedAt: drift.observedAt,
+        explanation: drift.explanation,
+        fields: drift.fields.filter((field) => field.drifted),
+      },
+    }) ?? planned;
+
+    explanation.push(`Factory prepared: ${action.intent}`);
+    const autonomy = action.autonomy;
+
+    /*
+     * The authority decides whether this runs without a person, and an
+     * authority Factory cannot reach is a denial rather than a default. Both
+     * leave the Action for a human; they are reported apart because they call
+     * for different responses.
+     */
+    if (!autonomy?.allowed) {
+      const unreachable = /unavailable|unreachable|could not|no AuthBoundry session/i.test(autonomy?.reason ?? '');
+      explanation.push(unreachable
+        ? 'AuthBoundry could not be reached, so Factory did not act.'
+        : 'AuthBoundry denied autonomous execution, so this waits for a person.');
+      return finish(unreachable ? 'authority-unavailable' : 'autonomy-denied', {
+        ...revisions,
+        fingerprint,
+        actionId: action.id,
+        ...(autonomy ? { autonomy } : {}),
+      });
+    }
+
+    explanation.push('AuthBoundry authorized autonomous execution.');
+    const executed = await this.runAction(context, action.id, {
+      ...(options.probe ? { probe: options.probe } : {}),
+      autonomous: true,
+    });
+
+    const failedVerification = executed.verification?.some((check) => check.status === 'failed') ?? false;
+    const run = executed.runId ? await this.domain.getRun(tenantId, executed.runId) : null;
+    const evidence = executed.runId
+      ? await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(executed.runId)
+      : null;
+
+    const base: Partial<ReconciliationOutcome> = {
+      ...revisions,
+      fingerprint,
+      actionId: executed.id,
+      ...(executed.runId ? { runId: executed.runId } : {}),
+      ...(executed.autonomy ? { autonomy: executed.autonomy } : {}),
+      ...(executed.authority ? { authority: executed.authority } : {}),
+      ...(evidence ? { evidenceId: evidence.id } : {}),
+    };
+
+    if (executed.status === 'succeeded') {
+      explanation.push(`${environment.name} reconciled to the declared state.`);
+      return finish('executed', base);
+    }
+    if (run && run.status !== 'completed') {
+      explanation.push(`Execution failed: ${run.error ?? 'the run did not complete'}.`);
+      return finish('execution-failed', base);
+    }
+    if (failedVerification) {
+      explanation.push('Execution completed but verification did not pass.');
+      return finish('verification-failed', base);
+    }
+    explanation.push('Reconciliation did not converge.');
+    return finish('error', base);
+  }
+
+  /**
+   * Run a pass and record what it found on the durable reconciliation record.
+   *
+   * The scheduler and the manual button both land here, so the record always
+   * reflects the last pass whoever asked for it.
+   */
+  async runReconciliationPass(
+    context: AuthenticatedContext,
+    record: ReconciliationRecord,
+    options: { probe?: CapabilityProbe; now?: number } = {},
+  ): Promise<{ record: ReconciliationRecord; outcome: ReconciliationOutcome }> {
+    const now = options.now ?? Date.now();
+    let outcome: ReconciliationOutcome;
+    try {
+      outcome = await this.reconcileEnvironment(context, record.projectId, record.environmentId, {
+        ...(options.probe ? { probe: options.probe } : {}),
+      });
+    } catch (error) {
+      outcome = {
+        result: 'error',
+        observedAt: new Date(now).toISOString(),
+        explanation: [error instanceof Error ? error.message : String(error)],
+      };
+    }
+
+    const status = RECONCILIATION_STATUS[outcome.result];
+    const released = await this.domain.releaseReconciliation(record.id, {
+      status,
+      lastObservedAt: outcome.observedAt,
+      ...(outcome.result === 'executed' ? { lastReconciledAt: outcome.observedAt } : {}),
+      ...(outcome.actionId ? { lastActionId: outcome.actionId } : {}),
+      ...(outcome.runId ? { lastRunId: outcome.runId } : {}),
+      ...(outcome.fingerprint ? { lastFingerprint: outcome.fingerprint } : {}),
+      lastOutcome: outcome,
+      lastError: status === 'failed' ? outcome.explanation[outcome.explanation.length - 1] ?? 'unknown error' : '',
+      nextDueAt: nextDueAt(record, now),
+    });
+    return { record: released ?? record, outcome };
+  }
+
+  /**
+   * The Factory-wide reconciliation view: what Factory is keeping in sync.
+   *
+   * Everything here is read from the durable records, so there is no worker
+   * whose state exists only in a process. If Factory is reconciling something,
+   * this says so, and if a pass failed it says why.
+   */
+  async reconciliationView(context: AuthenticatedContext, projectId?: string): Promise<{
+    environments: Record<string, unknown>[];
+    summary: Record<string, number>;
+  }> {
+    const tenantId = context.tenant;
+    const records = await this.domain.listReconciliations(tenantId, projectId);
+    const environments: Record<string, unknown>[] = [];
+    const summary = { total: 0, healthy: 0, drifted: 0, awaitingApproval: 0, failed: 0, disabled: 0 };
+
+    for (const record of records) {
+      const [project, environment] = await Promise.all([
+        this.domain.getProject(tenantId, record.projectId),
+        this.domain.getEnvironment(tenantId, record.projectId, record.environmentId),
+      ]);
+      const action = record.lastActionId
+        ? await this.domain.getAction(tenantId, record.lastActionId)
+        : null;
+
+      summary.total += 1;
+      if (!record.enabled) summary.disabled += 1;
+      else if (record.status === 'healthy') summary.healthy += 1;
+      else if (record.status === 'failed') summary.failed += 1;
+      else if (record.status === 'drifted') summary.drifted += 1;
+      if (action?.status === 'awaiting-approval') summary.awaitingApproval += 1;
+
+      environments.push({
+        id: record.id,
+        projectId: record.projectId,
+        projectName: project?.name ?? null,
+        environmentId: record.environmentId,
+        environmentName: environment?.name ?? null,
+        status: record.status,
+        enabled: record.enabled,
+        interval: record.interval,
+        schedule: describeSchedule(record),
+        lastObservedAt: record.lastObservedAt ?? null,
+        lastReconciledAt: record.lastReconciledAt ?? null,
+        nextDueAt: record.nextDueAt ?? null,
+        lastError: record.lastError || null,
+        result: record.lastOutcome?.result ?? null,
+        explanation: record.lastOutcome?.explanation ?? [],
+        currentState: environment?.currentState ?? null,
+        action: action
+          ? {
+              id: action.id,
+              intent: action.intent,
+              status: action.status,
+              origin: action.origin ?? 'manual',
+              autonomy: action.autonomy ?? null,
+            }
+          : null,
+      });
+    }
+    return { environments, summary };
+  }
+
+  /**
+   * Write a pass's result onto its reconciliation record.
+   *
+   * Used when a pass was requested directly rather than claimed by the worker,
+   * so a manual pass leaves the same durable trail a scheduled one does.
+   */
+  async recordReconciliationOutcome(
+    record: ReconciliationRecord,
+    outcome: ReconciliationOutcome,
+    now = Date.now(),
+  ): Promise<ReconciliationRecord | null> {
+    const status = RECONCILIATION_STATUS[outcome.result];
+    return this.domain.patchReconciliation(record.tenantId, record.id, {
+      status,
+      lastObservedAt: outcome.observedAt,
+      ...(outcome.result === 'executed' ? { lastReconciledAt: outcome.observedAt } : {}),
+      ...(outcome.actionId ? { lastActionId: outcome.actionId } : {}),
+      ...(outcome.runId ? { lastRunId: outcome.runId } : {}),
+      ...(outcome.fingerprint ? { lastFingerprint: outcome.fingerprint } : {}),
+      lastOutcome: outcome,
+      lastError: status === 'failed'
+        ? outcome.explanation[outcome.explanation.length - 1] ?? 'unknown error'
+        : '',
+      nextDueAt: nextDueAt(record, now),
+    });
+  }
+
+  /** Configure continuous reconciliation for one environment. */
+  async configureReconciliation(context: AuthenticatedContext, projectId: string, environmentId: string, input: {
+    enabled?: boolean;
+    interval?: string;
+  }): Promise<ReconciliationRecord> {
+    const tenantId = context.tenant;
+    if (!await this.domain.getProject(tenantId, projectId)) {
+      throw new DomainValidationError(`project ${projectId} was not found`);
+    }
+    if (!await this.domain.getEnvironment(tenantId, projectId, environmentId)) {
+      throw new DomainValidationError(`environment ${environmentId} was not found`);
+    }
+    const existing = await this.domain.getReconciliation(tenantId, projectId, environmentId);
+    const schedule = parseInterval(input.interval ?? existing?.interval);
+    return this.domain.putReconciliation({
+      tenantId,
+      projectId,
+      environmentId,
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      ...schedule,
+    });
   }
 
   /**
@@ -632,7 +974,7 @@ export class FactoryService {
       && verification.every((check) => check.status !== 'failed');
 
     if (succeeded && action.environmentId) {
-      await this.reconcileEnvironment(tenantId, action.projectId, action.environmentId, run.id);
+      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, run.id);
     }
 
     return await this.domain.patchAction(tenantId, actionId, {
@@ -811,8 +1153,44 @@ export class FactoryService {
     this.paxVersion = await verifyPax(this.config.paxExecutable);
   }
 
+  /**
+   * Begin continuous reconciliation.
+   *
+   * Nothing is reconciled because Factory started. Each record carries its own
+   * next-due time, so a restart resumes the schedule the durable records
+   * describe rather than sweeping every environment at boot.
+   */
+  startReconciliation(options: {
+    context: () => Promise<AuthenticatedContext>;
+    probe?: CapabilityProbe;
+    tickMs?: number;
+    leaseMs?: number;
+    now?: () => number;
+  }): SchedulerHandle {
+    this.scheduler?.stop();
+    this.scheduler = createReconciliationScheduler({
+      service: this,
+      context: options.context,
+      ...(options.probe ? { probe: options.probe } : {}),
+      ...(options.tickMs === undefined ? {} : { tickMs: options.tickMs }),
+      ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
+      ...(options.now ? { now: options.now } : {}),
+      onError: (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`Factory reconciliation worker error: ${message}\n`);
+      },
+    });
+    this.scheduler.start();
+    return this.scheduler;
+  }
+
+  reconciliationWorker(): SchedulerHandle | null {
+    return this.scheduler;
+  }
+
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.scheduler?.stop();
     for (const execution of this.activeExecutions.values()) {
       execution.cancel();
     }
@@ -1375,6 +1753,19 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         try {
           await getAuthenticator().authenticate(request, 'factory.ui.read');
         } catch (error) {
+          /*
+           * A person whose session has lapsed is sent to sign in and brought
+           * back, the same as at `/`. Raw JSON on a page a browser reloaded is
+           * an error message with no way forward. A client asking for JSON
+           * still gets it, and a denial is still a denial.
+           */
+          if (error instanceof AuthBoundryAuthenticationError
+            && !/application\/json/i.test(request.headers.accept ?? '')) {
+            const returnTo = encodeURIComponent(factoryReturnPath(url.pathname));
+            response.writeHead(302, { location: `/api/auth/login/github?return_to=${returnTo}` });
+            response.end();
+            return;
+          }
           writeAuthError(response, error);
           return;
         }
@@ -1409,7 +1800,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         try {
           await handleProductRoute({ service, authenticator: getAuthenticator, request, response, url, body });
         } catch (error) {
-          if (error instanceof DomainValidationError) {
+          if (error instanceof DomainValidationError || error instanceof IntervalError) {
             writeJson(response, 400, { error: error.message, code: 'INVALID_REQUEST' });
             return;
           }
@@ -1530,6 +1921,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     authBoundryUrl: process.env.AUTHBOUNDRY_URL,
     authBoundryBrowserCookieSecret: process.env.AUTHBOUNDRY_BROWSER_COOKIE_SECRET,
     authBoundryTenantId: process.env.AUTHBOUNDRY_TENANT_ID,
+    authBoundryOperatorCredential: process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL,
+    factoryServiceCredential: process.env.FACTORY_SERVICE_CREDENTIAL,
+    ...(process.env.FACTORY_RECONCILE_TICK_MS
+      ? { reconciliationTickMs: Number(process.env.FACTORY_RECONCILE_TICK_MS) }
+      : {}),
   };
   if (production) {
     const deploymentConfig = readDeploymentConfig(config);
@@ -1547,6 +1943,27 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   server.listen(port, host, () => {
     process.stdout.write(`Software Factory Runner listening on ${host}:${port}\n`);
   });
+
+  /*
+   * Continuous reconciliation runs only when Factory has a credential to act
+   * under. Without one there is no authority to ask whether it may act, and an
+   * autonomous loop acting on nobody's behalf is the thing this design exists
+   * to prevent. Configuration and history stay durable either way, so enabling
+   * the credential later resumes rather than restarts.
+   */
+  if (config.factoryServiceCredential) {
+    const session = createServiceSession(service.authenticator(), config.factoryServiceCredential);
+    service.startReconciliation({
+      context: session.context,
+      probe: session.probe,
+      ...(config.reconciliationTickMs ? { tickMs: config.reconciliationTickMs } : {}),
+    });
+    process.stdout.write('Continuous reconciliation worker started\n');
+  } else {
+    process.stdout.write(
+      'Continuous reconciliation is idle: FACTORY_SERVICE_CREDENTIAL is not configured\n',
+    );
+  }
 
   const shutdown = async () => {
     await service.shutdown();

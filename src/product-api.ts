@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FactoryService } from './server.js';
 import { AuthBoundryAuthorizationError, type AuthenticatedContext, type Authenticator, type CapabilityProbe } from './auth.js';
 import { DomainValidationError } from './domain.js';
+import { IntervalError } from './reconciliation.js';
 import type { ProjectRecord } from './types.js';
 
 /**
@@ -61,6 +62,8 @@ function projectStatus(value: unknown): ProjectRecord['status'] {
   }
   return status as ProjectRecord['status'];
 }
+
+const RECONCILIATION_PATH = /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reconciliation$/;
 
 export const PRODUCT_ROUTES: ProductRoute[] = [
   {
@@ -298,6 +301,72 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
       });
       // No drift is not an error: there is simply nothing to do.
       return json(result.action ? 201 : 200, result);
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/reconciliation$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context }) {
+      return json(200, await service.reconciliationView(context));
+    },
+  },
+  {
+    method: 'GET',
+    pattern: RECONCILIATION_PATH,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const record = await service.projects().getReconciliation(context.tenant, params[0]!, params[1]!);
+      return record ? json(200, record) : json(404, { error: 'Reconciliation is not configured' });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: RECONCILIATION_PATH,
+    capability: PRODUCT_CAPABILITIES.write,
+    async handle({ service, context, params, body }) {
+      const input = body === undefined ? {} : asRecord(body);
+      return json(201, await service.configureReconciliation(context, params[0]!, params[1]!, {
+        enabled: input.enabled === undefined ? true : Boolean(input.enabled),
+        ...(input.interval === undefined ? {} : { interval: text(input.interval, 'interval')! }),
+      }));
+    },
+  },
+  {
+    method: 'PATCH',
+    pattern: RECONCILIATION_PATH,
+    capability: PRODUCT_CAPABILITIES.write,
+    async handle({ service, context, params, body }) {
+      const input = asRecord(body);
+      const record = await service.projects().getReconciliation(context.tenant, params[0]!, params[1]!);
+      if (!record) return json(404, { error: 'Reconciliation is not configured' });
+      return json(200, await service.configureReconciliation(context, params[0]!, params[1]!, {
+        ...(input.enabled === undefined ? {} : { enabled: Boolean(input.enabled) }),
+        ...(input.interval === undefined ? {} : { interval: text(input.interval, 'interval')! }),
+      }));
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: RECONCILIATION_PATH,
+    capability: PRODUCT_CAPABILITIES.delete,
+    async handle({ service, context, params }) {
+      const removed = await service.projects().deleteReconciliation(context.tenant, params[0]!, params[1]!);
+      return removed ? json(204, null) : json(404, { error: 'Reconciliation is not configured' });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reconcile-now$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params, probe }) {
+      // The same engine the scheduler calls, run sooner. Not a shortcut past it.
+      const outcome = await service.reconcileEnvironment(context, params[0]!, params[1]!, { probe });
+      const record = await service.projects().getReconciliation(context.tenant, params[0]!, params[1]!);
+      if (record) {
+        await service.recordReconciliationOutcome(record, outcome);
+      }
+      return json(200, outcome);
     },
   },
   {

@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { createBrowserRelyingApplicationAdapter } from '@authboundry/core/server';
 import { createHttpServer } from '../src/server.js';
 import { createTempWorkspace } from './helpers.js';
-import type { Authenticator } from '../src/auth.js';
+import { AuthBoundryAuthenticationError, type Authenticator } from '../src/auth.js';
 
 async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -49,6 +49,37 @@ test('public root enters AuthBoundry without weakening protected routes or retur
     const health = await fetch(`${origin}/health`);
     assert.equal(health.status, 200);
     assert.equal((await health.json() as { ok: boolean }).ok, true);
+  } finally {
+    await close(server);
+  }
+});
+
+test('a product page with no session sends a browser to sign in and back, and JSON callers a 401', async () => {
+  const unauthenticated: Authenticator = {
+    async authenticate() { throw new AuthBoundryAuthenticationError(); },
+  };
+  const workingDirectory = await createTempWorkspace('factory-browser-lapsed');
+  const { server } = await createHttpServer({
+    mode: 'local', workingDirectory, appportPath: `${workingDirectory}/services`, authenticator: unauthenticated,
+  });
+  const origin = await listen(server);
+  try {
+    // A reloaded detail page returns to its section, since only exact
+    // registered paths may be returned to.
+    const page = await fetch(`${origin}/factory/projects/prj_123`, { redirect: 'manual' });
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get('location'), '/api/auth/login/github?return_to=%2Ffactory%2Fprojects');
+
+    const landing = await fetch(`${origin}/factory`, { redirect: 'manual' });
+    assert.equal(landing.headers.get('location'), '/api/auth/login/github?return_to=%2Ffactory');
+
+    // A client that asked for JSON is answered in JSON, not redirected.
+    const api = await fetch(`${origin}/factory`, { redirect: 'manual', headers: { accept: 'application/json' } });
+    assert.equal(api.status, 401);
+    assert.equal((await api.json() as { code: string }).code, 'UNAUTHENTICATED');
+
+    // API routes are unchanged: a machine gets a machine answer.
+    assert.equal((await fetch(`${origin}/v1/projects`, { redirect: 'manual' })).status, 401);
   } finally {
     await close(server);
   }
