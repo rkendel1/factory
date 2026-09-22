@@ -744,5 +744,15 @@ test('fly integration: real status and health against a configured app', {
   const probed = await service.runAction(context, probe.id, { probe: grants, autonomous: true });
   assert.ok(['succeeded', 'failed'].includes(probed.status));
   assert.ok(probed.verification?.some((check) => check.name === 'environment responds healthy'));
+
+  // Opt in separately to a real deployment of the test app through the same path.
+  if (process.env.FACTORY_INTEGRATION_FLY_DEPLOY === '1') {
+    const deploy = await service.createAction(context, project.id, { capability: 'deployment.create', environmentId: environment.id }, grants);
+    const deployed = await service.runAction(context, deploy.id, { probe: grants, autonomous: true });
+    assert.equal(deployed.status, 'succeeded', JSON.stringify({ failure: deployed.failure, verification: deployed.verification }));
+    assert.ok(deployed.execution?.providerOperationId, 'fly reported a release');
+    assert.ok(deployed.verification?.some((check) => check.name === 'environment responds healthy' && check.status === 'passed'));
+    assert.equal((await evidenceOf(service, deployed)).chain?.observedReality?.health, 'healthy');
+  }
   await service.shutdown();
 });

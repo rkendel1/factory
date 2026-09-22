@@ -145,6 +145,43 @@ from a probe that ran; `unknown` when nothing probed). Only a fresh comparison
 that finds no drift lets the pass report `executed`; otherwise it reports
 `drift-detected` with the re-observation's explanation.
 
+## Execution matrix
+
+What each capability in the vocabulary actually does from a Factory instance
+today. "Real operation" is the mechanism the execution boundary spawns or
+performs; "verification" is what reality is asked afterwards. A capability with
+no row in `.flow` for an adapter that implements it is unsupported: the
+Providers page says so, the Action form does not offer it, and no adapter
+pretends otherwise.
+
+| Capability | Provider | Real operation | Resource | Credential | Verification | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `repository.inspect` | git | `git status --porcelain=v2 --branch` in a fresh clone of the configured repository | repository (`git:<provider>:<owner>/<name>`) | none | HEAD, branch, upstream and clean/dirty state as git reports them; the inspected HEAD must match the checked-out revision | executable |
+| `repository.checkout` | git | clone, then `git checkout --detach <revision>` (the Action's `parameters.revision`) or the desired branch; `git rev-parse --verify HEAD` | repository | none | the resulting HEAD, and that it equals the requested revision when one was requested | executable |
+| `build.run` | local | `npm run build --if-present` in the ephemeral workspace | workspace of the repository | none | the declared build script exited 0; new top-level artifacts are recorded; a repository without a build script is `verification-unavailable` | executable |
+| `test.run` | local | `npm run test --if-present` | workspace of the repository | none | the declared test script's own result | executable |
+| `deployment.create` | fly | `fly deploy --remote-only --yes` with `FLY_APP` bound from the environment | environment → `fly:app:<app>` | `FLY_API_TOKEN` | the release fly printed, **and** a live HTTP probe of the environment's health URL | executable when the fly CLI and credential are present |
+| `environment.inspect` | fly | `fly status --json` | environment → `fly:app:<app>` | `FLY_API_TOKEN` | the app name and status the provider reports | executable when the fly CLI and credential are present |
+| `environment.health` | fly | an HTTPS probe of the environment's health URL, from Factory itself | environment → health URL | `FLY_API_TOKEN` (named by the adapter) | the probe's HTTP result | executable when the credential is present |
+| `deployment.rollback` | — | none | — | — | — | unsupported: no adapter implements it |
+| `service.restart` | — | none | — | — | — | unsupported |
+| `configuration.apply` | — | none | — | — | — | unsupported |
+| `migration.run` | — | none | — | — | — | unsupported |
+
+`repo-echo` is a declared `.flow` operation (`node -e "console.log('authorized')"`)
+that the `local` adapter does not implement as a capability. It runs as an
+operation for the authority and evidence tests and is reported as declared
+but not implemented on the Providers page.
+
+The end-to-end proof lives in `tests/factory-promise.test.ts`: project,
+repository, environment and desired state created through the product API the
+UI calls; an Action planned and executed the same way; build, test, deploy and
+health run for real (with a fake `fly` CLI as the deterministic provider
+boundary and a live health endpoint); the same work requested through the
+Operational Work contract; a real provider failure; a verification failure; an
+unknown outcome; idempotent execution; and the whole state reopened after a
+Factory restart.
+
 ## Durable execution ownership and uncertain outcomes
 
 Every Run has one durable execution history and one authoritative attempt at
@@ -286,3 +323,7 @@ without destroying anything (status and health only), opt in:
 ```sh
 FACTORY_INTEGRATION_FLY=1 FACTORY_INTEGRATION_FLY_APP=<app> FLY_API_TOKEN=<token> npm run check
 ```
+
+To also perform a real deployment of that app through the same path, add
+`FACTORY_INTEGRATION_FLY_DEPLOY=1`. This deploys the checked-out repository to
+the named app; use a test application.

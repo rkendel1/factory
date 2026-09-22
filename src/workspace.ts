@@ -57,7 +57,7 @@ export async function createWorkspace(runId: string, workspaceRoot = '/tmp/softw
   return handle;
 }
 
-async function copyRepository(sourcePath: string, destinationPath: string, ref?: string): Promise<string | undefined> {
+async function copyRepository(sourcePath: string, destinationPath: string, ref?: string, commit?: string): Promise<string | undefined> {
   try {
     await stat(path.join(sourcePath, '.git'));
   } catch (error) {
@@ -69,8 +69,13 @@ async function copyRepository(sourcePath: string, destinationPath: string, ref?:
     return undefined;
   }
 
-  await runProcess('git', ['clone', '--depth', '1', sourcePath, destinationPath]);
-  if (ref) {
+  // A requested commit needs history; a branch needs only its tip.
+  await runProcess('git', commit ? ['clone', sourcePath, destinationPath] : ['clone', '--depth', '1', sourcePath, destinationPath]);
+  if (commit) {
+    // The real checkout. A revision the repository does not have fails here,
+    // with git's own reason, before anything runs against the workspace.
+    await runProcess('git', ['-c', 'advice.detachedHead=false', 'checkout', '--detach', commit], destinationPath);
+  } else if (ref) {
     await runProcess('git', ['checkout', ref], destinationPath);
   }
   return await runProcess('git', ['rev-parse', 'HEAD'], destinationPath);
@@ -86,7 +91,7 @@ export async function materializeRepository(
     throw new Error('No local repository mirror is configured for this execution request');
   }
 
-  const commit = await copyRepository(sourcePath, workspace.repositoryPath, repository.ref);
+  const commit = await copyRepository(sourcePath, workspace.repositoryPath, repository.ref, repository.commit);
   // The commit is what git reports after the checkout, never what was asked
   // for. A requested commit the checkout did not reach is a failure, not a fact.
   if (repository.commit && commit && commit !== repository.commit && !commit.startsWith(repository.commit)) {

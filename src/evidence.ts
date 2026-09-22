@@ -23,6 +23,8 @@ export interface RawExecutionResult {
   outputBytes?: { stdout: number; stderr: number };
   workspace?: string;
   credentialsResolved?: string[];
+  /** Top-level workspace entries the operation created. Names only, bounded. */
+  artifacts?: string[];
 }
 
 function matchField(label: string, text: string): string | undefined {
@@ -165,7 +167,7 @@ export function buildEvidence(
         ],
       },
     } : {}),
-    artifacts: [],
+    artifacts: result.artifacts ?? [],
     deterministicResult,
     finalResult,
     invariant,

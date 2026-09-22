@@ -157,7 +157,7 @@ function isTerminal(status: RunRecord['status']): boolean {
 }
 
 const requestKeys = new Set(['workId', 'repository', 'operation', 'idempotencyKey', 'github']);
-const repositoryKeys = new Set(['provider', 'owner', 'name', 'ref']);
+const repositoryKeys = new Set(['provider', 'owner', 'name', 'ref', 'commit']);
 const githubKeys = new Set(['pullNumber', 'mergeMethod']);
 const validTransitions: Record<RunRecord['status'], RunRecord['status'][]> = {
   accepted: ['authorized', 'failed', 'cancelled'],
@@ -1087,7 +1087,9 @@ export class FactoryService {
         failure: {
           actionId: failed.id,
           outcome: failed.outcome ?? 'execution-failed',
-          reason: failed.verification?.find((check) => check.status === 'failed')?.detail
+          // The Action's own recorded reason, then the check that failed.
+          reason: failed.failure?.reason
+            ?? failed.verification?.find((check) => check.status === 'failed')?.detail
             ?? `${failed.type} ${failed.outcome ?? 'failed'}`,
         },
       } : {}),
@@ -1870,6 +1872,11 @@ export class FactoryService {
     const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
     const execution = resolution && binding ? providerExecution(this.registry, resolution, providerContext, binding) : undefined;
 
+    // A checkout may name the revision it must reach. It is a parameter of the
+    // Action, validated as a git object name, never a provider resource.
+    const revision = typeof action.parameters?.revision === 'string' && /^[0-9a-f]{7,40}$/i.test(action.parameters.revision)
+      ? action.parameters.revision.toLowerCase()
+      : undefined;
     const run = await this.startRun({
       workId: work.id,
       repository: {
@@ -1877,6 +1884,7 @@ export class FactoryService {
         owner: repository.owner,
         name: repository.name,
         ref: desiredState?.sourceBranch ?? repository.defaultBranch,
+        ...(revision ? { commit: revision } : {}),
       },
       operation: action.operation ?? action.type,
       // A retried Action is admitted as a new Run; the earlier Run is history.
