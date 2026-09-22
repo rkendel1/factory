@@ -25,8 +25,15 @@ jobs:
 
       - name: Install PAX
         run: |
-          curl --fail --location --silent --show-error https://github.com/rkendel1/pax/releases/download/v0.1.0/pax-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-            | tar -xz -C "$RUNNER_TEMP"
+          PAX_ARCHIVE="$RUNNER_TEMP/pax-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --location --silent --show-error \
+            https://github.com/rkendel1/pax/releases/download/build-295cacf/pax-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$PAX_ARCHIVE"
+          echo "dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb  $PAX_ARCHIVE" \
+            | sha256sum --check --strict
+          tar -xzf "$PAX_ARCHIVE" -C "$RUNNER_TEMP" pax
+          chmod 0755 "$RUNNER_TEMP/pax"
+          "$RUNNER_TEMP/pax" --version
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Run runner tests

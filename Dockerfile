@@ -13,10 +13,14 @@ FROM node:22-bookworm-slim
 RUN apt-get update \
   && apt-get install --no-install-recommends -y ca-certificates curl git \
   && rm -rf /var/lib/apt/lists/*
-ARG PAX_VERSION=0.1.0
+ARG PAX_RELEASE=build-295cacf
+ARG PAX_SHA256=dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb
 RUN curl --fail --location --silent --show-error \
-    "https://github.com/rkendel1/pax/releases/download/v${PAX_VERSION}/pax-${PAX_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
-    | tar -xz -C /usr/local/bin \
+    "https://github.com/rkendel1/pax/releases/download/${PAX_RELEASE}/pax-x86_64-unknown-linux-gnu.tar.gz" \
+    --output /tmp/pax.tar.gz \
+  && echo "${PAX_SHA256}  /tmp/pax.tar.gz" | sha256sum --check --strict \
+  && tar -xzf /tmp/pax.tar.gz -C /usr/local/bin pax \
+  && rm /tmp/pax.tar.gz \
   && chmod 0755 /usr/local/bin/pax \
   && pax --version
 

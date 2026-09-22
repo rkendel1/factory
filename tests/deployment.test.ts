@@ -34,8 +34,14 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.doesNotMatch(fly, /appport.*(?:URL|url)/i);
   assert.match(dockerfile, /npm ci --omit=dev/);
   assert.equal((dockerfile.match(/COPY vendor \.\/vendor/g) ?? []).length, 2);
+  assert.match(dockerfile, /build-295cacf/);
+  assert.match(dockerfile, /dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb/);
+  assert.match(dockerfile, /sha256sum --check --strict/);
   assert.match(dockerfile, /pax --version/);
   assert.match(dockerfile, /USER node/);
+  assert.match(workflow, /build-295cacf/);
+  assert.match(workflow, /dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb/);
+  assert.match(workflow, /sha256sum --check --strict/);
   assert.match(workflow, /fly deploy --config fly\.toml --remote-only --strategy rolling/);
   assert.match(workflow, /FLY_API_TOKEN: \$\{\{ secrets\.FLY_API_TOKEN \}\}/);
   assert.doesNotMatch(workflow, /FELTDB_TOKEN\s*[:=]/);
