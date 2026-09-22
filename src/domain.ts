@@ -8,6 +8,8 @@ import type {
   DesiredStateRecord,
   EnvironmentCurrentState,
   EnvironmentRecord,
+  OperationalWorkEventRecord,
+  OperationalWorkRecord,
   ProjectRecord,
   ReconciliationRecord,
   ReconciliationStatus,
@@ -35,6 +37,8 @@ export class FactoryDomain {
   private desired() { return this.db.collection<DesiredStateRecord>(COLLECTIONS.desiredState); }
   private actionRecords() { return this.db.collection<ActionRecord>(COLLECTIONS.actions); }
   private runRecords() { return this.db.collection<RunRecord>(COLLECTIONS.runs); }
+  private operationalWork() { return this.db.collection<OperationalWorkRecord>(COLLECTIONS.operationalWork); }
+  private operationalWorkEvents() { return this.db.collection<OperationalWorkEventRecord>(COLLECTIONS.operationalWorkEvents); }
 
   // -- Projects ------------------------------------------------------------
 
@@ -401,7 +405,9 @@ export class FactoryDomain {
     tenantId: string,
     fingerprint: string,
   ): Promise<ActionRecord | null> {
-    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running'];
+    // Unknown is open: an Action whose outcome reality has not resolved is
+    // adopted, never duplicated, by a later pass over the same drift.
+    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running', 'executed', 'verifying', 'unknown'];
     const actions = await this.actionRecords().find({ tenantId, reconciliationFingerprint: fingerprint });
     return actions.find((action) => open.includes(action.status)) ?? null;
   }
@@ -437,6 +443,47 @@ export class FactoryDomain {
   async graphActions(tenantId: string, graphId: string): Promise<ActionRecord[]> {
     const actions = await this.actionRecords().find({ tenantId, graphId });
     return actions.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || left.id.localeCompare(right.id));
+  }
+
+  // -- Operational work (Attn ↔ Factory) -----------------------------------
+
+  async listOperationalWork(tenantId: string, projectId?: string): Promise<OperationalWorkRecord[]> {
+    const records = await this.operationalWork().find(projectId ? { tenantId, projectId } : { tenantId });
+    return records.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async findOperationalWorkByGraph(tenantId: string, graphId: string): Promise<OperationalWorkRecord | null> {
+    const records = await this.operationalWork().find({ tenantId, graphId });
+    return records[0] ?? null;
+  }
+
+  async getOperationalWork(tenantId: string, id: string): Promise<OperationalWorkRecord | null> {
+    const record = await this.operationalWork().get(id);
+    return record && record.tenantId === tenantId ? record : null;
+  }
+
+  async createOperationalWork(record: OperationalWorkRecord): Promise<OperationalWorkRecord> {
+    await this.operationalWork().insert(record, record.id);
+    return record;
+  }
+
+  async patchOperationalWork(tenantId: string, id: string, patch: Partial<OperationalWorkRecord>): Promise<OperationalWorkRecord | null> {
+    const current = await this.getOperationalWork(tenantId, id);
+    if (!current) return null;
+    const next: OperationalWorkRecord = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await this.operationalWork().put(next, next.id);
+    return next;
+  }
+
+  async appendOperationalWorkEvent(record: Omit<OperationalWorkEventRecord, 'id' | 'createdAt'>): Promise<OperationalWorkEventRecord> {
+    const event: OperationalWorkEventRecord = { id: `owe_${randomUUID()}`, createdAt: new Date().toISOString(), ...record };
+    await this.operationalWorkEvents().insert(event, event.id);
+    return event;
+  }
+
+  async listOperationalWorkEvents(tenantId: string, workId: string): Promise<OperationalWorkEventRecord[]> {
+    const events = await this.operationalWorkEvents().find({ tenantId, workId });
+    return events.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   }
 
   // -- Runs ----------------------------------------------------------------

@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { loadFactoryFlow, createFactoryDB, COLLECTIONS } from './felt.js';
 import { authorizeExecution, getOperationAuthorities } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
-import { executeContract, verifyPax, type ExecutionHandle } from './execution.js';
+import { CredentialUnavailableError, executeContract, processCredentialResolver, SpawnFailedError, verifyPax, type CredentialResolver, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import {
   createFactoryBrowserAdapter,
@@ -36,19 +36,24 @@ import {
   runPage,
   runsPage,
   settingsPage,
+  workListPage,
+  workPage,
 } from './product-ui.js';
 import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
 import { createReconciliationScheduler, type SchedulerHandle } from './scheduler.js';
 import {
+  interpretOperation,
   planOperation,
   providerExecution,
   ProviderRegistry,
   resolveProvider,
   verifyOperation,
   type ProviderContext,
+  type ProviderResolution,
+  type ResourceBinding,
 } from './adapters.js';
-import { isOperationalCapability, REQUIRED_VERIFICATION } from './capabilities.js';
+import { capabilityResourceKind, isOperationalCapability, OPERATIONAL_CAPABILITIES, REQUIRED_VERIFICATION, type OperationalCapability } from './capabilities.js';
 import {
   blockingDependencies,
   graphStatus,
@@ -90,7 +95,23 @@ import {
 } from './appport-services.js';
 import { composeProductUi, factoryUiContribution, factoryUiContributor, type UiContributor } from './ui.js';
 import type { AppPortUiContext, ComposedUi } from '@appport/client';
-import { filterUiContribution, type UiDiscoveryDocument } from '@appport/protocol';
+import { filterUiContribution, type AppRequest, type AppResponse, type UiDiscoveryDocument } from '@appport/protocol';
+import { AppPortApplication, permissionAuthorizer } from '@appport/sdk';
+import {
+  OPERATIONAL_WORK_TERMINAL_EVENTS,
+  operationalWorkCapability,
+  operationalWorkFingerprint,
+  operationalWorkId,
+  operationalWorkResult,
+  operationalWorkStatus,
+  OperationalWorkConflictError,
+  OperationalWorkRequestError,
+  parseOperationalWorkRequest,
+  plannedActions,
+  planOperationalWork,
+  toAppPortError,
+  type OperationalWorkResult,
+} from './operational-work.js';
 import {
   formatDeploymentConfigDiagnostics,
   readDeploymentConfig,
@@ -98,11 +119,17 @@ import {
   validateDeploymentConfig,
 } from './bootstrap.js';
 import type {
+  ActionCancellation,
+  ActionFailurePhase,
   ActionGraphOrigin,
   ActionGraphRecord,
+  ExecutionCheckpoint,
+  OperationalWorkRecord,
+  OperationalWorkStatus,
   ActionOutcome,
   ActionRecord,
   ProviderExecution,
+  ProviderExecutionResult,
   AuthorityContextRecord,
   AutonomyDecision,
   ReconciliationOutcome,
@@ -122,6 +149,9 @@ import type {
   WorkRecord,
 } from './types.js';
 
+/** Namespaced AppPort extension carrying Factory's own invocation token. */
+const INVOCATION_EXTENSION = 'factory.invocation';
+
 function isTerminal(status: RunRecord['status']): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
@@ -134,11 +164,13 @@ const validTransitions: Record<RunRecord['status'], RunRecord['status'][]> = {
   authorized: ['allocated', 'failed', 'cancelled'],
   allocated: ['preparing', 'failed', 'cancelled'],
   preparing: ['executing', 'failed', 'cancelled'],
-  executing: ['verifying', 'completed', 'failed', 'cancelled'],
-  verifying: ['completed', 'failed', 'cancelled'],
+  executing: ['verifying', 'completed', 'failed', 'cancelled', 'unknown'],
+  verifying: ['completed', 'failed', 'cancelled', 'unknown'],
   completed: [],
   failed: [],
   cancelled: [],
+  // Reality resolves an unknown run; a retry resolves it by superseding it.
+  unknown: ['completed', 'failed', 'cancelled'],
 };
 
 function validateRunRequest(request: RunRequest): void {
@@ -244,7 +276,20 @@ export class FactoryService {
   private readonly association: FactoryAssociation;
   private readonly domain: FactoryDomain;
   private readonly registry: ProviderRegistry;
+  /** Resolves credential values by name, inside the execution boundary only. */
+  private readonly credentialResolver: CredentialResolver;
+  /** This worker's durable identity in Run ownership. */
+  private readonly workerId: string;
+  private readonly leaseMs: number;
   private readonly controlPlane: AuthBoundryControlPlane | null;
+  /**
+   * The AppPort runtime for capabilities other systems call on Factory. Attn
+   * reaches the operational work contract through it, over the same protocol
+   * as every other AppPort application, with the caller already authenticated
+   * by AuthBoundry before any envelope is opened.
+   */
+  private readonly appPortRuntime: AppPortApplication;
+  private readonly invocations = new Map<string, { context: AuthenticatedContext; probe?: CapabilityProbe }>();
   private connection: FactoryConnectionState = {
     status: 'unverified',
     reason: 'the Factory application association has not been checked yet',
@@ -266,7 +311,29 @@ export class FactoryService {
     });
     this.association = factoryAssociation(this.flowSpec);
     this.domain = new FactoryDomain(db);
+    this.appPortRuntime = new AppPortApplication({
+      application: { id: application.identity.id, name: application.identity.name, version: application.identity.version },
+      capabilities: [operationalWorkCapability(async (input, capabilityContext) => {
+        // The authenticated context is found by a token Factory itself put on
+        // the envelope, never by the caller's requestId, which two callers
+        // may share.
+        const token = capabilityContext.extensions[INVOCATION_EXTENSION];
+        const invocation = typeof token === 'string' ? this.invocations.get(token) : undefined;
+        if (!invocation) throw new AuthBoundryAuthenticationError('AppPort request has no authenticated Factory context');
+        try {
+          return (await this.createOperationalWork(invocation.context, input, invocation.probe)).result;
+        } catch (error) {
+          return toAppPortError(error, capabilityContext);
+        }
+      })],
+      authorizer: permissionAuthorizer(),
+      mode: 'production',
+      builtins: false,
+    });
     this.registry = new ProviderRegistry(this.flowSpec, config.providerAdapters);
+    this.credentialResolver = config.credentialResolver ?? processCredentialResolver;
+    this.workerId = config.workerId ?? `worker_${process.pid}_${randomUUID().slice(0, 8)}`;
+    this.leaseMs = Math.max(1000, config.executionLeaseMs ?? 60_000);
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
         && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
@@ -496,6 +563,7 @@ export class FactoryService {
     projectId: string,
     environmentId: string,
     runId: string,
+    verification: readonly VerificationCheck[] = [],
   ): Promise<void> {
     const environment = await this.domain.getEnvironment(tenantId, projectId, environmentId);
     const run = await this.domain.getRun(tenantId, runId);
@@ -506,6 +574,7 @@ export class FactoryService {
       run,
       evidence: evidence ?? null,
       desiredState: await this.domain.getDesiredState(tenantId, projectId),
+      verification,
     }));
   }
 
@@ -677,8 +746,18 @@ export class FactoryService {
     };
 
     if (executed.status === 'succeeded') {
-      explanation.push(`${environment.name} reconciled to the declared state.`);
-      return finish('executed', base);
+      /*
+       * Completion is not convergence. Reality is observed again, from the
+       * state the run's verification recorded, and only a comparison that
+       * finds no drift lets the pass say the environment was reconciled.
+       */
+      const after = (await this.observeReality(context, projectId)).find((report) => report.environmentId === environmentId);
+      if (after?.status === 'reconciled') {
+        explanation.push(`${environment.name} re-observed after execution: it matches the declared state.`);
+        return finish('executed', base);
+      }
+      explanation.push(`${environment.name} re-observed after execution: ${after?.explanation.join(' ') ?? 'it could not be observed'}`);
+      return finish('drift-detected', base);
     }
     if (run && run.status !== 'completed') {
       explanation.push(`Execution failed: ${run.error ?? 'the run did not complete'}.`);
@@ -854,6 +933,8 @@ export class FactoryService {
    * graph is durable state only: nothing here authorizes or executes.
    */
   async createActionGraph(context: AuthenticatedContext, input: {
+    /** A caller-derived identity, when the graph must be found again after a restart. */
+    id?: string;
     projectId: string;
     environmentId?: string;
     origin?: Partial<ActionGraphOrigin>;
@@ -889,7 +970,7 @@ export class FactoryService {
 
     const timestamp = new Date().toISOString();
     const graph = await this.domain.createGraph({
-      id: `graph_${randomUUID()}`,
+      id: input.id ?? `graph_${randomUUID()}`,
       tenantId,
       projectId: input.projectId,
       ...(input.environmentId ? { environmentId: input.environmentId } : {}),
@@ -969,6 +1050,14 @@ export class FactoryService {
         }
       }
 
+      // An unknown node is asked of reality once per pass, never re-run.
+      const uncertain = actions.find((action) => action.status === 'unknown' && !attempted.has(action.id));
+      if (uncertain) {
+        attempted.add(uncertain.id);
+        await this.resolveUncertainAction(context, uncertain.id);
+        continue;
+      }
+
       const next = runnableActions(actions).find((action) => !attempted.has(action.id));
       if (!next) break;
       attempted.add(next.id);
@@ -1033,7 +1122,14 @@ export class FactoryService {
     const tenantId = context.tenant;
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
-    if (action.status !== 'failed') {
+    if (action.status === 'unknown') {
+      const run = action.runId ? await this.domain.getRun(tenantId, action.runId) : null;
+      if (!run?.uncertainty?.retrySafe) {
+        throw new DomainValidationError(
+          `action ${actionId} has an unknown outcome and repeating it is not known to be safe; resolve it through observation first`,
+        );
+      }
+    } else if (action.status !== 'failed') {
       throw new DomainValidationError(`action ${actionId} is ${action.status}, and only a failed action can be retried`);
     }
     const retried = await this.domain.patchAction(tenantId, actionId, {
@@ -1043,6 +1139,8 @@ export class FactoryService {
       runId: undefined,
       verification: undefined,
       outcome: undefined,
+      failure: undefined,
+      execution: undefined,
       blockedBy: [],
     });
     if (retried?.graphId) {
@@ -1093,12 +1191,242 @@ export class FactoryService {
               const dependency = byId.get(id);
               return `${dependency?.type ?? id} — ${dependency?.outcome ?? 'failed'}`;
             }).join('; ')
+          : action.status === 'unknown'
+            ? 'outcome uncertain — Factory is verifying external state before retrying'
           : action.outcome && action.outcome !== 'succeeded'
             ? `${action.outcome}${action.verification?.find((check) => check.status === 'failed')?.detail
                 ? ': ' + action.verification.find((check) => check.status === 'failed')!.detail : ''}`
             : null,
       })),
     };
+  }
+
+  /* -----------------------------------------------------------------------
+   * Operational work: the Attn ↔ Factory boundary.
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Accept operational work from another system and act on it.
+   *
+   * The request is validated against the contract, translated into Factory's
+   * own Action Graph, and coordinated through the same path as any graph:
+   * each node asks AuthBoundry whether it may run, and the answer decides.
+   * The origin on the request is recorded as provenance and nothing more.
+   *
+   * The same origin and idempotency key always name the same work. A retry —
+   * from the caller, or from this process after a restart — finds the work
+   * already created, finishes whatever step was interrupted, and returns
+   * the same identifiers rather than creating anything twice.
+   */
+  async createOperationalWork(
+    context: AuthenticatedContext,
+    input: unknown,
+    probe?: CapabilityProbe,
+    options: { coordinate?: boolean } = {},
+  ): Promise<{ created: boolean; result: OperationalWorkResult }> {
+    const request = parseOperationalWorkRequest(input);
+    const tenantId = context.tenant;
+    const id = operationalWorkId(tenantId, request);
+    const fingerprint = operationalWorkFingerprint(request);
+
+    let work = await this.domain.getOperationalWork(tenantId, id);
+    let created = false;
+    if (work) {
+      if (work.requestFingerprint !== fingerprint) {
+        throw new OperationalWorkConflictError(
+          `idempotency key ${request.idempotencyKey} from ${request.origin.system} ${request.origin.type} ${request.origin.id} `
+          + 'already names different work; a new request needs a new key',
+        );
+      }
+    } else {
+      // Tenant-scoped reads: a project or environment another tenant owns is
+      // simply not found, so nothing can be requested against it.
+      if (!await this.domain.getProject(tenantId, request.project)) {
+        throw new DomainValidationError(`project ${request.project} was not found`);
+      }
+      if (request.environment && !await this.domain.getEnvironment(tenantId, request.project, request.environment)) {
+        throw new DomainValidationError(`environment ${request.environment} was not found`);
+      }
+      const timestamp = new Date().toISOString();
+      const record: OperationalWorkRecord = {
+        id,
+        tenantId,
+        projectId: request.project,
+        ...(request.environment ? { environmentId: request.environment } : {}),
+        contract: request.contract,
+        origin: request.origin,
+        idempotencyKey: request.idempotencyKey,
+        requestFingerprint: fingerprint,
+        requestedBy: context.principal,
+        ...(request.intent ? { intent: request.intent } : {}),
+        requested: request.actions,
+        plan: planOperationalWork(request),
+        status: 'accepted',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      try {
+        work = await this.domain.createOperationalWork(record);
+        created = true;
+        await this.domain.appendOperationalWorkEvent({
+          workId: id, tenantId, type: 'OperationalWorkAccepted', status: 'accepted', origin: record.origin,
+        });
+      } catch (error) {
+        // Two identical requests at once: the one that lost the insert
+        // continues with the record the other wrote.
+        const existing = await this.domain.getOperationalWork(tenantId, id);
+        if (!existing) throw error;
+        work = existing;
+      }
+    }
+
+    if (!work.graphId && work.status !== 'cancelled') {
+      work = (await this.domain.patchOperationalWork(tenantId, id, { status: 'planning' })) ?? work;
+      // The graph's identity is derived from the work's, so a restart between
+      // creating the graph and recording it adopts the graph instead of
+      // creating a second one.
+      const graphId = `graph_${id.slice('owk_'.length)}`;
+      let graph = await this.domain.getGraph(tenantId, graphId);
+      if (!graph) {
+        graph = (await this.createActionGraph(context, {
+          id: graphId,
+          projectId: work.projectId,
+          ...(work.environmentId ? { environmentId: work.environmentId } : {}),
+          origin: { kind: 'external', sourceSystem: work.origin.system, sourceType: work.origin.type, sourceId: work.origin.id },
+          actions: plannedActions(work),
+        }, probe)).graph;
+      }
+      work = (await this.domain.patchOperationalWork(tenantId, id, { graphId: graph.id })) ?? work;
+      await this.domain.appendOperationalWorkEvent({
+        workId: id, tenantId, type: 'OperationalWorkPlanned', status: 'ready', origin: work.origin, graphId: graph.id,
+      });
+    }
+
+    if (options.coordinate !== false && work.graphId && work.status !== 'cancelled') {
+      // Another system asked, so Factory acts on its own behalf here: every
+      // node needs AuthBoundry's permission to run autonomously, and a node
+      // it refuses waits for a person exactly as it would in any graph.
+      await this.coordinateGraph(context, work.graphId, { ...(probe ? { probe } : {}), autonomous: true });
+    }
+
+    return { created, result: (await this.operationalWorkView(context, id))! };
+  }
+
+  /** The current result, derived from the graph, with state transitions recorded once. */
+  async operationalWorkView(context: AuthenticatedContext, workId: string): Promise<OperationalWorkResult | null> {
+    const tenantId = context.tenant;
+    const work = await this.domain.getOperationalWork(tenantId, workId);
+    if (!work) return null;
+    return this.syncOperationalWork(work);
+  }
+
+  async listOperationalWork(context: AuthenticatedContext, projectId?: string): Promise<OperationalWorkResult[]> {
+    const records = await this.domain.listOperationalWork(context.tenant, projectId);
+    return Promise.all(records.map((work) => this.syncOperationalWork(work)));
+  }
+
+  async operationalWorkEvents(context: AuthenticatedContext, workId: string) {
+    return this.domain.listOperationalWorkEvents(context.tenant, workId);
+  }
+
+  /** Stop the work: its graph is cancelled and nodes that never ran stay that way. */
+  async cancelOperationalWork(context: AuthenticatedContext, workId: string): Promise<OperationalWorkResult | null> {
+    const tenantId = context.tenant;
+    const work = await this.domain.getOperationalWork(tenantId, workId);
+    if (!work) return null;
+    if (work.status === 'cancelled' || work.status === 'completed' || work.status === 'failed') {
+      return this.syncOperationalWork(work);
+    }
+    if (work.graphId) {
+      // The graph is the state; cancelling it is what makes the work cancelled,
+      // and the sync below records that transition once.
+      await this.cancelActionGraph(context, work.graphId);
+      return this.syncOperationalWork(work);
+    }
+    const cancelled = (await this.domain.patchOperationalWork(tenantId, workId, {
+      status: 'cancelled', completedAt: new Date().toISOString(),
+    })) ?? work;
+    await this.domain.appendOperationalWorkEvent({
+      workId, tenantId, type: 'OperationalWorkCancelled', status: 'cancelled', outcome: 'cancelled', origin: work.origin,
+    });
+    return this.syncOperationalWork(cancelled);
+  }
+
+  /**
+   * Handle the contract as an AppPort request envelope.
+   *
+   * The caller was authenticated by AuthBoundry before this is reached; the
+   * envelope is dispatched through Factory's AppPort runtime, which validates
+   * it against the capability's typed schema and answers with a protocol
+   * envelope. There is no Attn-specific transport.
+   */
+  async handleOperationalWorkEnvelope(
+    context: AuthenticatedContext,
+    envelope: AppRequest,
+    probe?: CapabilityProbe,
+  ): Promise<AppResponse> {
+    if (envelope.idempotencyKey && envelope.input && typeof envelope.input === 'object'
+      && !Array.isArray(envelope.input) && (envelope.input as Record<string, unknown>).idempotencyKey === undefined) {
+      envelope = { ...envelope, input: { ...(envelope.input as Record<string, unknown>), idempotencyKey: envelope.idempotencyKey } };
+    }
+    const token = randomUUID();
+    this.invocations.set(token, { context, ...(probe ? { probe } : {}) });
+    try {
+      const now = new Date().toISOString();
+      return await this.appPortRuntime.handleRequest({
+        ...envelope,
+        extensions: { ...envelope.extensions, [INVOCATION_EXTENSION]: token },
+      }, {
+        principal: { id: context.principal, type: 'service' },
+        session: {
+          id: `factory:${envelope.requestId}`,
+          principal: { id: context.principal, type: 'service' },
+          applicationId: this.applicationId,
+          createdAt: now,
+          // The one permission this route was authenticated for. AppPort
+          // re-checks it; it does not widen it.
+          permissions: ['factory.run'],
+        },
+        transport: 'http',
+      });
+    } finally {
+      this.invocations.delete(token);
+    }
+  }
+
+  private async syncOperationalWork(work: OperationalWorkRecord): Promise<OperationalWorkResult> {
+    const tenantId = work.tenantId;
+    const graph = work.graphId ? await this.domain.getGraph(tenantId, work.graphId) : null;
+    const actions = graph ? await this.domain.graphActions(tenantId, graph.id) : [];
+    const evidence = new Map<string, StructuredEvidence>();
+    for (const action of actions) {
+      if (!action.runId) continue;
+      const record = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(action.runId);
+      if (record) evidence.set(action.runId, record);
+    }
+    const status: OperationalWorkStatus = operationalWorkStatus(work, graph, actions);
+    let current = work;
+    if (status !== work.status) {
+      const terminal = status === 'completed' || status === 'failed' || status === 'cancelled';
+      current = (await this.domain.patchOperationalWork(tenantId, work.id, {
+        status,
+        ...(terminal && !work.completedAt ? { completedAt: new Date().toISOString() } : {}),
+      })) ?? work;
+      const type = OPERATIONAL_WORK_TERMINAL_EVENTS[status];
+      if (type) {
+        const result = operationalWorkResult({ work: current, graph, actions, evidence, status });
+        await this.domain.appendOperationalWorkEvent({
+          workId: work.id, tenantId, type, status, outcome: result.outcome, origin: work.origin,
+          ...(work.graphId ? { graphId: work.graphId } : {}),
+          summary: {
+            completedActions: result.completedActions,
+            blockedActions: result.blockedActions,
+            failedActions: result.failedActions,
+          },
+        });
+      }
+    }
+    return operationalWorkResult({ work: current, graph, actions, evidence, status });
   }
 
   private async providerContext(
@@ -1141,8 +1469,11 @@ export class FactoryService {
     const actions = tenantId ? await this.domain.listActions(tenantId) : [];
 
     return Promise.all(this.registry.adapters.map(async (adapter) => {
-      const capabilities = this.registry.capabilitiesOf(adapter.id);
+      const declared = this.registry.capabilitiesOf(adapter.id);
+      const unimplemented = this.registry.unimplementedOf(adapter.id);
       const availability = await adapter.availability();
+      const availabilityOf = new Map<string, { state: 'available' | 'unavailable'; detail: string }>();
+      for (const capability of adapter.capabilities) availabilityOf.set(capability, await adapter.availability(capability));
       const projects = environments
         .filter(({ environments: list, desiredState }) =>
           list.some((environment) => environment.provider === adapter.id) || desiredState?.targetProvider === adapter.id)
@@ -1152,24 +1483,69 @@ export class FactoryService {
           environments: list.filter((environment) => environment.provider === adapter.id).map((environment) => environment.name),
         }));
       const recent = actions.filter((action) => action.provider === adapter.id).slice(0, 10);
-      return {
-        id: adapter.id,
-        name: adapter.displayName,
-        status: capabilities.length === 0 ? 'unsupported' : availability.state,
-        detail: capabilities.length === 0 ? 'no .flow operation declares a capability for this provider' : availability.detail,
-        configured: projects.length > 0,
-        credentials: [...adapter.credentials],
-        note: 'configured and available describe reachability; authorization is decided per Action by AuthBoundry',
-        capabilities: capabilities.map((entry) => ({
+      // Presence by name. Values are never read here.
+      const credentials = Object.fromEntries(adapter.credentials.map((name) => [name, Boolean(this.credentialResolver(name))]));
+      const credentialsPresent = Object.values(credentials).every(Boolean);
+      const configured = projects.length > 0 || adapter.credentials.length === 0 && declared.length > 0
+        && declared.every((entry) => capabilityResourceKind(entry.capability) === 'repository');
+      const status = declared.length === 0 ? 'unsupported' : availability.state;
+
+      /*
+       * Honest per-capability status. `executable` is true only when every
+       * requirement holds from this process: implemented by the adapter,
+       * declared by .flow, the mechanism reachable, credentials present, and
+       * something configured to run it against. None of it is authorization.
+       */
+      const describe = (entry: { capability: OperationalCapability; operation: string | null; authority?: { capabilities: string[] } }, implemented: boolean) => {
+        const declaredHere = entry.operation !== null;
+        const reachable = availabilityOf.get(entry.capability) ?? availability;
+        const reasons = [
+          ...(implemented ? [] : [`the ${adapter.id} adapter does not implement ${entry.capability}`]),
+          ...(declaredHere ? [] : [`no .flow operation declares ${entry.capability} for ${adapter.id}`]),
+          ...(reachable.state === 'available' ? [] : [reachable.detail]),
+          ...(credentialsPresent ? [] : [`credential ${Object.entries(credentials).filter(([, present]) => !present).map(([name]) => name).join(', ')} is not configured`]),
+          ...(configured || capabilityResourceKind(entry.capability) === 'repository' ? [] : [`no environment or desired state names ${adapter.id}`]),
+        ];
+        return {
           capability: entry.capability,
           operation: entry.operation,
-          requiredAuthority: [...entry.authority.capabilities],
+          implementation: implemented,
+          declared: declaredHere,
+          available: reachable.state === 'available',
+          availability: reachable.detail,
+          credential: credentialsPresent,
+          configuration: configured || capabilityResourceKind(entry.capability) === 'repository',
+          executable: reasons.length === 0,
+          reasons,
+          requiredAuthority: entry.authority ? [...entry.authority.capabilities] : [],
           verificationRequires: REQUIRED_VERIFICATION[entry.capability] ?? null,
-          idempotency: adapter.idempotency(entry.capability),
+          idempotency: implemented ? adapter.idempotency(entry.capability) : null,
           recent: recent.filter((action) => action.capability === entry.capability).map((action) => ({
             id: action.id, status: action.status, outcome: action.outcome ?? null, updatedAt: action.updatedAt,
           })),
-        })),
+        };
+      };
+      const implementedOnly = adapter.capabilities
+        .filter((capability) => !declared.some((entry) => entry.capability === capability))
+        .map((capability) => ({ capability, operation: null }));
+
+      return {
+        id: adapter.id,
+        name: adapter.displayName,
+        status,
+        detail: declared.length === 0 ? 'no .flow operation declares a capability this adapter implements' : availability.detail,
+        configured,
+        credentials: [...adapter.credentials],
+        credentialsPresent: credentials,
+        executable: status === 'available' && credentialsPresent && declared.length > 0,
+        note: 'implemented, declared, available, credential and configuration describe whether Factory can reach the provider; authorization is decided per Action by AuthBoundry',
+        capabilities: [
+          ...declared.map((entry) => describe(entry, true)),
+          ...unimplemented.map((entry) => describe(entry, false)),
+          ...implementedOnly.map((entry) => describe(entry, true)),
+        ],
+        vocabulary: OPERATIONAL_CAPABILITIES.filter((capability) =>
+          !adapter.capabilities.includes(capability) && !declared.some((entry) => entry.capability === capability)),
         projects,
         recentActions: recent.map((action) => ({
           id: action.id, capability: action.capability ?? null, resource: action.resource ?? null,
@@ -1275,8 +1651,11 @@ export class FactoryService {
     } else {
       const authority = authorities.get(operation);
       if (authority?.provider && isOperationalCapability(authority.operationalCapability)) {
+        // An operation names its own provider in .flow. It gains provider
+        // execution only when that provider implements the capability; it is
+        // never re-homed to another provider that happens to.
         resolved = resolveProvider(this.registry, authority.operationalCapability, providerContext);
-        if (!resolved.ok) resolved = null;
+        if (!resolved.ok || resolved.provider !== authority.provider || resolved.operation !== operation) resolved = null;
       }
     }
     const providerPlan = resolved?.ok ? planOperation(this.registry, resolved, providerContext) : null;
@@ -1361,11 +1740,20 @@ export class FactoryService {
     const tenantId = context.tenant;
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
-    if (action.status === 'running') return action;
-    // A finished Action is finished. Running it again would reach the provider
-    // boundary a second time; a failed one comes back only through an explicit
-    // retry, which returns it to planned first.
+    /*
+     * Terminal and in-flight Actions stop here, before anything below runs.
+     * A finished Action is finished: running it again would reach the
+     * provider boundary a second time, and a failed one comes back only
+     * through an explicit retry, which returns it to planned first. A
+     * cancelled one never runs.
+     */
+    if (action.status === 'running' || action.status === 'authorized'
+      || action.status === 'executed' || action.status === 'verifying') return action;
     if (action.status === 'succeeded' || action.status === 'failed') return action;
+    if (action.outcome === 'cancelled') return action;
+    // An unknown outcome is never re-run blindly: reality resolves it first,
+    // and only a resolution that finds a repeat safe returns it to planned.
+    if (action.status === 'unknown') return action;
 
     /*
      * The authority is asked again here rather than trusting the answer stored
@@ -1392,17 +1780,6 @@ export class FactoryService {
       ...(options.autonomous ? {} : { approvedBy: context.principal }),
     });
 
-    const authority = this.authorityContext(context);
-    if (!authority) {
-      const reason = this.connection.status === 'associated'
-        ? `AuthBoundry authorized no application context for ${context.principal}`
-        : this.connection.reason;
-      return await this.domain.patchAction(tenantId, actionId, {
-        status: 'failed',
-        verification: [{ name: 'authority', status: 'failed', detail: reason }],
-      }) ?? action;
-    }
-
     const repositories = await this.domain.listRepositories(tenantId, action.projectId);
     const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
     const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId)
@@ -1410,32 +1787,88 @@ export class FactoryService {
     if (!repository) {
       throw new DomainValidationError(`project ${action.projectId} has no repository to act on`);
     }
-
-    await this.domain.patchAction(tenantId, actionId, { status: 'authorized', authority });
-
-    const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
-    await this.domain.patchAction(tenantId, actionId, { status: 'running' });
+    const requestedAt = new Date().toISOString();
+    const idempotencyKey = action.retries ? `${action.id}:retry:${action.retries}` : action.id;
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState, idempotencyKey);
 
     /*
-     * Only now, after AuthBoundry has answered, does the provider adapter get
-     * asked for what to run. The adapter hands over parameters and credential
-     * names; the execution boundary resolves the values at spawn time.
+     * Execution preflight. Every check is deterministic, every check is
+     * recorded on the Action, and the provider is reached only after all of
+     * them passed. A failure here is a durable, specific outcome — never a
+     * provider side effect and never a generic error.
      */
-    const providerContext = await this.providerContext(tenantId, action, repository, desiredState,
-      action.retries ? `${action.id}:retry:${action.retries}` : action.id);
-    let execution: ProviderExecution | undefined;
-    if (action.provider && isOperationalCapability(action.capability)) {
-      const resolution = resolveProvider(this.registry, action.capability, providerContext);
-      if (!resolution.ok || resolution.provider !== action.provider) {
-        return await this.domain.patchAction(tenantId, actionId, {
-          status: 'failed',
-          outcome: 'provider-unavailable',
-          verification: [{ name: 'provider', status: 'failed', detail: resolution.ok
-            ? `provider ${action.provider} is no longer the configured provider` : resolution.reason }],
-        }) ?? action;
+    const checks: VerificationCheck[] = [];
+    const failPreflight = async (outcome: ActionOutcome, reason: string, phase: ActionFailurePhase = 'preflight') => {
+      const name = phase === 'preflight' ? outcome : phase;
+      checks.push({ name, status: 'failed', detail: reason });
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed',
+        outcome,
+        failure: { phase, outcome, reason },
+        preflight: { checks, failedAt: new Date().toISOString() },
+        execution: { requestedAt },
+        verification: [{ name, status: 'failed', detail: reason }],
+      })) ?? action;
+    };
+
+    let resolution: Extract<ProviderResolution, { ok: true }> | null = null;
+    let binding: Extract<ResourceBinding, { ok: true }> | null = null;
+    if (action.capability) {
+      if (!isOperationalCapability(action.capability) || this.registry.providersFor(action.capability).length === 0) {
+        return failPreflight('capability-unavailable', `${action.capability} is not a capability Factory can perform`);
       }
-      execution = providerExecution(this.registry, resolution, providerContext);
+      checks.push({ name: 'capability supported', status: 'passed', detail: `${action.capability} is declared by .flow and implemented by an adapter` });
+      const resolved = resolveProvider(this.registry, action.capability, providerContext);
+      if (!resolved.ok) return failPreflight(resolved.outcome, resolved.reason);
+      if (resolved.provider !== action.provider) {
+        return failPreflight('provider-unavailable', `provider ${action.provider} is no longer the configured provider; ${resolved.provider} is`);
+      }
+      checks.push({ name: 'provider resolved', status: 'passed', detail: `${resolved.provider} performs ${resolved.capability} as ${resolved.operation}` });
+      const adapter = this.registry.adapter(resolved.provider)!;
+      const availability = await adapter.availability(resolved.capability);
+      if (availability.state !== 'available') return failPreflight('provider-unavailable', availability.detail);
+      checks.push({ name: 'provider available', status: 'passed', detail: availability.detail });
+      const bound = adapter.resource(resolved.capability, providerContext);
+      if (!bound.ok) return failPreflight('resource-unavailable', bound.reason);
+      checks.push({ name: 'resource bound', status: 'passed', detail: `${resolved.resource} → ${bound.id} (${bound.detail})` });
+      checks.push({
+        name: 'configuration present',
+        status: 'passed',
+        detail: Object.keys(bound.parameters).length ? Object.keys(bound.parameters).sort().join(', ') : 'no parameters required',
+      });
+      // Presence by name only. The value is read inside the boundary, later.
+      const missing = adapter.credentials.filter((name) => !this.credentialResolver(name));
+      if (missing.length > 0) {
+        return failPreflight('credential-unavailable', `credential ${missing.join(', ')} is not available to the execution boundary`);
+      }
+      checks.push({
+        name: 'credentials available',
+        status: 'passed',
+        detail: adapter.credentials.length ? `${adapter.credentials.join(', ')} present (names only)` : 'none required',
+      });
+      resolution = resolved;
+      binding = bound;
+    } else {
+      checks.push({ name: 'capability supported', status: 'skipped', detail: `${action.operation ?? action.type} is a declared .flow operation rather than a provider capability` });
     }
+
+    const authority = this.authorityContext(context);
+    if (!authority) {
+      const reason = this.connection.status === 'associated'
+        ? `AuthBoundry authorized no application context for ${context.principal}`
+        : this.connection.reason;
+      return failPreflight('authority-unavailable', reason, 'authority');
+    }
+    checks.push({ name: 'authority available', status: 'passed', detail: `${authority.application ?? 'application'} via ${authority.delegation ?? 'claim'}` });
+    await this.domain.patchAction(tenantId, actionId, {
+      status: 'authorized',
+      authority,
+      preflight: { checks, passedAt: new Date().toISOString() },
+      execution: { requestedAt },
+    });
+
+    const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
+    const execution = resolution && binding ? providerExecution(this.registry, resolution, providerContext, binding) : undefined;
 
     const run = await this.startRun({
       workId: work.id,
@@ -1447,8 +1880,22 @@ export class FactoryService {
       },
       operation: action.operation ?? action.type,
       // A retried Action is admitted as a new Run; the earlier Run is history.
-      ...(action.retries ? { idempotencyKey: `${action.id}:retry:${action.retries}` } : {}),
-    }, context, execution);
+      ...(action.retries ? { idempotencyKey } : {}),
+    }, context, execution, {
+      actionId,
+      // The Run is on the Action as soon as it exists, so a cancel request
+      // made while the provider is working finds the process to stop.
+      onAdmitted: async (admitted) => {
+        // Both records point at each other from the first moment, so a
+        // recovery on another worker can settle the Action from the Run.
+        await this.patchRun(admitted.id, {
+          actionId: action.id,
+          projectId: action.projectId,
+          ...(action.environmentId ? { environmentId: action.environmentId } : {}),
+        });
+        await this.domain.patchAction(tenantId, actionId, { status: 'running', runId: admitted.id });
+      },
+    });
 
     await this.patchRun(run.id, {
       actionId: action.id,
@@ -1459,41 +1906,459 @@ export class FactoryService {
       ...(action.executionProvider ? { executionProvider: action.executionProvider } : {}),
     });
 
-    const settled = await this.getRun(run.id, context);
-    const verification = await this.verifyRun(settled?.id ?? run.id, desiredState?.healthRequirement);
-    // The adapter reads the operation's result back; Factory keeps the verdict.
-    const evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(run.id);
-    if (evidenceRecord && settled?.status === 'completed') {
-      verification.push(...verifyOperation(this.registry, action, evidenceRecord, providerContext));
-    }
-    const succeeded = settled?.status === 'completed'
-      && verification.every((check) => check.status !== 'failed');
+    return this.settleAction(tenantId, action, run.id, authority, requestedAt, providerContext);
+  }
 
+  /**
+   * Read what the Run and its evidence say, verify against reality, and write
+   * the Action's final state. This runs after execution and again after a
+   * restart that interrupted verification: everything it needs is durable.
+   */
+  private async settleAction(
+    tenantId: string,
+    action: ActionRecord,
+    runId: string,
+    authority: AuthorityContextRecord,
+    requestedAt: string,
+    providerContext: ProviderContext,
+  ): Promise<ActionRecord> {
+    const actionId = action.id;
+    const settled = await this.getRun(runId);
+    const current = (await this.domain.getAction(tenantId, actionId)) ?? action;
+    const cancelRequestedAt = current.execution?.cancelRequestedAt;
+    let evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
+
+    // Authorization refused: nothing ran, and the Run says why.
+    if (settled?.status === 'failed' && !evidenceRecord) {
+      const reason = settled.error ?? 'AuthBoundry did not authorize the execution';
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed',
+        outcome: 'execution-failed',
+        failure: { phase: 'authorization', outcome: 'execution-failed', reason },
+        runId,
+        authority: { ...authority, ...(settled.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}) },
+        verification: [{ name: 'authorization', status: 'failed', detail: reason }],
+        execution: { requestedAt, ...(cancelRequestedAt ? { cancelRequestedAt } : {}) },
+      })) ?? action;
+    }
+
+    // Another worker owns the Run; this worker records nothing about it.
+    if (settled && !isTerminal(settled.status) && settled.status !== 'unknown') {
+      return current;
+    }
+
+    /*
+     * The outcome is unknown: the provider may have acted and Factory did not
+     * see the result. The Action says so — not failed — and waits for reality.
+     */
+    if (settled?.status === 'unknown') {
+      const reason = settled.uncertainty?.reason ?? 'the external outcome could not be determined';
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'unknown',
+        outcome: 'unknown',
+        failure: { phase: 'unknown', outcome: 'unknown', reason },
+        runId,
+        authority: { ...authority, ...(settled.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}) },
+        verification: [{ name: 'outcome', status: 'skipped', detail: 'uncertain: Factory is verifying external state before retrying' }],
+        execution: {
+          requestedAt,
+          ...(evidenceRecord ? { startedAt: evidenceRecord.startedAt, completedAt: evidenceRecord.completedAt, durationMs: evidenceRecord.durationMs } : {}),
+          ...(cancelRequestedAt ? { cancelRequestedAt } : {}),
+        },
+      })) ?? action;
+    }
+
+    if (settled?.status === 'completed' && current.status !== 'executed' && current.status !== 'verifying') {
+      await this.domain.patchAction(tenantId, actionId, { status: 'executed' });
+    }
+
+    /*
+     * The adapter reads the provider's answer back into a structured result,
+     * which is recorded on the evidence; then verification asks reality. Both
+     * read the durable evidence, so a later reader sees what verification saw.
+     */
+    let providerResult: ProviderExecutionResult | null = null;
+    if (evidenceRecord && action.provider && isOperationalCapability(action.capability)) {
+      providerResult = interpretOperation(this.registry, action, evidenceRecord, providerContext);
+      if (providerResult) {
+        evidenceRecord = { ...evidenceRecord, providerResult };
+        await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidenceRecord, evidenceRecord.id);
+        // The provider's own reference for the attempt lives on the Run too.
+        await this.patchRun(runId, { providerOperationId: providerResult.providerOperationId });
+      }
+    }
+    await this.domain.patchAction(tenantId, actionId, { status: 'verifying' });
+    const operationChecks = evidenceRecord && settled?.status === 'completed'
+      ? await verifyOperation(this.registry, action, evidenceRecord, providerContext)
+      : [];
+    const verification = await this.verifyRun(runId, providerContext.desiredState?.healthRequirement, operationChecks);
+    verification.push(...operationChecks);
+    await this.checkpoint('after-verification-before-completion', { runId, actionId });
+
+    const persisted = await this.getRun(runId);
+    const cancelled = persisted?.status === 'cancelled' || evidenceRecord?.status === 'cancelled' || Boolean(cancelRequestedAt && persisted?.status !== 'completed');
+    const failedChecks = verification.filter((check) => check.status === 'failed');
+    const unverified = operationChecks.filter((check) => check.status === 'skipped');
+    const succeeded = !cancelled && persisted?.status === 'completed' && failedChecks.length === 0 && unverified.length === 0;
+
+    let observedReality: EnvironmentRecord['currentState'] | undefined;
     if (succeeded && action.environmentId) {
-      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, run.id);
+      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, runId, verification);
+      observedReality = (await this.domain.getEnvironment(tenantId, action.projectId, action.environmentId))?.currentState;
     }
 
-    const outcome: ActionOutcome = succeeded
-      ? 'succeeded'
-      : settled?.status === 'completed' ? 'verification-failed' : 'execution-failed';
+    let outcome: ActionOutcome;
+    let failure: ActionRecord['failure'];
+    if (cancelled) {
+      outcome = 'cancelled';
+      failure = { phase: 'execution', outcome, reason: persisted?.error ?? 'cancelled before the operation completed' };
+    } else if (succeeded) {
+      outcome = 'succeeded';
+    } else if (persisted?.status === 'completed') {
+      outcome = failedChecks.length ? 'verification-failed' : 'verification-unavailable';
+      failure = { phase: 'verification', outcome, reason: (failedChecks[0] ?? unverified[0])?.detail ?? 'verification did not establish the required state' };
+    } else if (evidenceRecord?.execution?.terminationReason === 'spawn-failed') {
+      outcome = 'provider-unavailable';
+      failure = { phase: 'provider', outcome, reason: evidenceRecord.stderr.trim() || 'the provider mechanism could not be started' };
+    } else if (providerResult?.status === 'rejected') {
+      outcome = 'execution-failed';
+      failure = { phase: 'provider', outcome, reason: providerResult.summary };
+    } else {
+      outcome = 'execution-failed';
+      const reason = evidenceRecord?.execution?.terminationReason === 'timeout'
+        ? `timed out after ${evidenceRecord.execution.timeoutMs}ms`
+        : persisted?.error?.trim() || providerResult?.summary || 'the operation did not complete';
+      failure = { phase: 'execution', outcome, reason: reason.split('\n').pop()!.slice(0, 500) };
+    }
 
-    return await this.domain.patchAction(tenantId, actionId, {
+    // The chain, on the evidence, so it can be reconstructed from there alone.
+    if (evidenceRecord && persisted) {
+      const work = action.graphId ? await this.domain.findOperationalWorkByGraph(tenantId, action.graphId) : null;
+      evidenceRecord = {
+        ...evidenceRecord,
+        chain: {
+          ...(work ? { operationalWorkId: work.id } : {}),
+          ...(action.graphId ? { graphId: action.graphId } : {}),
+          actionId,
+          runId,
+          attempt: persisted.attempt ?? 1,
+          ...(persisted.executionOwner ? { executionOwner: persisted.executionOwner } : {}),
+          authorizationDecisionId: persisted.authorizationDecisionId ?? evidenceRecord.authorizationDecisionId,
+          ...(action.provider ? { provider: action.provider } : {}),
+          ...(action.capability ? { capability: action.capability } : {}),
+          ...(action.resource ? { resource: action.resource } : {}),
+          ...(evidenceRecord.provider?.providerResource ? { providerResource: evidenceRecord.provider.providerResource } : {}),
+          idempotencyKey: evidenceRecord.provider?.idempotency.key ?? persisted.idempotencyKey,
+          providerOperationId: providerResult?.providerOperationId ?? null,
+          verification,
+          ...(observedReality ? { observedReality } : {}),
+        },
+      };
+      await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidenceRecord, evidenceRecord.id);
+    }
+
+    return (await this.domain.patchAction(tenantId, actionId, {
       status: succeeded ? 'succeeded' : 'failed',
       outcome,
-      runId: run.id,
+      ...(failure ? { failure } : {}),
+      runId,
       authority: {
         ...authority,
-        ...(settled?.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}),
+        ...(persisted?.authorizationDecisionId ? { authorizationDecisionId: persisted.authorizationDecisionId } : {}),
       },
       verification,
-    }) ?? action;
+      execution: {
+        requestedAt,
+        ...(evidenceRecord ? {
+          startedAt: evidenceRecord.startedAt,
+          completedAt: evidenceRecord.completedAt,
+          durationMs: evidenceRecord.durationMs,
+          exitCode: evidenceRecord.exitCode,
+          ...(evidenceRecord.execution?.terminationReason ? { terminationReason: evidenceRecord.execution.terminationReason } : {}),
+        } : {}),
+        ...(providerResult ? {
+          providerStatus: providerResult.status,
+          providerOperationId: providerResult.providerOperationId,
+          ...(providerResult.observed.revision ? { observedRevision: providerResult.observed.revision } : {}),
+        } : {}),
+        ...(cancelRequestedAt ? { cancelRequestedAt } : {}),
+      },
+    })) ?? action;
+  }
+
+  /**
+   * Resolve an Action whose outcome is unknown by observing reality.
+   *
+   * The provider is asked what is, never to do it again. An effect that is
+   * observably in place makes the Action succeeded, with the observation as
+   * its verification; an effect that observably did not happen makes it
+   * failed; an operation with no external effect is returned to planned for
+   * an explicit retry; and anything reality cannot settle stays unknown, with
+   * the observation recorded.
+   */
+  async resolveUncertainAction(context: AuthenticatedContext, actionId: string): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const action = await this.domain.getAction(tenantId, actionId);
+    if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
+    if (action.status !== 'unknown' || !action.runId) return action;
+    const run = await this.domain.getRun(tenantId, action.runId);
+    if (!run || run.status !== 'unknown') return action;
+
+    const repositories = await this.domain.listRepositories(tenantId, action.projectId);
+    const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState, run.idempotencyKey);
+    const adapter = action.provider ? this.registry.adapter(action.provider) : null;
+    const observation = adapter && isOperationalCapability(action.capability)
+      ? await adapter.observe(action.capability, providerContext)
+      : run.uncertainty?.retrySafe
+        ? { outcome: 'retry-safe' as const, detail: 'the operation has no external effect', checks: [], observed: {} }
+        : { outcome: 'undetermined' as const, detail: 'no adapter can observe this operation', checks: [], observed: {} };
+    const at = new Date().toISOString();
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const observations = [...(run.uncertainty?.observations ?? []), { at, outcome: observation.outcome, detail: observation.detail }];
+    const evidence = this.db.collection<StructuredEvidence>(COLLECTIONS.evidence);
+    const record = await evidence.get(run.id);
+
+    if (observation.outcome === 'established') {
+      const resolved = await this.patchRun(run.id, {
+        status: 'completed',
+        completedAt: run.completedAt ?? at,
+        finishedAt: at,
+        error: undefined,
+        result: { resolvedByObservation: true },
+        uncertainty: { ...run.uncertainty!, observations, resolvedAt: at, resolvedBy: 'observation', resolution: 'succeeded' },
+      });
+      const verification: VerificationCheck[] = [
+        { name: 'outcome resolved by observation', status: 'passed', detail: observation.detail },
+        ...observation.checks,
+      ];
+      if (record) {
+        await evidence.put({
+          ...record,
+          providerResult: {
+            status: 'succeeded', providerOperationId: record.providerResult?.providerOperationId ?? null,
+            startedAt: record.startedAt, completedAt: at, durationMs: record.durationMs,
+            metadata: { resolvedByObservation: true }, observed: observation.observed, summary: observation.detail,
+          },
+          resolution: { resolvedAt: at, resolvedBy: 'observation', resolution: 'succeeded', checks: verification },
+        }, record.id);
+      }
+      if (action.environmentId) {
+        await this.recordReconciledState(tenantId, action.projectId, action.environmentId, resolved.id, verification);
+      }
+      await this.appendEvent(run.id, 'completed', `resolved by observation: ${observation.detail}`);
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'succeeded', outcome: 'succeeded', failure: undefined, verification,
+        execution: { ...(action.execution ?? { requestedAt: at }), completedAt: at, providerStatus: 'succeeded' },
+      })) ?? action;
+    }
+
+    if (observation.outcome === 'absent') {
+      await this.patchRun(run.id, {
+        status: 'failed', completedAt: at, finishedAt: at, error: observation.detail,
+        uncertainty: { ...run.uncertainty!, observations, resolvedAt: at, resolvedBy: 'observation', resolution: 'failed' },
+      });
+      if (record) await evidence.put({ ...record, resolution: { resolvedAt: at, resolvedBy: 'observation', resolution: 'failed', checks: observation.checks } }, record.id);
+      await this.appendEvent(run.id, 'failed', `resolved by observation: ${observation.detail}`);
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed', outcome: 'execution-failed',
+        failure: { phase: 'execution', outcome: 'execution-failed', reason: observation.detail },
+        verification: [{ name: 'outcome resolved by observation', status: 'failed', detail: observation.detail }, ...observation.checks],
+      })) ?? action;
+    }
+
+    if (observation.outcome === 'retry-safe') {
+      // Superseded by an explicit new attempt; the unknown Run stays as history.
+      await runs.put({ ...run, uncertainty: { ...run.uncertainty!, observations, resolvedAt: at, resolvedBy: 'retry', resolution: 'retried' }, updatedAt: at }, run.id);
+      await this.appendEvent(run.id, 'unknown', `resolved: ${observation.detail}; a new attempt is admitted`);
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'planned',
+        retries: (action.retries ?? 0) + 1,
+        previousRunIds: [...(action.previousRunIds ?? []), run.id],
+        runId: undefined, verification: undefined, outcome: undefined, failure: undefined, blockedBy: [],
+        execution: undefined,
+      })) ?? action;
+    }
+
+    await runs.put({ ...run, uncertainty: { ...run.uncertainty!, observations }, updatedAt: at }, run.id);
+    return (await this.domain.patchAction(tenantId, actionId, {
+      verification: [
+        { name: 'outcome', status: 'skipped', detail: 'uncertain: Factory is verifying external state before retrying' },
+        ...observation.checks,
+      ],
+      failure: { phase: 'unknown', outcome: 'unknown', reason: observation.detail },
+    })) ?? action;
+  }
+
+  /**
+   * Recover execution state after this process (or another worker) stopped.
+   *
+   * Durable Runs decide everything. A Run whose lease another worker still
+   * holds is left alone. An expired or unowned non-terminal Run is settled
+   * from what it had reached: before invocation it is failed and known; in
+   * flight it is unknown, never failed; past persistence its verification is
+   * resumed. Nothing is replayed, and nothing is fabricated.
+   */
+  async recoverExecution(now = Date.now()): Promise<void> {
+    const runs = await this.db.collection<RunRecord>(COLLECTIONS.runs).all();
+    for (const run of runs) {
+      if (isTerminal(run.status) || run.status === 'unknown') continue;
+      if (run.leaseExpiresAt && Date.parse(run.leaseExpiresAt) > now && run.executionOwner !== this.workerId) continue;
+      if (this.activeExecutions.has(run.id)) continue;
+      const action = run.actionId ? await this.db.collection<ActionRecord>(COLLECTIONS.actions).get(run.actionId) : null;
+      const reason = 'Factory restarted before execution reached a terminal state';
+
+      if (run.status === 'verifying' || (run.status === 'executing' && run.evidenceId)) {
+        // The provider's answer is on record; only verification was interrupted.
+        const persisted = await this.patchRun(run.id, { status: 'completed', completedAt: run.completedAt ?? new Date(now).toISOString(), finishedAt: new Date(now).toISOString() });
+        await this.appendEvent(run.id, 'completed', 'recovered: evidence was persisted before the interruption; verification resumes');
+        if (action) await this.resumeSettlement(action, persisted);
+        continue;
+      }
+      if (run.status === 'executing') {
+        const contract = (await this.db.collection<ExecutionContractRecord>(COLLECTIONS.executionContracts).get(run.id))?.contract;
+        const retrySafe = contract?.provider ? Boolean(contract.provider.idempotency.exactlyOnce) : contract?.execution.mode !== 'integration';
+        await this.markRunUnknown(run.id, `${reason}; the provider had been invoked`, true, retrySafe, contract);
+        if (action) await this.markActionUnknown(action, run.id, `${reason}; the provider had been invoked`, now);
+        continue;
+      }
+
+      // accepted, authorized, allocated, preparing: nothing reached a provider.
+      const stamp = new Date(now).toISOString();
+      await this.patchRun(run.id, { status: 'failed', completedAt: stamp, finishedAt: stamp, error: reason });
+      await this.appendEvent(run.id, 'failed', 'Recovered interrupted non-terminal run from durable FeltDB state');
+      try {
+        const transition = await this.db.transitionOperation({ operationId: run.operationId, expectedVersion: run.operationVersion, to: 'failed', error: reason });
+        await this.patchRun(run.id, { operationVersion: transition.operation.version });
+      } catch {
+        // Durable run state is authoritative for recovery even if the operation was already terminal.
+      }
+      if (action) {
+        await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+          ...action,
+          status: 'failed',
+          outcome: 'execution-failed',
+          runId: run.id,
+          failure: { phase: 'interrupted', outcome: 'execution-failed', reason },
+          verification: [...(action.verification ?? []), { name: 'execution', status: 'failed', detail: reason }],
+          updatedAt: stamp,
+        }, action.id);
+      }
+    }
+
+    // Actions that never got a Run, or whose Run is gone, cannot be running.
+    for (const action of await this.db.collection<ActionRecord>(COLLECTIONS.actions).all()) {
+      if (!['authorized', 'running', 'executed', 'verifying'].includes(action.status)) continue;
+      const run = action.runId ? await this.db.collection<RunRecord>(COLLECTIONS.runs).get(action.runId) : null;
+      if (run && !isTerminal(run.status) && run.status !== 'unknown') continue; // live elsewhere
+      if (run && run.status === 'completed') { await this.resumeSettlement(action, run); continue; }
+      if (run && run.status === 'unknown') {
+        await this.markActionUnknown(action, run.id, run.uncertainty?.reason ?? 'the external outcome could not be determined', now);
+        continue;
+      }
+      const reason = 'Factory restarted before execution reached a terminal state';
+      await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+        ...action,
+        status: 'failed',
+        outcome: run?.status === 'cancelled' ? 'cancelled' : 'execution-failed',
+        failure: { phase: 'interrupted', outcome: run?.status === 'cancelled' ? 'cancelled' : 'execution-failed', reason },
+        verification: [...(action.verification ?? []), { name: 'execution', status: 'failed', detail: reason }],
+        updatedAt: new Date(now).toISOString(),
+      }, action.id);
+    }
+  }
+
+  private async markActionUnknown(action: ActionRecord, runId: string, reason: string, now = Date.now()): Promise<void> {
+    await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+      ...action,
+      status: 'unknown',
+      outcome: 'unknown',
+      runId,
+      failure: { phase: 'unknown', outcome: 'unknown', reason },
+      verification: [{ name: 'outcome', status: 'skipped', detail: 'uncertain: Factory is verifying external state before retrying' }],
+      authority: action.authority ?? {},
+      updatedAt: new Date(now).toISOString(),
+    }, action.id);
+  }
+
+  /** Verification interrupted by a restart resumes from the durable evidence. */
+  private async resumeSettlement(action: ActionRecord, run: RunRecord): Promise<void> {
+    const tenantId = action.tenantId;
+    const repositories = await this.domain.listRepositories(tenantId, action.projectId);
+    const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState, run.idempotencyKey);
+    await this.settleAction(tenantId, action, run.id, action.authority ?? {}, action.execution?.requestedAt ?? run.createdAt, providerContext);
+  }
+
+  /**
+   * Stop an Action.
+   *
+   * A planned Action is marked cancelled and never runs. A running one has its
+   * process stopped through the Run it is on, and its outcome is `cancelled`
+   * however the provider answers afterwards.
+   */
+  async cancelAction(context: AuthenticatedContext, actionId: string): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const action = await this.domain.getAction(tenantId, actionId);
+    if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
+    const requestedAt = new Date().toISOString();
+    const record = (stage: ActionCancellation['stage'], effect: ActionCancellation['effect'], detail: string): ActionCancellation =>
+      ({ requestedAt, requestedBy: context.principal, stage, effect, detail });
+
+    if (action.status === 'succeeded' || action.status === 'failed' || action.outcome === 'cancelled') {
+      if (action.cancellation) return action;
+      // Nothing to stop. Recording the request keeps the history honest.
+      return (await this.domain.patchAction(tenantId, actionId, {
+        cancellation: record('after-completion', 'none', `the Action had already ended as ${action.outcome ?? action.status}; nothing was cancelled and no effect was reversed`),
+      })) ?? action;
+    }
+    if (action.status === 'planned' || action.status === 'awaiting-approval' || action.status === 'unknown') {
+      const detail = action.status === 'unknown'
+        ? `cancelled by ${context.principal} while the outcome was unknown; the provider may already have acted and nothing was reversed`
+        : `cancelled by ${context.principal} before it ran; nothing reached a provider`;
+      if (action.status === 'unknown' && action.runId) {
+        const run = await this.domain.getRun(tenantId, action.runId);
+        if (run?.uncertainty) {
+          await this.db.collection<RunRecord>(COLLECTIONS.runs).put({
+            ...run, uncertainty: { ...run.uncertainty, resolvedAt: requestedAt, resolvedBy: 'cancellation', resolution: 'cancelled' }, updatedAt: requestedAt,
+          }, run.id);
+        }
+      }
+      return (await this.domain.patchAction(tenantId, actionId, {
+        outcome: 'cancelled',
+        ...(action.status === 'unknown' ? { status: 'failed' } : {}),
+        failure: { phase: action.status === 'unknown' ? 'unknown' : 'preflight', outcome: 'cancelled', reason: detail },
+        cancellation: record('before-invocation', action.status === 'unknown' ? 'submitted' : 'not-started', detail),
+      })) ?? action;
+    }
+
+    const run = action.runId ? await this.domain.getRun(tenantId, action.runId) : null;
+    const external = action.provider ? !(this.registry.adapter(action.provider)?.idempotency(action.capability as never).exactlyOnce ?? true) : false;
+    let cancellation: ActionCancellation;
+    if (!run || ['accepted', 'authorized', 'allocated', 'preparing'].includes(run.status)) {
+      cancellation = record('before-invocation', 'not-started', 'cancelled before the provider was invoked; nothing reached it');
+    } else if (run.status === 'executing') {
+      cancellation = external
+        ? record('after-external-submission', 'submitted', `the ${action.provider} operation had been submitted; Factory stopped waiting for it and did not reverse it`)
+        : record('native-execution', 'stopped', 'the local process was stopped; it had no external effect');
+    } else {
+      cancellation = record('during-verification', external ? 'submitted' : 'stopped', 'the operation had completed; only verification was still running, and the recorded outcome is the verified one');
+    }
+    const patched = (await this.domain.patchAction(tenantId, actionId, {
+      execution: { requestedAt: action.execution?.requestedAt ?? requestedAt, ...action.execution, cancelRequestedAt: requestedAt },
+      cancellation,
+    })) ?? action;
+    if (action.runId && cancellation.stage !== 'during-verification') await this.cancelRunAs(action.runId);
+    return patched;
   }
 
   /**
    * Verification reads the durable evidence rather than the process that wrote
    * it, so a check reports what a later reader of FeltDB would also see.
    */
-  private async verifyRun(runId: string, healthRequirement?: string): Promise<VerificationCheck[]> {
+  private async verifyRun(runId: string, healthRequirement?: string, operationChecks: readonly VerificationCheck[] = []): Promise<VerificationCheck[]> {
     const evidence = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
     const checks: VerificationCheck[] = [{
       name: 'evidence recorded',
@@ -1515,10 +2380,12 @@ export class FactoryService {
       });
     }
     if (healthRequirement) {
+      // Only a probe that actually ran can say the environment is healthy.
+      const probe = operationChecks.find((check) => check.name === 'environment responds healthy');
       checks.push({
         name: healthRequirement,
-        status: evidence?.finalResult === 'PASS' ? 'passed' : 'skipped',
-        detail: 'derived from the run evidence; no external probe is performed',
+        status: probe ? probe.status : 'skipped',
+        detail: probe ? probe.detail ?? '' : 'not probed by this Action; environment.health verifies it',
       });
     }
     return checks;
@@ -1639,7 +2506,7 @@ export class FactoryService {
     const db = await createFactoryDB(config);
     const service = new FactoryService(config, db);
     await service.provisionAuthority();
-    await service.recoverInterruptedRuns();
+    await service.recoverExecution();
     return service;
   }
 
@@ -1690,6 +2557,9 @@ export class FactoryService {
   }
 
   async shutdown(): Promise<void> {
+    // A stopped worker stops heartbeating; its leases lapse and another
+    // worker may reclaim them. Nothing here touches the Runs themselves.
+    for (const stop of [...this.heartbeats]) stop();
     this.shuttingDown = true;
     this.scheduler?.stop();
     for (const execution of this.activeExecutions.values()) {
@@ -1833,38 +2703,115 @@ export class FactoryService {
     return cancelledRun;
   }
 
+  /** Kept for callers of the earlier name; recovery is one procedure. */
   async recoverInterruptedRuns(): Promise<void> {
-    const runs = await this.db.collection<RunRecord>(COLLECTIONS.runs).all();
-    for (const run of runs) {
-      if (isTerminal(run.status)) {
-        continue;
-      }
+    await this.recoverExecution();
+  }
 
-      await this.patchRun(run.id, {
-        status: 'failed',
-        completedAt: new Date().toISOString(),
-        error: 'Runner restarted before execution reached a terminal state',
-      });
-      await this.appendEvent(run.id, 'failed', 'Recovered interrupted non-terminal run from durable FeltDB state');
+  /** Test-only failure injection. Production configures no hooks, so this is a no-op. */
+  private async checkpoint(point: ExecutionCheckpoint, detail: { runId: string; actionId?: string }): Promise<void> {
+    await this.config.executionHooks?.checkpoint(point, detail);
+  }
 
-      try {
-        const transition = await this.db.transitionOperation({
-          operationId: run.operationId,
-          expectedVersion: run.operationVersion,
-          to: 'failed',
-          error: 'Runner restarted before execution reached a terminal state',
-        });
-        await this.patchRun(run.id, { operationVersion: transition.operation.version });
-      } catch {
-        // Durable run state is authoritative for recovery even if the operation was already terminal.
+  workerIdentity(): string {
+    return this.workerId;
+  }
+
+  /**
+   * Acquire durable ownership of a Run by compare-and-swap.
+   *
+   * Exactly one live worker owns a Run. A lease still held by another worker
+   * refuses the acquisition; an expired one is reclaimed with the attempt
+   * count advanced, and the record — not the reclaim — decides what the new
+   * owner may do with it.
+   */
+  async acquireRunOwnership(runId: string, now = Date.now()): Promise<RunRecord | null> {
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const current = await runs.get(runId);
+    if (!current || isTerminal(current.status) || current.status === 'unknown') return null;
+    const live = current.leaseExpiresAt && Date.parse(current.leaseExpiresAt) > now && current.executionOwner !== this.workerId;
+    if (live) return null;
+    const result = await runs.updateIfVersion(runId, current.__version ?? 1, {
+      executionOwner: this.workerId,
+      leaseExpiresAt: new Date(now + this.leaseMs).toISOString(),
+      heartbeatAt: new Date(now).toISOString(),
+      attempt: (current.attempt ?? 0) + 1,
+      updatedAt: new Date(now).toISOString(),
+    });
+    return result.updated ? (result.item ?? (await runs.get(runId))) : null;
+  }
+
+  private readonly heartbeats = new Set<() => void>();
+
+  private startHeartbeat(runId: string): () => void {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      void this.patchRun(runId, {
+        heartbeatAt: new Date(now).toISOString(),
+        leaseExpiresAt: new Date(now + this.leaseMs).toISOString(),
+      }).catch(() => { /* the lease simply lapses */ });
+    }, Math.max(250, Math.floor(this.leaseMs / 3)));
+    timer.unref?.();
+    const stop = () => { clearInterval(timer); this.heartbeats.delete(stop); };
+    this.heartbeats.add(stop);
+    return stop;
+  }
+
+  private async releaseRunOwnership(runId: string): Promise<void> {
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const current = await runs.get(runId);
+    if (!current || current.executionOwner !== this.workerId) return;
+    const released: RunRecord = { ...current, finishedAt: current.finishedAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() };
+    delete released.leaseExpiresAt;
+    await runs.put(released, runId);
+  }
+
+  /**
+   * The Run's outcome cannot be determined. This is not a failure and is
+   * never written as one: it is recorded with why, whether the provider may
+   * already have acted, and whether the provider's own semantics make a
+   * repeat safe. Reality, not a retry, resolves it.
+   */
+  private async markRunUnknown(
+    runId: string,
+    reason: string,
+    invocationMayHaveOccurred: boolean,
+    retrySafe: boolean,
+    contract?: ExecutionContractRecord['contract'],
+  ): Promise<RunRecord | null> {
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const current = await runs.get(runId);
+    if (!current || isTerminal(current.status) || current.status === 'unknown') return current;
+    const since = new Date().toISOString();
+    const evidence = this.db.collection<StructuredEvidence>(COLLECTIONS.evidence);
+    if (!(await evidence.get(runId))) {
+      const stored = contract ?? (await this.db.collection<ExecutionContractRecord>(COLLECTIONS.executionContracts).get(runId))?.contract;
+      if (stored) {
+        const unknown = buildFailureEvidence(stored, new Error(reason), current.startedAt ?? since, since, 'unknown', 'not-started');
+        await evidence.put(unknown, unknown.id);
       }
     }
+    const marked: RunRecord = {
+      ...current,
+      status: 'unknown',
+      error: reason,
+      uncertainty: { reason, since, invocationMayHaveOccurred, retrySafe, observations: [] },
+      updatedAt: since,
+    };
+    delete marked.leaseExpiresAt;
+    await runs.put(marked, runId);
+    await this.appendEvent(runId, 'unknown', reason);
+    try {
+      await this.db.transitionOperation({ operationId: current.operationId, expectedVersion: current.operationVersion, to: 'failed', error: `unknown: ${reason}` });
+    } catch { /* the durable run record is authoritative for uncertainty */ }
+    return marked;
   }
 
   async startRun(
     request: RunRequest,
     principalOrContext: string | AuthenticatedContext,
     execution?: ProviderExecution,
+    options: { onAdmitted?: (run: RunRecord) => Promise<void>; actionId?: string; retrySafe?: boolean } = {},
   ): Promise<RunRecord> {
     if (this.shuttingDown) {
       throw new Error('Factory service is shutting down');
@@ -1924,9 +2871,13 @@ export class FactoryService {
     } else if (isTerminal(run.status) || run.status !== 'accepted' || this.activeExecutions.has(run.id)) {
       return run;
     }
+    await options.onAdmitted?.(run);
+    const detail = { runId: run.id, ...(options.actionId ? { actionId: options.actionId } : {}) };
+    await this.checkpoint('after-run-created', detail);
 
     await this.recordRequest(run.id, request, principal, context.tenant);
 
+    await this.checkpoint('before-authorization', detail);
     const authorization = await authorizeExecution(this.db, this.flowSpec, context, request, run.id, {
       association: this.association,
       authorized: authorizedApplicationContext(
@@ -1946,109 +2897,171 @@ export class FactoryService {
       return run;
     }
 
-    await this.recordContract(authorization.contract);
-    this.appPort.bindContract(authorization.contract);
+    const contract = authorization.contract;
+    await this.recordContract(contract);
+    this.appPort.bindContract(contract);
     run = await this.patchRun(run.id, {
       status: 'authorized',
       contractId: run.id,
     });
     await this.appendEvent(run.id, 'authorized', authorization.reason);
+    await this.checkpoint('after-authorization', detail);
 
-    const startedAt = new Date().toISOString();
-    const operation = await this.db.transitionOperation({
-      operationId: run.operationId,
-      expectedVersion: run.operationVersion,
-      to: 'executing',
-    });
-    run = await this.patchRun(run.id, {
-      status: 'allocated',
-      operationVersion: operation.operation.version,
-    });
-    await this.appendEvent(run.id, 'allocated', 'Allocated ephemeral runner workspace');
-    run = await this.patchRun(run.id, { status: 'preparing' });
-    await this.appendEvent(run.id, 'preparing', 'Preparing repository workspace');
-    run = await this.patchRun(run.id, {
-      status: 'executing',
-      startedAt,
-    });
+    // Durable ownership before anything is allocated. Another worker's live
+    // lease means this worker does nothing with the Run.
+    const owned = await this.acquireRunOwnership(run.id);
+    if (!owned) return (await this.getRun(run.id)) ?? run;
+    run = owned;
+    await this.appendEvent(run.id, 'authorized', `execution owned by ${this.workerId}, attempt ${run.attempt ?? 1}`);
+    await this.checkpoint('after-ownership', detail);
+    const stopHeartbeat = this.startHeartbeat(run.id);
+    const retrySafe = options.retrySafe ?? (execution ? execution.idempotency.exactlyOnce : contract.execution.mode !== 'integration');
     const activeRunId = run.id;
-    const executionDetail = authorization.contract.execution.mode === 'pax'
-      ? ['pax', '--json', authorization.contract.execution.operation, authorization.contract.execution.target, ...authorization.contract.execution.args].join(' ')
-      : authorization.contract.command?.join(' ') ?? 'native execution';
-    await this.appendEvent(activeRunId, 'executing', executionDetail);
+    // Set once the provider process exists. From then on a lost result is
+    // unknown, not failed — unless the process was cancelled, which is known.
+    let invoked = false;
+    let executedStatus: StructuredEvidence['status'] | undefined;
 
     try {
-      const outcome = authorization.contract.execution.mode === 'integration'
-        ? await this.github.execute(authorization.contract)
-        : await executeContract(authorization.contract, {
-          repositoryRoot: this.config.repositoryRoot,
-          workspaceRoot: this.config.workspaceRoot,
-          onHandle: (handle) => {
-            this.activeExecutions.set(activeRunId, handle);
-          },
-          paxExecutable: this.config.paxExecutable,
-        });
+      const startedAt = new Date().toISOString();
+      const operation = await this.db.transitionOperation({
+        operationId: run.operationId,
+        expectedVersion: run.operationVersion,
+        to: 'executing',
+      });
+      run = await this.patchRun(run.id, {
+        status: 'allocated',
+        operationVersion: operation.operation.version,
+      });
+      await this.appendEvent(run.id, 'allocated', 'Allocated ephemeral runner workspace');
+      run = await this.patchRun(run.id, { status: 'preparing' });
+      await this.appendEvent(run.id, 'preparing', 'Preparing repository workspace');
+      await this.checkpoint('before-invocation', detail);
+      run = await this.patchRun(run.id, {
+        status: 'executing',
+        startedAt,
+      });
+      const executionDetail = contract.execution.mode === 'pax'
+        ? ['pax', '--json', contract.execution.operation, contract.execution.target, ...contract.execution.args].join(' ')
+        : contract.command?.join(' ') ?? 'native execution';
+      await this.appendEvent(activeRunId, 'executing', executionDetail);
 
-      this.activeExecutions.delete(activeRunId);
-      if (outcome.evidence.status !== 'cancelled') {
-        run = await this.patchRun(activeRunId, { status: 'verifying' });
-        await this.appendEvent(activeRunId, 'verifying', 'Persisting structured evidence');
-      } else {
-        run = await this.getRun(activeRunId) ?? run;
-      }
-      await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(outcome.evidence, outcome.evidence.id);
+      try {
+        // A cancel that landed between admission and here stops the run before
+        // any process exists. Nothing is spawned for a cancelled run.
+        const beforeSpawn = await this.getRun(activeRunId);
+        if (beforeSpawn?.status === 'cancelled') return beforeSpawn;
 
-      const terminalStatus = outcome.evidence.status === 'completed' ? 'completed' : outcome.evidence.status;
-      const transition = terminalStatus === 'cancelled' && run.status === 'cancelled'
-        ? null
-        : await this.db.transitionOperation({
-          operationId: run.operationId,
-          expectedVersion: run.operationVersion,
-          to: terminalStatus === 'completed' ? 'completed' : terminalStatus,
-          resultSnapshot: outcome.evidence,
+        // The GitHub integration answers or throws: a thrown error is the
+        // provider's own refusal, known and final. Only a result that arrives
+        // and then cannot be recorded is uncertain.
+        const executed = contract.execution.mode === 'integration'
+          ? await (async () => { const result = await this.github.execute(contract); invoked = true; return result; })()
+          : await executeContract(contract, {
+            repositoryRoot: this.config.repositoryRoot,
+            workspaceRoot: this.config.workspaceRoot,
+            onHandle: (handle) => {
+              this.activeExecutions.set(activeRunId, handle);
+            },
+            paxExecutable: this.config.paxExecutable,
+            credentialResolver: this.credentialResolver,
+            onSpawned: async () => {
+              invoked = true;
+              await this.checkpoint('after-invocation', detail);
+            },
+          });
+
+        this.activeExecutions.delete(activeRunId);
+        executedStatus = executed.evidence.status;
+        await this.checkpoint('after-result-before-persistence', detail);
+        // A late provider result never un-cancels a run: what was cancelled
+        // stays cancelled, and the evidence says so.
+        const persistedAfter = await this.getRun(activeRunId);
+        const outcome = persistedAfter?.status === 'cancelled' && executed.evidence.status !== 'cancelled'
+          ? { ...executed, evidence: { ...executed.evidence, status: 'cancelled' as const, deterministicResult: 'CANCELLED' as const, finalResult: 'CANCELLED' as const } }
+          : executed;
+        executedStatus = outcome.evidence.status;
+        if (outcome.evidence.status !== 'cancelled') {
+          run = await this.patchRun(activeRunId, { status: 'verifying' });
+          await this.appendEvent(activeRunId, 'verifying', 'Persisting structured evidence');
+        } else {
+          run = await this.getRun(activeRunId) ?? run;
+        }
+        await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(outcome.evidence, outcome.evidence.id);
+        await this.checkpoint('after-persistence-before-verification', detail);
+
+        const terminalStatus = outcome.evidence.status === 'completed' ? 'completed' : outcome.evidence.status;
+        const transition = terminalStatus === 'cancelled' && (run.status === 'cancelled' || persistedAfter?.status === 'cancelled')
+          ? null
+          : await this.db.transitionOperation({
+            operationId: run.operationId,
+            expectedVersion: run.operationVersion,
+            to: terminalStatus === 'completed' ? 'completed' : terminalStatus === 'unknown' ? 'failed' : terminalStatus,
+            resultSnapshot: outcome.evidence,
+            error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
+          });
+
+        run = await this.patchRun(activeRunId, {
+          status: terminalStatus,
+          completedAt: outcome.evidence.completedAt,
+          finishedAt: new Date().toISOString(),
+          operationVersion: transition?.operation.version ?? run.operationVersion,
+          evidenceId: outcome.evidence.id,
+          ...(outcome.evidence.providerResult?.providerOperationId !== undefined ? { providerOperationId: outcome.evidence.providerResult.providerOperationId } : {}),
           error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
         });
-
-      run = await this.patchRun(activeRunId, {
-        status: terminalStatus,
-        completedAt: outcome.evidence.completedAt,
-        operationVersion: transition?.operation.version ?? run.operationVersion,
-        evidenceId: outcome.evidence.id,
-        error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
-      });
-      await this.appendEvent(activeRunId, terminalStatus, `Final deterministic result: ${outcome.evidence.finalResult}`);
-      return run;
-    } catch (error) {
-      this.activeExecutions.delete(activeRunId);
-      const completedAt = new Date().toISOString();
-      const persistedRun = await this.getRun(activeRunId);
-      const terminalStatus = persistedRun?.status === 'cancelled' ? 'cancelled' : 'failed';
-      const evidence = buildFailureEvidence(
-        authorization.contract,
-        error instanceof Error ? error : new Error(String(error)),
-        run.startedAt ?? startedAt,
-        completedAt,
-        terminalStatus,
-      );
-      await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidence, evidence.id);
-      const transition = terminalStatus === 'cancelled' && persistedRun?.status === 'cancelled'
-        ? null
-        : await this.db.transitionOperation({
-          operationId: run.operationId,
-          expectedVersion: run.operationVersion,
-          to: terminalStatus,
+        await this.appendEvent(activeRunId, terminalStatus, `Final deterministic result: ${outcome.evidence.finalResult}`);
+        await this.checkpoint('after-evidence', detail);
+        return run;
+      } catch (error) {
+        this.activeExecutions.delete(activeRunId);
+        const persistedRun = await this.getRun(activeRunId);
+        if (persistedRun?.status !== 'cancelled' && executedStatus !== 'cancelled' && invoked) {
+          /*
+           * The provider was invoked and the result was lost — a persistence
+           * failure after the process ran, or a boundary error after spawn.
+           * Factory does not know what the provider did, and says exactly that.
+           */
+          const reason = `provider was invoked but its result could not be recorded: ${error instanceof Error ? error.message : String(error)}`;
+          return (await this.markRunUnknown(activeRunId, reason.slice(0, 500), true, retrySafe, contract)) ?? run;
+        }
+        const completedAt = new Date().toISOString();
+        const terminalStatus = persistedRun?.status === 'cancelled' || executedStatus === 'cancelled' ? 'cancelled' : 'failed';
+        const evidence = buildFailureEvidence(
+          contract,
+          error instanceof Error ? error : new Error(String(error)),
+          run.startedAt ?? startedAt,
+          completedAt,
+          terminalStatus,
+          terminalStatus === 'cancelled' ? 'cancelled'
+            : error instanceof SpawnFailedError ? 'spawn-failed'
+            : error instanceof CredentialUnavailableError ? 'not-started'
+            : 'not-started',
+        );
+        await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidence, evidence.id);
+        const transition = terminalStatus === 'cancelled' && persistedRun?.status === 'cancelled'
+          ? null
+          : await this.db.transitionOperation({
+            operationId: run.operationId,
+            expectedVersion: run.operationVersion,
+            to: terminalStatus,
+            error: evidence.stderr,
+            resultSnapshot: evidence,
+          });
+        run = await this.patchRun(activeRunId, {
+          status: terminalStatus,
+          completedAt,
+          finishedAt: completedAt,
+          operationVersion: transition?.operation.version ?? run.operationVersion,
+          evidenceId: evidence.id,
           error: evidence.stderr,
-          resultSnapshot: evidence,
         });
-      run = await this.patchRun(activeRunId, {
-        status: terminalStatus,
-        completedAt,
-        operationVersion: transition?.operation.version ?? run.operationVersion,
-        evidenceId: evidence.id,
-        error: evidence.stderr,
-      });
-      await this.appendEvent(activeRunId, terminalStatus, evidence.stderr);
-      return run;
+        await this.appendEvent(activeRunId, terminalStatus, evidence.stderr);
+        return run;
+      }
+    } finally {
+      stopHeartbeat();
+      await this.releaseRunOwnership(activeRunId);
     }
   }
 
@@ -2151,6 +3164,9 @@ function productSurface(pathname: string): string | null {
   if (pathname === '/factory/providers') return providersPage();
   if (pathname === '/factory/settings') return settingsPage();
   if (pathname === '/factory/graphs') return graphsPage();
+  if (pathname === '/factory/work') return workListPage();
+  const work = pathname.match(/^\/factory\/work\/([A-Za-z0-9._:-]{1,128})$/);
+  if (work) return workPage(work[1]!);
   const graph = pathname.match(/^\/factory\/graphs\/([A-Za-z0-9._:-]{1,128})$/);
   if (graph) return graphPage(graph[1]!);
   const project = pathname.match(/^\/factory\/projects\/([A-Za-z0-9._:-]{1,128})$/);
@@ -2311,6 +3327,10 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           if (error instanceof DomainValidationError || error instanceof IntervalError
             || error instanceof GraphValidationError) {
             writeJson(response, 400, { error: error.message, code: 'INVALID_REQUEST' });
+            return;
+          }
+          if (error instanceof OperationalWorkRequestError || error instanceof OperationalWorkConflictError) {
+            writeJson(response, error.status, { error: error.message, code: error.code });
             return;
           }
           if (error instanceof FactoryAssociationError

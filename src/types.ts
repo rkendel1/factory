@@ -7,9 +7,11 @@ export type RunStatus =
   | 'verifying'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  /** Factory cannot determine whether the external operation occurred. Not a failure. */
+  | 'unknown';
 
-export type DeterministicResult = 'PASS' | 'FAIL' | 'CANCELLED';
+export type DeterministicResult = 'PASS' | 'FAIL' | 'CANCELLED' | 'UNKNOWN';
 export type JevStatus = 'DRIFT' | 'ALIGNED' | 'UNAVAILABLE';
 
 export interface RepositoryRef {
@@ -159,9 +161,58 @@ export interface RunRecord {
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  /*
+   * Durable execution ownership. Exactly one live worker owns a Run; the
+   * lease is acquired by compare-and-swap on this record, extended by
+   * heartbeat while the worker is alive, and reclaimable once expired. A
+   * reclaimed Run is not thereby safe to repeat: that is decided from its
+   * status and the provider's idempotency, never from the lease.
+   */
+  executionOwner?: string;
+  leaseExpiresAt?: string;
+  attempt?: number;
+  heartbeatAt?: string;
+  finishedAt?: string;
+  providerOperationId?: string | null;
+  /** Present while, or since, Factory could not determine the external outcome. */
+  uncertainty?: RunUncertainty;
   createdAt: string;
   updatedAt: string;
   __version?: number;
+}
+
+export interface RunUncertainty {
+  reason: string;
+  since: string;
+  /** Whether the provider may already have been invoked when contact was lost. */
+  invocationMayHaveOccurred: boolean;
+  /** Whether the provider's idempotency makes a repeat safe. */
+  retrySafe: boolean;
+  observations: { at: string; outcome: 'established' | 'absent' | 'undetermined' | 'retry-safe'; detail: string }[];
+  resolvedAt?: string;
+  resolvedBy?: 'observation' | 'retry' | 'cancellation';
+  resolution?: 'succeeded' | 'failed' | 'retried' | 'cancelled';
+}
+
+/**
+ * Points in the execution path a process may stop at. Tests inject failure
+ * here through the `executionHooks` configuration; production runs with no
+ * hooks and no behaviour that depends on them.
+ */
+export type ExecutionCheckpoint =
+  | 'before-authorization'
+  | 'after-authorization'
+  | 'after-run-created'
+  | 'after-ownership'
+  | 'before-invocation'
+  | 'after-invocation'
+  | 'after-result-before-persistence'
+  | 'after-persistence-before-verification'
+  | 'after-verification-before-completion'
+  | 'after-evidence';
+
+export interface ExecutionHooks {
+  checkpoint(point: ExecutionCheckpoint, detail: { runId: string; actionId?: string }): Promise<void> | void;
 }
 
 /* -------------------------------------------------------------------------
@@ -251,8 +302,74 @@ export type ActionStatus =
   | 'awaiting-approval'
   | 'authorized'
   | 'running'
+  | 'executed'
+  | 'verifying'
   | 'succeeded'
-  | 'failed';
+  | 'failed'
+  /** The external outcome cannot be determined yet. Neither success nor failure. */
+  | 'unknown';
+
+/** Why a process stopped. `spawn-failed` means the provider mechanism could not start; `not-started` means Factory stopped before spawning. */
+export type TerminationReason = 'exit' | 'signal' | 'timeout' | 'cancelled' | 'spawn-failed' | 'not-started';
+
+/**
+ * The phase an Action failed in. Kept apart from the outcome so a reader can
+ * tell "the provider said no" from "Factory could not ask the provider".
+ */
+export type ActionFailurePhase =
+  | 'preflight'
+  | 'authority'
+  | 'authorization'
+  | 'execution'
+  | 'provider'
+  | 'verification'
+  | 'interrupted'
+  | 'unknown';
+
+/**
+ * What actually happened when an Action executed, from the execution
+ * boundary's own clock. Absent on an Action that has not run: nothing here is
+ * ever filled in from a plan.
+ */
+export interface ActionExecutionSummary {
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  exitCode?: number | null;
+  terminationReason?: TerminationReason;
+  providerStatus?: ProviderResultStatus;
+  providerOperationId?: string | null;
+  /** The revision the operation actually left behind, as the provider reported it. */
+  observedRevision?: string;
+  cancelRequestedAt?: string;
+}
+
+/**
+ * What a provider adapter reports after an operation. Factory turns this into
+ * a Run and Evidence; the adapter never writes either.
+ */
+export type ProviderResultStatus = 'succeeded' | 'rejected' | 'failed' | 'cancelled';
+
+export interface ProviderExecutionResult {
+  status: ProviderResultStatus;
+  /** The provider's own reference for the operation, when it gives one. */
+  providerOperationId: string | null;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  /** Sanitized, structured detail read from the provider's response. */
+  metadata: Record<string, string | number | boolean | null>;
+  /** State the operation observed, never copied from what was requested. */
+  observed: {
+    revision?: string;
+    health?: 'healthy' | 'unhealthy';
+    healthStatus?: number;
+    healthUrl?: string;
+  };
+  /** One sentence a person can act on. Sanitized. */
+  summary: string;
+}
 
 export interface ActionPlanStep {
   order: number;
@@ -358,6 +475,15 @@ export interface ActionRecord {
   };
   /** The person who approved an Action the authority would not run on its own. */
   approvedBy?: string;
+  /**
+   * The deterministic checks made before any provider was invoked, and when
+   * they passed. A provider is reached only after every one of them passed.
+   */
+  preflight?: { checks: VerificationCheck[]; passedAt?: string; failedAt?: string };
+  execution?: ActionExecutionSummary;
+  /** Why the Action failed, in which phase. Never a generic message. */
+  failure?: { phase: ActionFailurePhase; outcome: ActionOutcome; reason: string };
+  cancellation?: ActionCancellation;
   createdBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -457,6 +583,8 @@ export type ActionGraphStatus =
   | 'ready'
   | 'running'
   | 'blocked'
+  /** A node's external outcome is unknown; nothing proceeds until reality resolves it. */
+  | 'unresolved'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -502,12 +630,26 @@ export type ActionOutcome =
   | 'succeeded'
   | 'capability-unavailable'
   | 'provider-unavailable'
+  | 'resource-unavailable'
+  | 'credential-unavailable'
   | 'autonomy-denied'
   | 'authority-unavailable'
   | 'awaiting-approval'
   | 'execution-failed'
   | 'verification-failed'
+  | 'verification-unavailable'
+  | 'unknown'
   | 'cancelled';
+
+/** What Factory actually cancelled, so cancelling never implies an effect was reversed. */
+export interface ActionCancellation {
+  requestedAt: string;
+  requestedBy: string;
+  stage: 'before-invocation' | 'native-execution' | 'after-external-submission' | 'during-verification' | 'after-completion';
+  /** `not-started`: nothing reached the provider; `stopped`: a local process was stopped; `submitted`: an external operation may stand. */
+  effect: 'not-started' | 'stopped' | 'submitted' | 'none';
+  detail: string;
+}
 
 /**
  * What a provider adapter hands the execution boundary.
@@ -521,6 +663,8 @@ export interface ProviderExecution {
   capability: string;
   operation: string;
   resource: string;
+  /** The provider-side resource the Factory resource was bound to. */
+  providerResource?: string;
   environment: Record<string, string>;
   credentials: string[];
   idempotency: { key: string; exactlyOnce: boolean; note?: string };
@@ -595,9 +739,56 @@ export interface StructuredEvidence {
     capability: string;
     operation: string;
     resource: string;
+    /** The provider-side resource the environment or repository was bound to. */
+    providerResource?: string;
     parameters: Record<string, string>;
     credentials: string[];
     idempotency: { key: string; exactlyOnce: boolean; note?: string };
+  };
+  /** What the provider reported, as the adapter read it. Sanitized. */
+  providerResult?: ProviderExecutionResult;
+  /** How the process actually ended, from the execution boundary. */
+  execution?: {
+    terminationReason: TerminationReason;
+    signal: string | null;
+    timedOut: boolean;
+    cancelled: boolean;
+    timeoutMs: number;
+    truncated: { stdout: boolean; stderr: boolean };
+    outputBytes: { stdout: number; stderr: number };
+    workspace?: string;
+    /** Credential names the boundary resolved for the process. Never values. */
+    credentialsResolved: string[];
+  };
+  /** Requested against observed. Observed comes only from the operation itself. */
+  revision?: { requested?: string; observed?: string };
+  /**
+   * The whole chain this attempt belongs to, so a reader can reconstruct it
+   * from the evidence alone. Identifiers and names only.
+   */
+  chain?: {
+    operationalWorkId?: string;
+    graphId?: string;
+    actionId: string;
+    runId: string;
+    attempt: number;
+    executionOwner?: string;
+    authorizationDecisionId: string;
+    provider?: string;
+    capability?: string;
+    resource?: string;
+    providerResource?: string;
+    idempotencyKey: string;
+    providerOperationId: string | null;
+    verification: VerificationCheck[];
+    observedReality?: EnvironmentCurrentState;
+  };
+  /** How an unknown outcome was later resolved, and by what observation. */
+  resolution?: {
+    resolvedAt: string;
+    resolvedBy: 'observation' | 'retry' | 'cancellation';
+    resolution: 'succeeded' | 'failed' | 'retried' | 'cancelled';
+    checks: VerificationCheck[];
   };
   principal?: string;
   tenantId?: string;
@@ -621,7 +812,7 @@ export interface StructuredEvidence {
   };
   authorizationDecisionId: string;
   authorizationDecision: 'granted' | 'rejected';
-  status: 'completed' | 'failed' | 'cancelled';
+  status: 'completed' | 'failed' | 'cancelled' | 'unknown';
   exitCode: number | null;
   startedAt: string;
   completedAt: string;
@@ -685,7 +876,100 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   reconciliationTickMs?: number;
   /** Provider adapters to register. Defaults to the built-in set. */
   providerAdapters?: readonly import('./adapters.js').ProviderAdapter[];
+  /**
+   * Where credential values come from, by name, at the execution boundary
+   * only. Defaults to this process's environment. Nothing outside the boundary
+   * ever receives a value.
+   */
+  credentialResolver?: (name: string) => string | undefined;
+  /** Test-only failure injection at execution checkpoints. Production sets none. */
+  executionHooks?: ExecutionHooks;
+  /** How long a worker's execution ownership of a Run lasts without a heartbeat. */
+  executionLeaseMs?: number;
+  /** This worker's durable identity in Run ownership. Defaults to a per-process id. */
+  workerId?: string;
   authBoundryControlPlane?: import('./provisioning.js').AuthBoundryControlPlane;
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;
+}
+
+/* -------------------------------------------------------------------------
+ * Operational work requested across the Attn ↔ Factory boundary.
+ *
+ * One record per request identity (tenant, origin, idempotency key). It
+ * remembers what was asked and how Factory translated it; everything about
+ * what then happened lives on the Action Graph, its Actions, their Runs and
+ * their Evidence. Nothing is duplicated here.
+ * ---------------------------------------------------------------------- */
+
+export type OperationalWorkStatus =
+  | 'accepted'
+  | 'planning'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'unresolved'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface OperationalWorkPlanStep {
+  key: string;
+  verb: string;
+  capability: string;
+  /** Added by Factory's operational rules rather than requested. */
+  implied: boolean;
+  reason: string;
+  dependsOn: string[];
+  parameters?: Record<string, string | number | boolean>;
+}
+
+export interface OperationalWorkRecord {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  environmentId?: string;
+  contract: string;
+  /** Provenance of the request. Referenced, never dereferenced. */
+  origin: { system: string; type: string; id: string };
+  idempotencyKey: string;
+  /** Hash of the whole request, so a reused key with a different request is refused. */
+  requestFingerprint: string;
+  requestedBy: string;
+  intent?: string;
+  requested: { verb: string; target?: string; parameters?: Record<string, string | number | boolean> }[];
+  plan: OperationalWorkPlanStep[];
+  graphId?: string;
+  status: OperationalWorkStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  __version?: number;
+}
+
+export type OperationalWorkEventType =
+  | 'OperationalWorkAccepted'
+  | 'OperationalWorkPlanned'
+  | 'OperationalWorkCompleted'
+  | 'OperationalWorkFailed'
+  | 'OperationalWorkBlocked'
+  | 'OperationalWorkUnresolved'
+  | 'OperationalWorkCancelled';
+
+/**
+ * A durable notice that work changed state, for Attn to read through Factory's
+ * API. It carries identifiers and outcomes only: no command, no log, no
+ * credential, and nothing Attn would need Factory's database to interpret.
+ */
+export interface OperationalWorkEventRecord {
+  id: string;
+  workId: string;
+  tenantId: string;
+  type: OperationalWorkEventType;
+  status: OperationalWorkStatus;
+  outcome?: string | null;
+  origin: { system: string; type: string; id: string };
+  graphId?: string;
+  summary?: { completedActions: string[]; blockedActions: string[]; failedActions: string[] };
+  createdAt: string;
 }

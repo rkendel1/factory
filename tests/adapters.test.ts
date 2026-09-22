@@ -112,6 +112,10 @@ async function factory(repositoryRoot: string, options: {
     authBoundryTenantId: options.tenant ?? TENANT,
     authBoundryControlPlane: controlPlane(),
     ...(options.adapters ? { providerAdapters: options.adapters } : {}),
+    // The boundary resolves credentials by name. Tests provide a Fly token
+    // unless the process environment already names one, so preflight passes
+    // and redaction can be checked against a known value.
+    credentialResolver: (name) => process.env[name] ?? (name === 'FLY_API_TOKEN' ? 'test-fly-token' : undefined),
   });
   await service.refreshConnection();
   return { service, workingDirectory };
@@ -156,7 +160,10 @@ test('the vocabulary is provider-neutral and .flow decides which of it Factory c
   assert.deepEqual(registry.providers(), ['fly', 'git', 'local']);
   assert.deepEqual(registry.providersFor('deployment.create'), ['fly']);
   assert.deepEqual(registry.providersFor('build.run'), ['local']);
-  assert.deepEqual(registry.providersFor('repository.inspect'), ['git', 'local']);
+  // repo-echo declares repository.inspect for local, but the local adapter does
+  // not implement it: declared without an implementation is not an ability.
+  assert.deepEqual(registry.providersFor('repository.inspect'), ['git']);
+  assert.deepEqual(registry.unimplementedOf('local').map((entry) => entry.operation), ['repo-echo']);
   // Declared in the vocabulary, declared by no .flow operation: not performable.
   assert.deepEqual(registry.providersFor('deployment.rollback'), []);
   assert.deepEqual(registry.providersFor('migration.run'), []);
@@ -192,8 +199,13 @@ test('provider resolution is deterministic and never falls back', () => {
     desiredState: { id: 'd', projectId: 'prj', tenantId: TENANT, targetProvider: 'fly', createdAt: '', updatedAt: '' },
   }));
   assert.equal(fromDesired.ok && fromDesired.provider, 'fly');
-  // Repository capabilities with several declared providers are refused, not guessed.
-  assert.equal(resolveProvider(registry, 'repository.inspect', registryContext()).ok, false);
+  const inspect = resolveProvider(registry, 'repository.inspect', registryContext());
+  assert.equal(inspect.ok && inspect.provider, 'git');
+  // Repository capabilities with several implemented providers are refused, not guessed.
+  const twoProviders = new ProviderRegistry(loadFactoryFlow(), [gitAdapter, { ...localAdapter, capabilities: ['repository.inspect', 'build.run', 'test.run'] }, flyAdapter]);
+  const ambiguous = resolveProvider(twoProviders, 'repository.inspect', registryContext());
+  assert.equal(ambiguous.ok, false);
+  assert.match(!ambiguous.ok ? ambiguous.reason : '', /must have one provider/);
 });
 
 test('an Action with an unperformable capability is refused; an unresolvable provider is a durable outcome', async () => {
@@ -295,15 +307,18 @@ test('execution success and verification failure stay distinct, and the health p
   }
 });
 
-test('a provider operation that cannot run is execution-failed, with the reason kept', async () => {
+test('a provider whose mechanism is absent is provider-unavailable at preflight, before any run', async () => {
   const root = await createTempWorkspace('adapters-execfail');
   const { service, context, project, environment } = await scenario(await gitRepository(root));
-  // fly is not installed here, so deployment really fails to execute.
+  // fly is not installed here, so preflight stops the deployment before a Run exists.
   const deploy = await service.createAction(context, project.id, { capability: 'deployment.create', environmentId: environment.id }, grants);
   const ran = await service.runAction(context, deploy.id, { probe: grants, autonomous: true });
   assert.equal(ran.status, 'failed');
-  assert.equal(ran.outcome, 'execution-failed');
-  assert.ok(ran.runId);
+  assert.equal(ran.outcome, 'provider-unavailable');
+  assert.equal(ran.failure?.phase, 'preflight');
+  assert.match(ran.failure?.reason ?? '', /fly CLI is not on PATH/);
+  assert.equal(ran.runId, undefined, 'nothing was admitted: the provider was never reached');
+  assert.ok(ran.preflight?.failedAt);
 });
 
 test('credentials are resolved only at the execution boundary and never recorded', async () => {
@@ -351,13 +366,13 @@ test('a multi-provider graph executes in dependency order and a provider failure
   const result = await service.coordinateGraph(context, graph.id, { probe: grants, autonomous: true });
   assert.equal(result.actions[0]!.status, 'succeeded', 'build ran through local');
   assert.equal(result.actions[1]!.status, 'succeeded', 'test ran through local');
-  assert.equal(result.actions[2]!.outcome, 'execution-failed', 'fly is not installed here');
+  assert.equal(result.actions[2]!.outcome, 'provider-unavailable', 'fly is not installed here, and preflight says so');
   assert.deepEqual(result.actions[3]!.blockedBy, [result.actions[2]!.id], 'health is blocked by the failed deploy');
   assert.equal(result.graph.status, 'failed');
-  assert.equal(result.graph.failure?.outcome, 'execution-failed');
+  assert.equal(result.graph.failure?.outcome, 'provider-unavailable');
   const view = (await service.graphView(context, graph.id))!;
   const healthNode = (view.nodes as { reason: string | null }[])[3]!;
-  assert.match(healthNode.reason ?? '', /deployment.create — execution-failed/, 'the block names its cause');
+  assert.match(healthNode.reason ?? '', /deployment.create — provider-unavailable/, 'the block names its cause');
 
   // Coordinating again invokes nothing twice.
   const again = await service.coordinateGraph(context, graph.id, { probe: grants, autonomous: true });

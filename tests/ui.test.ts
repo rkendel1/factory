@@ -106,7 +106,7 @@ test('authenticated AppPort discovery returns a filtered Factory contribution', 
     assert.deepEqual(body.product, { id: 'software_factory', version: '1.0.0' });
     assert.deepEqual(
       body.surfaces.map(({ id }) => id),
-      ['overview', 'projects', 'actions', 'runs', 'providers', 'evidence', 'settings'],
+      ['overview', 'projects', 'actions', 'runs', 'providers', 'work', 'evidence', 'settings'],
     );
     assert.deepEqual(body.capabilities, ['evidence.write', 'factory.ui.read']);
     assert.deepEqual(seen, ['factory.ui.read']);

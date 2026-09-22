@@ -16,6 +16,8 @@ import {
   runPage,
   runsPage,
   settingsPage,
+  workListPage,
+  workPage,
 } from '../src/product-ui.js';
 import { createRepository, createTempWorkspace } from './helpers.js';
 import { COLLECTIONS } from '../src/felt.js';
@@ -487,6 +489,8 @@ test('every product page script parses as an ES module', async () => {
     ['settings', settingsPage()],
     ['graphs', graphsPage()],
     ['graph', graphPage('graph_example')],
+    ['work-list', workListPage()],
+    ['work', workPage('owk_example')],
   ];
   for (const [name, html] of pages) {
     const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];

@@ -15,7 +15,9 @@ export type NodeStatus =
   | 'running'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  /** The node's external outcome is unknown. It blocks dependents until reality resolves it. */
+  | 'unknown';
 
 export interface PlannedAction {
   /** Request-local name other actions refer to in `dependsOn`. */
@@ -96,13 +98,16 @@ export function orderPlan(actions: readonly PlannedAction[]): { key: string; act
  */
 export function nodeStatus(action: ActionRecord, byId: ReadonlyMap<string, ActionRecord>): NodeStatus {
   if (action.status === 'succeeded') return 'completed';
-  if (action.status === 'running' || action.status === 'authorized') return 'running';
+  if (action.status === 'running' || action.status === 'authorized' || action.status === 'executed' || action.status === 'verifying') return 'running';
   if (action.outcome === 'cancelled') return 'cancelled';
+  if (action.status === 'unknown') return 'unknown';
   if (action.status === 'failed') return 'failed';
 
   const dependencies = (action.dependsOn ?? []).map((id) => byId.get(id));
   if (dependencies.some((dependency) => !dependency)) return 'blocked';
-  if (dependencies.some((dependency) => dependency!.status === 'failed' || dependency!.outcome === 'cancelled')) {
+  // A failed, cancelled or unknown dependency blocks: unknown is not failure,
+  // but nothing that depends on it may proceed until reality says.
+  if (dependencies.some((dependency) => dependency!.status === 'failed' || dependency!.status === 'unknown' || dependency!.outcome === 'cancelled')) {
     return 'blocked';
   }
   if (dependencies.some((dependency) => dependency!.status !== 'succeeded')) return 'blocked';
@@ -114,7 +119,7 @@ export function nodeStatus(action: ActionRecord, byId: ReadonlyMap<string, Actio
 export function blockingDependencies(action: ActionRecord, byId: ReadonlyMap<string, ActionRecord>): string[] {
   return (action.dependsOn ?? []).filter((id) => {
     const dependency = byId.get(id);
-    return !dependency || dependency.status === 'failed' || dependency.outcome === 'cancelled';
+    return !dependency || dependency.status === 'failed' || dependency.status === 'unknown' || dependency.outcome === 'cancelled';
   });
 }
 
@@ -156,6 +161,7 @@ export function graphStatus(graph: ActionGraphRecord, actions: readonly ActionRe
   const statuses = actions.map((action) => nodeStatus(action, byId));
   if (statuses.every((status) => status === 'completed')) return 'completed';
   if (statuses.some((status) => status === 'running')) return 'running';
+  if (statuses.some((status) => status === 'unknown')) return 'unresolved';
   if (statuses.some((status) => status === 'failed' || status === 'cancelled')) return 'failed';
   if (statuses.some((status) => status === 'awaiting-approval')) return 'blocked';
   if (statuses.some((status) => status === 'ready')) return 'ready';

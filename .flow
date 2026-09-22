@@ -316,6 +316,47 @@ app software_factory {
     index status using hash(status)
   }
 
+  collection OperationalWork {
+    project_id: text
+    projectId: ref Project?
+    environmentId: ref Environment?
+    tenantId: text?
+    contract: text
+    origin: json
+    idempotencyKey: text
+    requestFingerprint: text
+    requestedBy: text?
+    intent: text?
+    requested: json?
+    plan: json?
+    graphId: ref ActionGraph?
+    status: text
+    createdAt: datetime?
+    updatedAt: datetime?
+    completedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+    index status using hash(status)
+  }
+
+  collection OperationalWorkEvent {
+    workId: ref OperationalWork
+    tenantId: text?
+    type: text
+    status: text
+    outcome: text?
+    origin: json?
+    graphId: ref ActionGraph?
+    summary: json?
+    createdAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index workId using hash(workId)
+    index type using hash(type)
+  }
+
   capability FactoryApplicationAccess {
     visibility internal
     application factory
@@ -387,7 +428,7 @@ app software_factory {
     provider git
     operational_capability repository.checkout
     execution_mode native
-    command ["git","status","--short","--branch"]
+    command ["git","rev-parse","--verify","HEAD"]
     timeoutMs 30000
     grant repository.read
     grant evidence.write
@@ -511,6 +552,16 @@ app software_factory {
     appport_service github
     appport_capability github.pull_request.merge
     jev bounded
+  }
+
+  policy OperationalWork {
+    read: authenticated
+    write: none
+  }
+
+  policy OperationalWorkEvent {
+    read: authenticated
+    write: none
   }
 
   policy ActionGraph {

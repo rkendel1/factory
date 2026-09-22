@@ -4,6 +4,8 @@ import { AuthBoundryAuthorizationError, type AuthenticatedContext, type Authenti
 import { DomainValidationError } from './domain.js';
 import { IntervalError } from './reconciliation.js';
 import type { ProjectRecord } from './types.js';
+import { isRequest, type AppErrorObject } from '@appport/protocol';
+import { OPERATIONAL_WORK_CAPABILITY, OPERATIONAL_WORK_CAPABILITY_VERSION } from './operational-work.js';
 
 /**
  * Capabilities the product surface asks AuthBoundry for.
@@ -61,6 +63,26 @@ function projectStatus(value: unknown): ProjectRecord['status'] {
     throw new DomainValidationError(`status must be one of ${PROJECT_STATUSES.join(', ')}`);
   }
   return status as ProjectRecord['status'];
+}
+
+/** AppPort error codes carried on HTTP keep their meaning as status codes. */
+function appPortErrorStatus(error: AppErrorObject): number {
+  switch (error.code) {
+    case 'INVALID_INPUT':
+    case 'INVALID_REQUEST':
+    case 'INVALID_PROTOCOL':
+    case 'UNSUPPORTED_VERSION':
+    case 'UNSUPPORTED_CAPABILITY_VERSION': return 400;
+    case 'UNAUTHORIZED': return 401;
+    case 'FORBIDDEN': return 403;
+    case 'NOT_FOUND':
+    case 'UNKNOWN_CAPABILITY': return 404;
+    case 'CONFLICT': return 409;
+    case 'PAYLOAD_TOO_LARGE': return 413;
+    case 'RATE_LIMITED': return 429;
+    case 'TIMEOUT': return 504;
+    default: return 500;
+  }
 }
 
 const RECONCILIATION_PATH = /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reconciliation$/;
@@ -446,6 +468,23 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
   },
   {
     method: 'POST',
+    pattern: /^\/v1\/actions\/([^/]+)\/cancel$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      return json(200, await service.cancelAction(context, params[0]!));
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/actions\/([^/]+)\/resolve$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      // Ask reality about an unknown outcome. Never repeats the operation.
+      return json(200, await service.resolveUncertainAction(context, params[0]!));
+    },
+  },
+  {
+    method: 'POST',
     pattern: /^\/v1\/actions\/([^/]+)\/retry$/,
     capability: PRODUCT_CAPABILITIES.execute,
     async handle({ service, context, params }) {
@@ -476,6 +515,67 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     async handle({ service, context, params }) {
       const provider = (await service.operationalProviders(context)).find((entry) => entry.id === params[0]);
       return provider ? json(200, { provider: provider.id, capabilities: provider.capabilities }) : json(404, { error: 'Provider not found' });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/operational-work$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, url }) {
+      const projectId = url.searchParams.get('projectId') ?? undefined;
+      return json(200, { work: await service.listOperationalWork(context, projectId) });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/operational-work$/,
+    // Requesting operational work is asking Factory to execute; the caller
+    // needs the execute capability, and every node still asks AuthBoundry.
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, body, probe }) {
+      /*
+       * The contract travels as an AppPort request envelope, answered with an
+       * AppPort response envelope. A bare contract body is accepted too and
+       * answered with the same result, so a caller without an AppPort client
+       * still speaks the one contract.
+       */
+      if (isRequest(body)) {
+        if (body.capability.name !== OPERATIONAL_WORK_CAPABILITY) {
+          throw new DomainValidationError(`this route serves ${OPERATIONAL_WORK_CAPABILITY}@${OPERATIONAL_WORK_CAPABILITY_VERSION}, not ${body.capability.name}`);
+        }
+        const response = await service.handleOperationalWorkEnvelope(context, body, probe);
+        return json(response.ok ? 200 : appPortErrorStatus(response.error), response);
+      }
+      const { created, result } = await service.createOperationalWork(context, body, probe);
+      return json(created ? 201 : 200, result);
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/operational-work\/([^/]+)$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const result = await service.operationalWorkView(context, params[0]!);
+      return result ? json(200, result) : json(404, { error: 'Operational work not found' });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/operational-work\/([^/]+)\/events$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const result = await service.operationalWorkView(context, params[0]!);
+      if (!result) return json(404, { error: 'Operational work not found' });
+      return json(200, { workId: result.workId, events: await service.operationalWorkEvents(context, params[0]!) });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/operational-work\/([^/]+)\/cancel$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      const result = await service.cancelOperationalWork(context, params[0]!);
+      return result ? json(200, result) : json(404, { error: 'Operational work not found' });
     },
   },
   {

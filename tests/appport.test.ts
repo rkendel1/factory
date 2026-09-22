@@ -31,6 +31,7 @@ test('AppPort SDK is the canonical Factory protocol contract', () => {
     'softwarefactory.flydeploymentcreate',
     'softwarefactory.flyenvironmenthealth',
     'softwarefactory.flyenvironmentinspect',
+    'softwarefactory.operationalwork',
     'softwarefactory.pullrequestmerge',
     'softwarefactory.repoecho',
     'softwarefactory.repositorieslist',

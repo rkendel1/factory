@@ -137,6 +137,11 @@ a repository, an authority and a provider is not arbitrary caller input.
 
 ## Operational capabilities and provider adapters
 
+How an Action actually crosses the provider boundary — preflight, credential
+resolution, the structured provider result, verification against reality and
+the runtime configuration per provider — is described in
+[real-execution.md](real-execution.md).
+
 An Action names what Factory needs done; a provider adapter knows how to do it
 on one external system. Keeping the two apart is what lets the same graph
 deploy to a different provider without a different coordination model.
@@ -249,7 +254,77 @@ never as database access.
 | `GET /v1/action-graphs/:id` | The graph with its nodes' derived statuses |
 | `POST /v1/action-graphs/:id/run` | Begin coordinating; every node is still authorized on its own |
 | `POST /v1/action-graphs/:id/cancel` | Stop coordinating; history is kept |
-| `POST /v1/actions/:id/retry` | Explicit retry of a failed node |
+| `POST /v1/actions/:id/retry` | Explicit retry of a failed node, or of an unknown one only when a repeat is known to be safe |
+| `POST /v1/actions/:id/resolve` | Ask reality about an unknown outcome; never repeats the operation |
+| `POST /v1/actions/:id/cancel` | Cancel, recording what was actually cancelled and never implying an effect was reversed |
+
+## Requested work: the Attn ↔ Factory contract
+
+Attn owns attention, goals and development work. Factory owns operational work.
+The boundary between them is an explicit, versioned contract —
+`factory.operational-work/1` — carried as an AppPort capability
+(`softwarefactory.operationalwork@1`) with a typed input and output. There is
+no Attn-specific transport, no shared database, and no reading of the other
+system's state in either direction.
+
+**A request names operational verbs.** `inspect`, `build`, `test`, `migrate`,
+`deploy`, `restart`, `verify` — and nothing else. A development verb
+(`implement`, `fix`, `refactor`, …) is refused with a reason, not
+reinterpreted, and so are development instructions, credentials wherever they
+sit, and anything that would carry authority (`approvedBy`, `autonomous`,
+`capabilities`, …). Validation is pure: the same request is accepted or refused
+the same way everywhere.
+
+**The origin is provenance, never permission.** A request carries
+`origin: { system, type, id }`. Factory records it on the work and on the
+graph so a reader can say "this exists because Attn asked", and never
+dereferences it. Whether each step may run is AuthBoundry's answer, asked per
+Action at execution time, exactly as for any graph. `approvedBy: attn` is not
+an approval.
+
+**Factory translates; it does not plan.** Requested verbs become Factory's own
+Action Graph of ordinary Actions in the operational vocabulary
+(`build.run`, `deployment.create`, `environment.health`, …). Enrichment comes
+from fixed operational rules — a `deploy` implies `build` and `test` before it
+and `verify` (environment health) after it; a `restart` implies `verify` — and
+implied steps are marked as such. No model decides the plan.
+
+**The same origin and key always name the same work.** An `idempotencyKey` is
+required. Tenant, origin and key derive the work's identity, and the work
+derives its graph's identity, so a retried request — from the caller, or from
+Factory after a restart between steps — finds what already exists and returns
+the same identifiers rather than creating anything twice. A reused key with a
+different request is a conflict.
+
+**The result is compact.** `{ workId, origin, status, outcome, graphId,
+actions, completedActions, blockedActions, failedActions, evidence }`, with
+statuses `accepted → planning → ready → running → blocked | unresolved |
+completed | failed | cancelled` derived from the graph. `unresolved` means a
+step's external outcome is unknown and Factory is verifying reality before
+anything is retried; it is never collapsed into failure. Outcomes stay distinct — `succeeded`,
+`autonomy-denied`, `authority-unavailable`, `execution-failed`,
+`verification-failed`, `provider-unavailable`, `cancelled`. Each step points at
+Factory's Run and Evidence; nothing is duplicated into the work record.
+
+**Transitions are durable events.** `OperationalWorkAccepted`, `…Planned`,
+`…Completed`, `…Failed`, `…Blocked`, `…Cancelled` are written to FeltDB once
+per transition and carry identifiers and outcomes only: no command, no log, no
+credential.
+
+### Operational work API
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/operational-work` | Accept work. An AppPort request envelope for `softwarefactory.operationalwork@1` is answered with an AppPort response envelope; a bare contract body is answered with the result |
+| `GET /v1/operational-work` | Work Factory has been asked for |
+| `GET /v1/operational-work/:id` | The current result, derived from the graph |
+| `GET /v1/operational-work/:id/events` | Durable transition events |
+| `POST /v1/operational-work/:id/cancel` | Stop coordinating; steps that never ran stay that way |
+
+Requesting work needs the execute capability (`factory.run`); each node then
+asks AuthBoundry for `factory.action.autonomous` on its own. A tenant cannot
+see, cancel or request work against another tenant's project, and an
+environment belongs to exactly one project.
 
 ## What waits for a person
 
@@ -289,6 +364,7 @@ Providers page shows is one an Action could actually be authorized for.
 | `/factory/actions/:id` | Intent, plan, authority, execution, verification, evidence |
 | `/factory/runs/:id` | The lifecycle phases; logs are supporting detail, folded away |
 | `/factory/providers` | Providers, connection state, capabilities, what they operate on |
+| `/factory/work` | Work other systems asked for: origin, status, outcome, steps, history |
 | `/factory/settings` | The authority association and links to infrastructure |
 
 The Overview reports the association state — `associated`, `unassociated`,

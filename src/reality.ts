@@ -6,6 +6,7 @@ import type {
   RepositoryRecord,
   RunRecord,
   StructuredEvidence,
+  VerificationCheck,
 } from './types.js';
 
 /**
@@ -110,8 +111,10 @@ export function compareReality(input: {
       'repository head and the evidence of the last reconciling run'),
     compare('deployment', 'Deployment', desiredDeployment, current?.deployment ?? null,
       'desired state and environment configuration'),
+    // Health that was never probed is unobserved, not unhealthy.
     compare('health', 'Health', desiredState?.healthRequirement ? 'healthy' : null,
-      current?.health ?? null, 'desired state and the last run evidence'),
+      current?.health && current.health !== 'unknown' ? current.health : null,
+      'desired state and the health probe of the last reconciling run'),
     compare('provider', 'Provider', desiredProvider, current?.provider ?? null,
       'desired state and the environment record'),
   ];
@@ -184,17 +187,24 @@ export function reconciledState(input: {
   run: RunRecord;
   evidence: StructuredEvidence | null;
   desiredState: DesiredStateRecord | null;
+  /** The Action's verification, so health comes from a probe that actually ran. */
+  verification?: readonly VerificationCheck[];
 }): EnvironmentCurrentState {
   const { run, evidence, desiredState } = input;
+  const observedCommit = evidence?.providerResult?.observed.revision ?? evidence?.revision?.observed ?? evidence?.repository?.commit;
+  const probe = input.verification?.find((check) => check.name === 'environment responds healthy');
+  const health: EnvironmentCurrentState['health'] = evidence?.providerResult?.observed.health
+    ?? (probe?.status === 'passed' ? 'healthy' : probe?.status === 'failed' ? 'unhealthy' : UNKNOWN as 'unknown');
   return {
     observedAt: run.completedAt ?? new Date().toISOString(),
-    ...(evidence?.repository?.commit ? { sourceCommit: evidence.repository.commit } : {}),
+    // Only a revision the operation itself reported. Never the requested one.
+    ...(observedCommit ? { sourceCommit: observedCommit } : {}),
     ...(run.repository?.ref ? { sourceBranch: run.repository.ref } : {}),
     ...(desiredState?.targetProvider ?? input.environment.provider
       ? { provider: desiredState?.targetProvider ?? input.environment.provider! }
       : {}),
     deployment: desiredState?.deploymentEnabled === false ? 'disabled' : 'enabled',
-    health: evidence?.finalResult === 'PASS' ? 'healthy' : evidence ? 'unhealthy' : UNKNOWN as 'unknown',
+    health,
     reconciledRunId: run.id,
     ...(evidence ? { reconciledEvidenceId: evidence.id } : {}),
   };
