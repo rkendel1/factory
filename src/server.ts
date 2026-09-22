@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { loadFactoryFlow, createFactoryDB, COLLECTIONS } from './felt.js';
 import { authorizeExecution, getOperationAuthorities } from './authority.js';
 import { buildFailureEvidence } from './evidence.js';
-import { executeContract, verifyPax, type ExecutionHandle } from './execution.js';
+import { CredentialUnavailableError, executeContract, processCredentialResolver, SpawnFailedError, verifyPax, type CredentialResolver, type ExecutionHandle } from './execution.js';
 import { assertContractIntegrity } from './contract.js';
 import {
   createFactoryBrowserAdapter,
@@ -43,14 +43,17 @@ import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
 import { createReconciliationScheduler, type SchedulerHandle } from './scheduler.js';
 import {
+  interpretOperation,
   planOperation,
   providerExecution,
   ProviderRegistry,
   resolveProvider,
   verifyOperation,
   type ProviderContext,
+  type ProviderResolution,
+  type ResourceBinding,
 } from './adapters.js';
-import { isOperationalCapability, REQUIRED_VERIFICATION } from './capabilities.js';
+import { capabilityResourceKind, isOperationalCapability, OPERATIONAL_CAPABILITIES, REQUIRED_VERIFICATION, type OperationalCapability } from './capabilities.js';
 import {
   blockingDependencies,
   graphStatus,
@@ -116,6 +119,7 @@ import {
   validateDeploymentConfig,
 } from './bootstrap.js';
 import type {
+  ActionFailurePhase,
   ActionGraphOrigin,
   ActionGraphRecord,
   OperationalWorkRecord,
@@ -123,6 +127,7 @@ import type {
   ActionOutcome,
   ActionRecord,
   ProviderExecution,
+  ProviderExecutionResult,
   AuthorityContextRecord,
   AutonomyDecision,
   ReconciliationOutcome,
@@ -267,6 +272,8 @@ export class FactoryService {
   private readonly association: FactoryAssociation;
   private readonly domain: FactoryDomain;
   private readonly registry: ProviderRegistry;
+  /** Resolves credential values by name, inside the execution boundary only. */
+  private readonly credentialResolver: CredentialResolver;
   private readonly controlPlane: AuthBoundryControlPlane | null;
   /**
    * The AppPort runtime for capabilities other systems call on Factory. Attn
@@ -317,6 +324,7 @@ export class FactoryService {
       builtins: false,
     });
     this.registry = new ProviderRegistry(this.flowSpec, config.providerAdapters);
+    this.credentialResolver = config.credentialResolver ?? processCredentialResolver;
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
         && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
@@ -546,6 +554,7 @@ export class FactoryService {
     projectId: string,
     environmentId: string,
     runId: string,
+    verification: readonly VerificationCheck[] = [],
   ): Promise<void> {
     const environment = await this.domain.getEnvironment(tenantId, projectId, environmentId);
     const run = await this.domain.getRun(tenantId, runId);
@@ -556,6 +565,7 @@ export class FactoryService {
       run,
       evidence: evidence ?? null,
       desiredState: await this.domain.getDesiredState(tenantId, projectId),
+      verification,
     }));
   }
 
@@ -727,8 +737,18 @@ export class FactoryService {
     };
 
     if (executed.status === 'succeeded') {
-      explanation.push(`${environment.name} reconciled to the declared state.`);
-      return finish('executed', base);
+      /*
+       * Completion is not convergence. Reality is observed again, from the
+       * state the run's verification recorded, and only a comparison that
+       * finds no drift lets the pass say the environment was reconciled.
+       */
+      const after = (await this.observeReality(context, projectId)).find((report) => report.environmentId === environmentId);
+      if (after?.status === 'reconciled') {
+        explanation.push(`${environment.name} re-observed after execution: it matches the declared state.`);
+        return finish('executed', base);
+      }
+      explanation.push(`${environment.name} re-observed after execution: ${after?.explanation.join(' ') ?? 'it could not be observed'}`);
+      return finish('drift-detected', base);
     }
     if (run && run.status !== 'completed') {
       explanation.push(`Execution failed: ${run.error ?? 'the run did not complete'}.`);
@@ -1421,8 +1441,11 @@ export class FactoryService {
     const actions = tenantId ? await this.domain.listActions(tenantId) : [];
 
     return Promise.all(this.registry.adapters.map(async (adapter) => {
-      const capabilities = this.registry.capabilitiesOf(adapter.id);
+      const declared = this.registry.capabilitiesOf(adapter.id);
+      const unimplemented = this.registry.unimplementedOf(adapter.id);
       const availability = await adapter.availability();
+      const availabilityOf = new Map<string, { state: 'available' | 'unavailable'; detail: string }>();
+      for (const capability of adapter.capabilities) availabilityOf.set(capability, await adapter.availability(capability));
       const projects = environments
         .filter(({ environments: list, desiredState }) =>
           list.some((environment) => environment.provider === adapter.id) || desiredState?.targetProvider === adapter.id)
@@ -1432,24 +1455,69 @@ export class FactoryService {
           environments: list.filter((environment) => environment.provider === adapter.id).map((environment) => environment.name),
         }));
       const recent = actions.filter((action) => action.provider === adapter.id).slice(0, 10);
-      return {
-        id: adapter.id,
-        name: adapter.displayName,
-        status: capabilities.length === 0 ? 'unsupported' : availability.state,
-        detail: capabilities.length === 0 ? 'no .flow operation declares a capability for this provider' : availability.detail,
-        configured: projects.length > 0,
-        credentials: [...adapter.credentials],
-        note: 'configured and available describe reachability; authorization is decided per Action by AuthBoundry',
-        capabilities: capabilities.map((entry) => ({
+      // Presence by name. Values are never read here.
+      const credentials = Object.fromEntries(adapter.credentials.map((name) => [name, Boolean(this.credentialResolver(name))]));
+      const credentialsPresent = Object.values(credentials).every(Boolean);
+      const configured = projects.length > 0 || adapter.credentials.length === 0 && declared.length > 0
+        && declared.every((entry) => capabilityResourceKind(entry.capability) === 'repository');
+      const status = declared.length === 0 ? 'unsupported' : availability.state;
+
+      /*
+       * Honest per-capability status. `executable` is true only when every
+       * requirement holds from this process: implemented by the adapter,
+       * declared by .flow, the mechanism reachable, credentials present, and
+       * something configured to run it against. None of it is authorization.
+       */
+      const describe = (entry: { capability: OperationalCapability; operation: string | null; authority?: { capabilities: string[] } }, implemented: boolean) => {
+        const declaredHere = entry.operation !== null;
+        const reachable = availabilityOf.get(entry.capability) ?? availability;
+        const reasons = [
+          ...(implemented ? [] : [`the ${adapter.id} adapter does not implement ${entry.capability}`]),
+          ...(declaredHere ? [] : [`no .flow operation declares ${entry.capability} for ${adapter.id}`]),
+          ...(reachable.state === 'available' ? [] : [reachable.detail]),
+          ...(credentialsPresent ? [] : [`credential ${Object.entries(credentials).filter(([, present]) => !present).map(([name]) => name).join(', ')} is not configured`]),
+          ...(configured || capabilityResourceKind(entry.capability) === 'repository' ? [] : [`no environment or desired state names ${adapter.id}`]),
+        ];
+        return {
           capability: entry.capability,
           operation: entry.operation,
-          requiredAuthority: [...entry.authority.capabilities],
+          implementation: implemented,
+          declared: declaredHere,
+          available: reachable.state === 'available',
+          availability: reachable.detail,
+          credential: credentialsPresent,
+          configuration: configured || capabilityResourceKind(entry.capability) === 'repository',
+          executable: reasons.length === 0,
+          reasons,
+          requiredAuthority: entry.authority ? [...entry.authority.capabilities] : [],
           verificationRequires: REQUIRED_VERIFICATION[entry.capability] ?? null,
-          idempotency: adapter.idempotency(entry.capability),
+          idempotency: implemented ? adapter.idempotency(entry.capability) : null,
           recent: recent.filter((action) => action.capability === entry.capability).map((action) => ({
             id: action.id, status: action.status, outcome: action.outcome ?? null, updatedAt: action.updatedAt,
           })),
-        })),
+        };
+      };
+      const implementedOnly = adapter.capabilities
+        .filter((capability) => !declared.some((entry) => entry.capability === capability))
+        .map((capability) => ({ capability, operation: null }));
+
+      return {
+        id: adapter.id,
+        name: adapter.displayName,
+        status,
+        detail: declared.length === 0 ? 'no .flow operation declares a capability this adapter implements' : availability.detail,
+        configured,
+        credentials: [...adapter.credentials],
+        credentialsPresent: credentials,
+        executable: status === 'available' && credentialsPresent && declared.length > 0,
+        note: 'implemented, declared, available, credential and configuration describe whether Factory can reach the provider; authorization is decided per Action by AuthBoundry',
+        capabilities: [
+          ...declared.map((entry) => describe(entry, true)),
+          ...unimplemented.map((entry) => describe(entry, false)),
+          ...implementedOnly.map((entry) => describe(entry, true)),
+        ],
+        vocabulary: OPERATIONAL_CAPABILITIES.filter((capability) =>
+          !adapter.capabilities.includes(capability) && !declared.some((entry) => entry.capability === capability)),
         projects,
         recentActions: recent.map((action) => ({
           id: action.id, capability: action.capability ?? null, resource: action.resource ?? null,
@@ -1555,8 +1623,11 @@ export class FactoryService {
     } else {
       const authority = authorities.get(operation);
       if (authority?.provider && isOperationalCapability(authority.operationalCapability)) {
+        // An operation names its own provider in .flow. It gains provider
+        // execution only when that provider implements the capability; it is
+        // never re-homed to another provider that happens to.
         resolved = resolveProvider(this.registry, authority.operationalCapability, providerContext);
-        if (!resolved.ok) resolved = null;
+        if (!resolved.ok || resolved.provider !== authority.provider || resolved.operation !== operation) resolved = null;
       }
     }
     const providerPlan = resolved?.ok ? planOperation(this.registry, resolved, providerContext) : null;
@@ -1641,11 +1712,17 @@ export class FactoryService {
     const tenantId = context.tenant;
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
-    if (action.status === 'running') return action;
-    // A finished Action is finished. Running it again would reach the provider
-    // boundary a second time; a failed one comes back only through an explicit
-    // retry, which returns it to planned first.
+    /*
+     * Terminal and in-flight Actions stop here, before anything below runs.
+     * A finished Action is finished: running it again would reach the
+     * provider boundary a second time, and a failed one comes back only
+     * through an explicit retry, which returns it to planned first. A
+     * cancelled one never runs.
+     */
+    if (action.status === 'running' || action.status === 'authorized'
+      || action.status === 'executed' || action.status === 'verifying') return action;
     if (action.status === 'succeeded' || action.status === 'failed') return action;
+    if (action.outcome === 'cancelled') return action;
 
     /*
      * The authority is asked again here rather than trusting the answer stored
@@ -1672,17 +1749,6 @@ export class FactoryService {
       ...(options.autonomous ? {} : { approvedBy: context.principal }),
     });
 
-    const authority = this.authorityContext(context);
-    if (!authority) {
-      const reason = this.connection.status === 'associated'
-        ? `AuthBoundry authorized no application context for ${context.principal}`
-        : this.connection.reason;
-      return await this.domain.patchAction(tenantId, actionId, {
-        status: 'failed',
-        verification: [{ name: 'authority', status: 'failed', detail: reason }],
-      }) ?? action;
-    }
-
     const repositories = await this.domain.listRepositories(tenantId, action.projectId);
     const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
     const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId)
@@ -1690,32 +1756,88 @@ export class FactoryService {
     if (!repository) {
       throw new DomainValidationError(`project ${action.projectId} has no repository to act on`);
     }
-
-    await this.domain.patchAction(tenantId, actionId, { status: 'authorized', authority });
-
-    const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
-    await this.domain.patchAction(tenantId, actionId, { status: 'running' });
+    const requestedAt = new Date().toISOString();
+    const idempotencyKey = action.retries ? `${action.id}:retry:${action.retries}` : action.id;
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState, idempotencyKey);
 
     /*
-     * Only now, after AuthBoundry has answered, does the provider adapter get
-     * asked for what to run. The adapter hands over parameters and credential
-     * names; the execution boundary resolves the values at spawn time.
+     * Execution preflight. Every check is deterministic, every check is
+     * recorded on the Action, and the provider is reached only after all of
+     * them passed. A failure here is a durable, specific outcome — never a
+     * provider side effect and never a generic error.
      */
-    const providerContext = await this.providerContext(tenantId, action, repository, desiredState,
-      action.retries ? `${action.id}:retry:${action.retries}` : action.id);
-    let execution: ProviderExecution | undefined;
-    if (action.provider && isOperationalCapability(action.capability)) {
-      const resolution = resolveProvider(this.registry, action.capability, providerContext);
-      if (!resolution.ok || resolution.provider !== action.provider) {
-        return await this.domain.patchAction(tenantId, actionId, {
-          status: 'failed',
-          outcome: 'provider-unavailable',
-          verification: [{ name: 'provider', status: 'failed', detail: resolution.ok
-            ? `provider ${action.provider} is no longer the configured provider` : resolution.reason }],
-        }) ?? action;
+    const checks: VerificationCheck[] = [];
+    const failPreflight = async (outcome: ActionOutcome, reason: string, phase: ActionFailurePhase = 'preflight') => {
+      const name = phase === 'preflight' ? outcome : phase;
+      checks.push({ name, status: 'failed', detail: reason });
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed',
+        outcome,
+        failure: { phase, outcome, reason },
+        preflight: { checks, failedAt: new Date().toISOString() },
+        execution: { requestedAt },
+        verification: [{ name, status: 'failed', detail: reason }],
+      })) ?? action;
+    };
+
+    let resolution: Extract<ProviderResolution, { ok: true }> | null = null;
+    let binding: Extract<ResourceBinding, { ok: true }> | null = null;
+    if (action.capability) {
+      if (!isOperationalCapability(action.capability) || this.registry.providersFor(action.capability).length === 0) {
+        return failPreflight('capability-unavailable', `${action.capability} is not a capability Factory can perform`);
       }
-      execution = providerExecution(this.registry, resolution, providerContext);
+      checks.push({ name: 'capability supported', status: 'passed', detail: `${action.capability} is declared by .flow and implemented by an adapter` });
+      const resolved = resolveProvider(this.registry, action.capability, providerContext);
+      if (!resolved.ok) return failPreflight(resolved.outcome, resolved.reason);
+      if (resolved.provider !== action.provider) {
+        return failPreflight('provider-unavailable', `provider ${action.provider} is no longer the configured provider; ${resolved.provider} is`);
+      }
+      checks.push({ name: 'provider resolved', status: 'passed', detail: `${resolved.provider} performs ${resolved.capability} as ${resolved.operation}` });
+      const adapter = this.registry.adapter(resolved.provider)!;
+      const availability = await adapter.availability(resolved.capability);
+      if (availability.state !== 'available') return failPreflight('provider-unavailable', availability.detail);
+      checks.push({ name: 'provider available', status: 'passed', detail: availability.detail });
+      const bound = adapter.resource(resolved.capability, providerContext);
+      if (!bound.ok) return failPreflight('resource-unavailable', bound.reason);
+      checks.push({ name: 'resource bound', status: 'passed', detail: `${resolved.resource} → ${bound.id} (${bound.detail})` });
+      checks.push({
+        name: 'configuration present',
+        status: 'passed',
+        detail: Object.keys(bound.parameters).length ? Object.keys(bound.parameters).sort().join(', ') : 'no parameters required',
+      });
+      // Presence by name only. The value is read inside the boundary, later.
+      const missing = adapter.credentials.filter((name) => !this.credentialResolver(name));
+      if (missing.length > 0) {
+        return failPreflight('credential-unavailable', `credential ${missing.join(', ')} is not available to the execution boundary`);
+      }
+      checks.push({
+        name: 'credentials available',
+        status: 'passed',
+        detail: adapter.credentials.length ? `${adapter.credentials.join(', ')} present (names only)` : 'none required',
+      });
+      resolution = resolved;
+      binding = bound;
+    } else {
+      checks.push({ name: 'capability supported', status: 'skipped', detail: `${action.operation ?? action.type} is a declared .flow operation rather than a provider capability` });
     }
+
+    const authority = this.authorityContext(context);
+    if (!authority) {
+      const reason = this.connection.status === 'associated'
+        ? `AuthBoundry authorized no application context for ${context.principal}`
+        : this.connection.reason;
+      return failPreflight('authority-unavailable', reason, 'authority');
+    }
+    checks.push({ name: 'authority available', status: 'passed', detail: `${authority.application ?? 'application'} via ${authority.delegation ?? 'claim'}` });
+    await this.domain.patchAction(tenantId, actionId, {
+      status: 'authorized',
+      authority,
+      preflight: { checks, passedAt: new Date().toISOString() },
+      execution: { requestedAt },
+    });
+
+    const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
+    const execution = resolution && binding ? providerExecution(this.registry, resolution, providerContext, binding) : undefined;
 
     const run = await this.startRun({
       workId: work.id,
@@ -1727,8 +1849,14 @@ export class FactoryService {
       },
       operation: action.operation ?? action.type,
       // A retried Action is admitted as a new Run; the earlier Run is history.
-      ...(action.retries ? { idempotencyKey: `${action.id}:retry:${action.retries}` } : {}),
-    }, context, execution);
+      ...(action.retries ? { idempotencyKey } : {}),
+    }, context, execution, {
+      // The Run is on the Action as soon as it exists, so a cancel request
+      // made while the provider is working finds the process to stop.
+      onAdmitted: async (admitted) => {
+        await this.domain.patchAction(tenantId, actionId, { status: 'running', runId: admitted.id });
+      },
+    });
 
     await this.patchRun(run.id, {
       actionId: action.id,
@@ -1740,40 +1868,163 @@ export class FactoryService {
     });
 
     const settled = await this.getRun(run.id, context);
-    const verification = await this.verifyRun(settled?.id ?? run.id, desiredState?.healthRequirement);
-    // The adapter reads the operation's result back; Factory keeps the verdict.
-    const evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(run.id);
-    if (evidenceRecord && settled?.status === 'completed') {
-      verification.push(...verifyOperation(this.registry, action, evidenceRecord, providerContext));
+    const current = (await this.domain.getAction(tenantId, actionId)) ?? action;
+    const cancelRequestedAt = current.execution?.cancelRequestedAt;
+    let evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(run.id);
+
+    // Authorization refused: nothing ran, and the Run says why.
+    if (settled?.status === 'failed' && !evidenceRecord) {
+      const reason = settled.error ?? 'AuthBoundry did not authorize the execution';
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed',
+        outcome: 'execution-failed',
+        failure: { phase: 'authorization', outcome: 'execution-failed', reason },
+        runId: run.id,
+        authority: { ...authority, ...(settled.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}) },
+        verification: [{ name: 'authorization', status: 'failed', detail: reason }],
+        execution: { requestedAt, ...(cancelRequestedAt ? { cancelRequestedAt } : {}) },
+      })) ?? action;
     }
-    const succeeded = settled?.status === 'completed'
-      && verification.every((check) => check.status !== 'failed');
+
+    if (settled?.status === 'completed') {
+      await this.domain.patchAction(tenantId, actionId, { status: 'executed' });
+    }
+
+    /*
+     * The adapter reads the provider's answer back into a structured result,
+     * which is recorded on the evidence; then verification asks reality. Both
+     * read the durable evidence, so a later reader sees what verification saw.
+     */
+    let providerResult: ProviderExecutionResult | null = null;
+    if (evidenceRecord && action.provider && isOperationalCapability(action.capability)) {
+      providerResult = interpretOperation(this.registry, action, evidenceRecord, providerContext);
+      if (providerResult) {
+        evidenceRecord = { ...evidenceRecord, providerResult };
+        await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidenceRecord, evidenceRecord.id);
+      }
+    }
+    await this.domain.patchAction(tenantId, actionId, { status: 'verifying' });
+    const operationChecks = evidenceRecord && settled?.status === 'completed'
+      ? await verifyOperation(this.registry, action, evidenceRecord, providerContext)
+      : [];
+    const verification = await this.verifyRun(run.id, desiredState?.healthRequirement, operationChecks);
+    verification.push(...operationChecks);
+
+    const persisted = await this.getRun(run.id, context);
+    const cancelled = persisted?.status === 'cancelled' || evidenceRecord?.status === 'cancelled' || Boolean(cancelRequestedAt && persisted?.status !== 'completed');
+    const failedChecks = verification.filter((check) => check.status === 'failed');
+    const unverified = operationChecks.filter((check) => check.status === 'skipped');
+    const succeeded = !cancelled && persisted?.status === 'completed' && failedChecks.length === 0 && unverified.length === 0;
 
     if (succeeded && action.environmentId) {
-      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, run.id);
+      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, run.id, verification);
     }
 
-    const outcome: ActionOutcome = succeeded
-      ? 'succeeded'
-      : settled?.status === 'completed' ? 'verification-failed' : 'execution-failed';
+    let outcome: ActionOutcome;
+    let failure: ActionRecord['failure'];
+    if (cancelled) {
+      outcome = 'cancelled';
+      failure = { phase: 'execution', outcome, reason: persisted?.error ?? 'cancelled before the operation completed' };
+    } else if (succeeded) {
+      outcome = 'succeeded';
+    } else if (persisted?.status === 'completed') {
+      outcome = failedChecks.length ? 'verification-failed' : 'verification-unavailable';
+      failure = { phase: 'verification', outcome, reason: (failedChecks[0] ?? unverified[0])?.detail ?? 'verification did not establish the required state' };
+    } else if (evidenceRecord?.execution?.terminationReason === 'spawn-failed') {
+      outcome = 'provider-unavailable';
+      failure = { phase: 'provider', outcome, reason: evidenceRecord.stderr.trim() || 'the provider mechanism could not be started' };
+    } else if (providerResult?.status === 'rejected') {
+      outcome = 'execution-failed';
+      failure = { phase: 'provider', outcome, reason: providerResult.summary };
+    } else {
+      outcome = 'execution-failed';
+      const reason = evidenceRecord?.execution?.terminationReason === 'timeout'
+        ? `timed out after ${evidenceRecord.execution.timeoutMs}ms`
+        : persisted?.error?.trim() || providerResult?.summary || 'the operation did not complete';
+      failure = { phase: 'execution', outcome, reason: reason.split('\n').pop()!.slice(0, 500) };
+    }
 
-    return await this.domain.patchAction(tenantId, actionId, {
+    return (await this.domain.patchAction(tenantId, actionId, {
       status: succeeded ? 'succeeded' : 'failed',
       outcome,
+      ...(failure ? { failure } : {}),
       runId: run.id,
       authority: {
         ...authority,
-        ...(settled?.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}),
+        ...(persisted?.authorizationDecisionId ? { authorizationDecisionId: persisted.authorizationDecisionId } : {}),
       },
       verification,
-    }) ?? action;
+      execution: {
+        requestedAt,
+        ...(evidenceRecord ? {
+          startedAt: evidenceRecord.startedAt,
+          completedAt: evidenceRecord.completedAt,
+          durationMs: evidenceRecord.durationMs,
+          exitCode: evidenceRecord.exitCode,
+          ...(evidenceRecord.execution?.terminationReason ? { terminationReason: evidenceRecord.execution.terminationReason } : {}),
+        } : {}),
+        ...(providerResult ? {
+          providerStatus: providerResult.status,
+          providerOperationId: providerResult.providerOperationId,
+          ...(providerResult.observed.revision ? { observedRevision: providerResult.observed.revision } : {}),
+        } : {}),
+        ...(cancelRequestedAt ? { cancelRequestedAt } : {}),
+      },
+    })) ?? action;
+  }
+
+  /**
+   * Stop an Action.
+   *
+   * A planned Action is marked cancelled and never runs. A running one has its
+   * process stopped through the Run it is on, and its outcome is `cancelled`
+   * however the provider answers afterwards.
+   */
+  async cancelAction(context: AuthenticatedContext, actionId: string): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const action = await this.domain.getAction(tenantId, actionId);
+    if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
+    if (action.status === 'succeeded' || action.status === 'failed' || action.outcome === 'cancelled') return action;
+    if (action.status === 'planned' || action.status === 'awaiting-approval') {
+      return (await this.domain.patchAction(tenantId, actionId, {
+        outcome: 'cancelled',
+        failure: { phase: 'preflight', outcome: 'cancelled', reason: `cancelled by ${context.principal} before it ran` },
+      })) ?? action;
+    }
+    const requestedAt = new Date().toISOString();
+    const patched = (await this.domain.patchAction(tenantId, actionId, {
+      execution: { requestedAt: action.execution?.requestedAt ?? requestedAt, ...action.execution, cancelRequestedAt: requestedAt },
+    })) ?? action;
+    if (action.runId) await this.cancelRunAs(action.runId);
+    return patched;
+  }
+
+  /**
+   * Actions that were executing when this process last stopped. Their Runs
+   * were already recovered as failed; the Action must say the same, and say
+   * why, rather than stay "running" forever.
+   */
+  async recoverInterruptedActions(): Promise<void> {
+    const actions = await this.db.collection<ActionRecord>(COLLECTIONS.actions).all();
+    for (const action of actions) {
+      if (!['authorized', 'running', 'executed', 'verifying'].includes(action.status)) continue;
+      const reason = 'Factory restarted before execution reached a terminal state';
+      await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+        ...action,
+        status: 'failed',
+        outcome: 'execution-failed',
+        failure: { phase: 'interrupted', outcome: 'execution-failed', reason },
+        verification: [...(action.verification ?? []), { name: 'execution', status: 'failed', detail: reason }],
+        updatedAt: new Date().toISOString(),
+      }, action.id);
+    }
   }
 
   /**
    * Verification reads the durable evidence rather than the process that wrote
    * it, so a check reports what a later reader of FeltDB would also see.
    */
-  private async verifyRun(runId: string, healthRequirement?: string): Promise<VerificationCheck[]> {
+  private async verifyRun(runId: string, healthRequirement?: string, operationChecks: readonly VerificationCheck[] = []): Promise<VerificationCheck[]> {
     const evidence = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
     const checks: VerificationCheck[] = [{
       name: 'evidence recorded',
@@ -1795,10 +2046,12 @@ export class FactoryService {
       });
     }
     if (healthRequirement) {
+      // Only a probe that actually ran can say the environment is healthy.
+      const probe = operationChecks.find((check) => check.name === 'environment responds healthy');
       checks.push({
         name: healthRequirement,
-        status: evidence?.finalResult === 'PASS' ? 'passed' : 'skipped',
-        detail: 'derived from the run evidence; no external probe is performed',
+        status: probe ? probe.status : 'skipped',
+        detail: probe ? probe.detail ?? '' : 'not probed by this Action; environment.health verifies it',
       });
     }
     return checks;
@@ -1920,6 +2173,7 @@ export class FactoryService {
     const service = new FactoryService(config, db);
     await service.provisionAuthority();
     await service.recoverInterruptedRuns();
+    await service.recoverInterruptedActions();
     return service;
   }
 
@@ -2145,6 +2399,7 @@ export class FactoryService {
     request: RunRequest,
     principalOrContext: string | AuthenticatedContext,
     execution?: ProviderExecution,
+    options: { onAdmitted?: (run: RunRecord) => Promise<void> } = {},
   ): Promise<RunRecord> {
     if (this.shuttingDown) {
       throw new Error('Factory service is shutting down');
@@ -2204,6 +2459,7 @@ export class FactoryService {
     } else if (isTerminal(run.status) || run.status !== 'accepted' || this.activeExecutions.has(run.id)) {
       return run;
     }
+    await options.onAdmitted?.(run);
 
     await this.recordRequest(run.id, request, principal, context.tenant);
 
@@ -2258,7 +2514,12 @@ export class FactoryService {
     await this.appendEvent(activeRunId, 'executing', executionDetail);
 
     try {
-      const outcome = authorization.contract.execution.mode === 'integration'
+      // A cancel that landed between admission and here stops the run before
+      // any process exists. Nothing is spawned for a cancelled run.
+      const beforeSpawn = await this.getRun(activeRunId);
+      if (beforeSpawn?.status === 'cancelled') return beforeSpawn;
+
+      const executed = authorization.contract.execution.mode === 'integration'
         ? await this.github.execute(authorization.contract)
         : await executeContract(authorization.contract, {
           repositoryRoot: this.config.repositoryRoot,
@@ -2267,9 +2528,16 @@ export class FactoryService {
             this.activeExecutions.set(activeRunId, handle);
           },
           paxExecutable: this.config.paxExecutable,
+          credentialResolver: this.credentialResolver,
         });
 
       this.activeExecutions.delete(activeRunId);
+      // A late provider result never un-cancels a run: what was cancelled
+      // stays cancelled, and the evidence says so.
+      const persistedAfter = await this.getRun(activeRunId);
+      const outcome = persistedAfter?.status === 'cancelled' && executed.evidence.status !== 'cancelled'
+        ? { ...executed, evidence: { ...executed.evidence, status: 'cancelled' as const, deterministicResult: 'CANCELLED' as const, finalResult: 'CANCELLED' as const } }
+        : executed;
       if (outcome.evidence.status !== 'cancelled') {
         run = await this.patchRun(activeRunId, { status: 'verifying' });
         await this.appendEvent(activeRunId, 'verifying', 'Persisting structured evidence');
@@ -2309,6 +2577,10 @@ export class FactoryService {
         run.startedAt ?? startedAt,
         completedAt,
         terminalStatus,
+        terminalStatus === 'cancelled' ? 'cancelled'
+          : error instanceof SpawnFailedError ? 'spawn-failed'
+          : error instanceof CredentialUnavailableError ? 'not-started'
+          : 'not-started',
       );
       await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidence, evidence.id);
       const transition = terminalStatus === 'cancelled' && persistedRun?.status === 'cancelled'

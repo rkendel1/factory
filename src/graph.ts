@@ -96,7 +96,7 @@ export function orderPlan(actions: readonly PlannedAction[]): { key: string; act
  */
 export function nodeStatus(action: ActionRecord, byId: ReadonlyMap<string, ActionRecord>): NodeStatus {
   if (action.status === 'succeeded') return 'completed';
-  if (action.status === 'running' || action.status === 'authorized') return 'running';
+  if (action.status === 'running' || action.status === 'authorized' || action.status === 'executed' || action.status === 'verifying') return 'running';
   if (action.outcome === 'cancelled') return 'cancelled';
   if (action.status === 'failed') return 'failed';
 

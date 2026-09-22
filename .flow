@@ -428,7 +428,7 @@ app software_factory {
     provider git
     operational_capability repository.checkout
     execution_mode native
-    command ["git","status","--short","--branch"]
+    command ["git","rev-parse","--verify","HEAD"]
     timeoutMs 30000
     grant repository.read
     grant evidence.write

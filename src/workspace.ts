@@ -87,7 +87,12 @@ export async function materializeRepository(
   }
 
   const commit = await copyRepository(sourcePath, workspace.repositoryPath, repository.ref);
-  return { commit: repository.commit ?? commit };
+  // The commit is what git reports after the checkout, never what was asked
+  // for. A requested commit the checkout did not reach is a failure, not a fact.
+  if (repository.commit && commit && commit !== repository.commit && !commit.startsWith(repository.commit)) {
+    throw new Error(`checkout of ${repository.ref} reached ${commit}, not the requested revision ${repository.commit}`);
+  }
+  return commit ? { commit } : {};
 }
 
 export async function destroyWorkspace(workspace: WorkspaceHandle): Promise<void> {

@@ -141,7 +141,8 @@ test('reconciling an environment records reality from the run evidence', async (
   assert.equal(observed.reconciledRunId, ran.runId);
   assert.ok(observed.reconciledEvidenceId, 'reconciliation points at the durable evidence');
   assert.equal(observed.sourceCommit, repository.commit);
-  assert.equal(observed.health, 'healthy');
+  // Nothing probed the environment, so health is unobserved rather than assumed.
+  assert.equal(observed.health, 'unknown');
 
   const [report] = await instance.observeReality(context, record.id);
   assert.equal(report?.status, 'reconciled');

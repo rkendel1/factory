@@ -514,7 +514,7 @@ export function actionsPage(): string {
 `, `
 const { api, esc, statusPill, fail } = window.factory;
 const target = document.querySelector('#actions');
-const ORDER = ['planned','awaiting-approval','authorized','running','succeeded','failed'];
+const ORDER = ['planned','awaiting-approval','authorized','running','executed','verifying','succeeded','failed'];
 try {
   const { actions } = await api('/v1/actions');
   target.innerHTML = ORDER.map((status) => {
@@ -557,6 +557,13 @@ async function render() {
         ? 'AuthBoundry unavailable' : 'denied';
     const origin = action.origin === 'continuous-reconciliation'
       ? 'Continuous reconciliation' : 'Manual';
+    const execution = action.execution || {};
+    const hasRun = Boolean(action.runId && execution.startedAt);
+    const bound = (action.preflight?.checks || []).find((check) => check.name === 'resource bound')?.detail || '';
+    // Phases are derived from durable status only; nothing here is client state.
+    const reachedIndex = { planned: 0, 'awaiting-approval': 0, authorized: 1, running: 2, executed: 3, verifying: 4, succeeded: 5, failed: hasRun ? (action.outcome === 'verification-failed' || action.outcome === 'verification-unavailable' ? 4 : 2) : action.preflight ? 1 : 0 }[action.status] ?? 0;
+    const PHASES = ['Planned', 'Authorized', 'Executing', 'Executed', 'Verifying', 'Succeeded']
+      .map((name, index) => [name, index <= reachedIndex && !(action.status === 'failed' && index === 5), index === reachedIndex && action.status !== 'succeeded' && action.status !== 'failed']);
     detail.innerHTML =
       '<h2>Origin</h2><div class="grid">'
         + '<div class="card"><h3>Origin</h3><p>' + esc(origin)
@@ -596,11 +603,34 @@ async function render() {
         + '<div class="card"><h3>Resource</h3><p>' + esc(action.resource || '—') + '</p></div>'
         + '<div class="card"><h3>Operation</h3><p>' + esc(action.operation || '—') + '</p></div>'
       + '</div>'
-      + '<h2>Execution</h2><div class="grid">'
-        + '<div class="card"><h3>Engine</h3><p>' + esc(action.executionProvider || '—') + '</p></div>'
+      + '<h2>Execution</h2>'
+      + '<div class="phases">' + PHASES.map(([name, reached, current]) =>
+          '<div class="phase"><div class="name">' + name + '</div><div>' + statusPill(reached ? (current ? 'running' : 'passed') : 'skipped')
+          + '</div><div class="muted">' + (reached ? (current ? 'now' : 'done') : 'not reached') + '</div></div>').join('') + '</div>'
+      + (action.failure ? '<div class="banner drift"><p><strong>' + esc(action.failure.outcome) + '</strong> in ' + esc(action.failure.phase) + '</p><p class="muted">' + esc(action.failure.reason) + '</p></div>' : '')
+      + '<div class="grid">'
+        + '<div class="card"><h3>Provider</h3><p>' + esc(action.provider || action.executionProvider || '—') + '</p></div>'
+        + '<div class="card"><h3>Operation</h3><p>' + esc(action.operation || '—') + '</p></div>'
+        + '<div class="card"><h3>Resource</h3><p>' + esc(action.resource || '—') + '</p>'
+          + (bound ? '<p class="muted">' + esc(bound) + '</p>' : '') + '</div>'
+        + '<div class="card"><h3>Started</h3><p>' + esc(execution.startedAt || '—') + '</p>'
+          + (execution.requestedAt ? '<p class="muted">requested ' + esc(execution.requestedAt) + '</p>' : '') + '</div>'
+        + '<div class="card"><h3>Duration</h3><p>' + (execution.durationMs !== undefined ? esc(execution.durationMs) + ' ms' : '—') + '</p>'
+          + (execution.completedAt ? '<p class="muted">completed ' + esc(execution.completedAt) + '</p>' : '') + '</div>'
+        + '<div class="card"><h3>Execution result</h3><p>' + (hasRun
+            ? statusPill(execution.providerStatus || (execution.exitCode === 0 ? 'succeeded' : 'failed'))
+              + ' <span class="muted">exit ' + esc(execution.exitCode === undefined ? '—' : execution.exitCode)
+              + (execution.terminationReason ? ' · ' + esc(execution.terminationReason) : '') + '</span>'
+            : '<span class="muted">not run</span>') + '</p></div>'
+        + '<div class="card"><h3>Provider reference</h3><p>' + esc(execution.providerOperationId || '—') + '</p>'
+          + (execution.observedRevision ? '<p class="muted">observed revision ' + esc(execution.observedRevision) + '</p>' : '') + '</div>'
         + '<div class="card"><h3>Environment</h3><p>' + esc(action.environmentId || '—') + '</p></div>'
-        + '<div class="card"><h3>Status</h3><p>' + statusPill(action.status) + '</p></div>'
       + '</div>'
+      + (action.preflight ? '<details><summary>Preflight (' + esc(action.preflight.checks.length) + ' checks'
+          + (action.preflight.passedAt ? ', passed' : action.preflight.failedAt ? ', failed' : '') + ')</summary>'
+          + '<table><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>'
+          + action.preflight.checks.map((check) => '<tr><td>' + esc(check.name) + '</td><td>' + statusPill(check.status) + '</td><td class="muted">' + esc(check.detail || '') + '</td></tr>').join('')
+          + '</tbody></table></details>' : '')
       + '<h2>Verification</h2>' + (verification.length
         ? '<table><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>'
           + verification.map((check) => '<tr><td>' + esc(check.name) + '</td><td>' + statusPill(check.status) + '</td>'
@@ -614,7 +644,9 @@ async function render() {
         ? '<div class="banner drift"><p><strong>Autonomous execution not authorized</strong></p>'
           + '<p class="muted">' + esc(action.autonomy?.reason || 'Factory could not ask the authority.') + '</p>'
           + '<p><button id="run">Approve &amp; Run</button></p></div>'
-        : action.status === 'planned' ? '<p><button id="run">Run</button></p>' : '')
+        : action.status === 'planned' && action.outcome !== 'cancelled' ? '<p><button id="run">Run</button></p>' : '')
+      + (['authorized','running','executed','verifying'].includes(action.status) || (action.status === 'planned' && action.outcome !== 'cancelled')
+          ? '<p><button id="cancel">Cancel</button></p>' : '')
       + (action.discovery ? '<details><summary>Repository discovery</summary><pre>'
         + esc(JSON.stringify(action.discovery, null, 2)) + '</pre></details>' : '');
     const run = detail.querySelector('#run');
@@ -623,6 +655,13 @@ async function render() {
       try { await api('/v1/actions/' + actionId + '/run', { method: 'POST' }); await render(); }
       catch (error) { fail(detail, error); }
     };
+    const cancel = detail.querySelector('#cancel');
+    if (cancel) cancel.onclick = async () => {
+      if (!confirm('Cancel this action?')) return;
+      try { await api('/v1/actions/' + actionId + '/cancel', { method: 'POST' }); await render(); }
+      catch (error) { fail(detail, error); }
+    };
+    if (['authorized','running','executed','verifying'].includes(action.status)) setTimeout(render, 3000);
   } catch (error) { fail(detail, error); }
 }
 await render();
@@ -676,7 +715,8 @@ try {
     + phase('Planning', action ? 'succeeded' : 'skipped', action ? esc(action.plan.length) + ' steps' : 'no action')
     + phase('Authorization', run.authorizationDecisionId ? 'passed' : 'failed',
         esc(run.authorizationDecisionId || 'no decision recorded'))
-    + phase('Execution', run.status, esc(run.executionProvider || evidence?.executionMode || '—'))
+    + phase('Execution', run.status, esc(run.executionProvider || evidence?.executionMode || '—')
+        + (evidence?.execution ? ' · ' + esc(evidence.execution.terminationReason) + (evidence.exitCode !== null && evidence.exitCode !== undefined ? ' · exit ' + esc(evidence.exitCode) : '') : ''))
     + phase('Verification', (action?.verification || []).some((c) => c.status === 'failed') ? 'failed'
         : action?.verification?.length ? 'passed' : 'skipped',
         esc((action?.verification || []).length) + ' checks')
@@ -688,7 +728,13 @@ try {
       + '<div class="card"><h3>Delegation</h3><p>' + esc(authorized?.delegationId || run.delegationId || '—') + '</p></div>'
       + '<div class="card"><h3>Tenant</h3><p>' + esc(run.tenantId || '—') + '</p></div>'
     + '</div>'
-    + (evidence ? '<details><summary>Execution logs</summary><pre>' + esc(evidence.stdout || '') + esc(evidence.stderr || '') + '</pre></details>' : '');
+    + (evidence?.providerResult ? '<h2>Provider result</h2><div class="grid">'
+        + '<div class="card"><h3>Status</h3><p>' + statusPill(evidence.providerResult.status) + '</p><p class="muted">' + esc(evidence.providerResult.summary) + '</p></div>'
+        + '<div class="card"><h3>Provider reference</h3><p>' + esc(evidence.providerResult.providerOperationId || '—') + '</p></div>'
+        + '<div class="card"><h3>Observed</h3><p class="muted">' + esc(JSON.stringify(evidence.providerResult.observed)) + '</p></div>'
+        + '</div>' : '')
+    + (evidence ? '<details><summary>Execution output' + (evidence.execution?.truncated?.stdout || evidence.execution?.truncated?.stderr ? ' (truncated)' : '') + '</summary>'
+        + '<p class="muted">stdout</p><pre>' + esc(evidence.stdout || '') + '</pre><p class="muted">stderr</p><pre>' + esc(evidence.stderr || '') + '</pre></details>' : '');
 } catch (error) { fail(detail, error); }
 `);
 }
@@ -709,13 +755,19 @@ try {
     '<section class="card provider"><h3>' + esc(provider.name) + ' ' + statusPill(provider.status)
     + (provider.configured ? ' <span class="pill">configured</span>' : '') + '</h3>'
     + '<p class="muted">' + esc(provider.detail) + '</p>'
-    + (provider.credentials.length ? '<p class="muted">Credentials resolved at execution: ' + provider.credentials.map(esc).join(', ') + ' (names only)</p>' : '')
+    + (provider.credentials.length ? '<p class="muted">Credentials resolved at execution: ' + provider.credentials.map((name) => esc(name) + ' (' + (provider.credentialsPresent[name] ? 'present' : 'missing') + ')').join(', ') + ' — names only</p>' : '')
+    + (provider.vocabulary.length ? '<p class="muted">Not offered by this provider: ' + provider.vocabulary.map(esc).join(', ') + '</p>' : '')
     + '<p><strong>Capabilities</strong></p>'
     + (provider.capabilities.length ? '<ul class="caps">' + provider.capabilities.map((entry) =>
-        '<li><details><summary>' + esc(entry.capability) + ' <span class="muted">via ' + esc(entry.operation) + '</span></summary>'
-        + '<p class="muted">Requires authority: ' + entry.requiredAuthority.map(esc).join(', ') + '</p>'
+        '<li><details><summary>' + esc(entry.capability) + ' ' + statusPill(entry.executable ? 'executable' : 'not executable')
+        + (entry.operation ? ' <span class="muted">via ' + esc(entry.operation) + '</span>' : '') + '</summary>'
+        + '<p class="muted">implementation: ' + (entry.implementation ? 'yes' : 'no') + ' · declared: ' + (entry.declared ? 'yes' : 'no')
+          + ' · available: ' + (entry.available ? 'yes' : 'no') + ' · credential: ' + (entry.credential ? 'yes' : 'no')
+          + ' · configuration: ' + (entry.configuration ? 'yes' : 'no') + ' · executable: ' + (entry.executable ? 'yes' : 'no') + '</p>'
+        + (entry.reasons.length ? '<p class="muted">' + entry.reasons.map(esc).join('; ') + '</p>' : '')
+        + '<p class="muted">Requires authority: ' + (entry.requiredAuthority.length ? entry.requiredAuthority.map(esc).join(', ') : '—') + '</p>'
         + (entry.verificationRequires ? '<p class="muted">Verified by: ' + esc(entry.verificationRequires) + '</p>' : '')
-        + '<p class="muted">Idempotency: ' + (entry.idempotency.exactlyOnce ? 'exactly-once' : 'not exactly-once') + (entry.idempotency.note ? ' — ' + esc(entry.idempotency.note) : '') + '</p>'
+        + (entry.idempotency ? '<p class="muted">Idempotency: ' + (entry.idempotency.exactlyOnce ? 'exactly-once' : 'not exactly-once') + (entry.idempotency.note ? ' — ' + esc(entry.idempotency.note) : '') + '</p>' : '')
         + (entry.recent.length ? '<p>Recent: ' + entry.recent.map((action) =>
             '<a href="/factory/actions/' + esc(action.id) + '">' + esc(action.id.slice(0, 12)) + '</a> ' + statusPill(action.outcome || action.status)).join(' ') + '</p>' : '<p class="muted">No executions yet.</p>')
         + '</details></li>').join('') + '</ul>'

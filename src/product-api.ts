@@ -468,6 +468,14 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
   },
   {
     method: 'POST',
+    pattern: /^\/v1\/actions\/([^/]+)\/cancel$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      return json(200, await service.cancelAction(context, params[0]!));
+    },
+  },
+  {
+    method: 'POST',
     pattern: /^\/v1\/actions\/([^/]+)\/retry$/,
     capability: PRODUCT_CAPABILITIES.execute,
     async handle({ service, context, params }) {

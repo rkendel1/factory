@@ -327,7 +327,7 @@ test('enriched work reports a provider failure as failed with the failing and bl
     ['verify', true, 'blocked'],
   ]);
   assert.equal(result.status, 'failed');
-  assert.equal(result.outcome, 'execution-failed', 'fly is not installed here');
+  assert.equal(result.outcome, 'provider-unavailable', 'fly is not installed here, and preflight stops before the provider');
   assert.deepEqual(result.failedActions, [result.actions[2]!.actionId]);
   assert.deepEqual(result.blockedActions, [result.actions[3]!.actionId]);
   assert.equal(result.completedActions.length, 2);

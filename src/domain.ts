@@ -405,7 +405,7 @@ export class FactoryDomain {
     tenantId: string,
     fingerprint: string,
   ): Promise<ActionRecord | null> {
-    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running'];
+    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running', 'executed', 'verifying'];
     const actions = await this.actionRecords().find({ tenantId, reconciliationFingerprint: fingerprint });
     return actions.find((action) => open.includes(action.status)) ?? null;
   }

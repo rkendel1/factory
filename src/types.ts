@@ -251,8 +251,71 @@ export type ActionStatus =
   | 'awaiting-approval'
   | 'authorized'
   | 'running'
+  | 'executed'
+  | 'verifying'
   | 'succeeded'
   | 'failed';
+
+/** Why a process stopped. `spawn-failed` means the provider mechanism could not start; `not-started` means Factory stopped before spawning. */
+export type TerminationReason = 'exit' | 'signal' | 'timeout' | 'cancelled' | 'spawn-failed' | 'not-started';
+
+/**
+ * The phase an Action failed in. Kept apart from the outcome so a reader can
+ * tell "the provider said no" from "Factory could not ask the provider".
+ */
+export type ActionFailurePhase =
+  | 'preflight'
+  | 'authority'
+  | 'authorization'
+  | 'execution'
+  | 'provider'
+  | 'verification'
+  | 'interrupted';
+
+/**
+ * What actually happened when an Action executed, from the execution
+ * boundary's own clock. Absent on an Action that has not run: nothing here is
+ * ever filled in from a plan.
+ */
+export interface ActionExecutionSummary {
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  exitCode?: number | null;
+  terminationReason?: TerminationReason;
+  providerStatus?: ProviderResultStatus;
+  providerOperationId?: string | null;
+  /** The revision the operation actually left behind, as the provider reported it. */
+  observedRevision?: string;
+  cancelRequestedAt?: string;
+}
+
+/**
+ * What a provider adapter reports after an operation. Factory turns this into
+ * a Run and Evidence; the adapter never writes either.
+ */
+export type ProviderResultStatus = 'succeeded' | 'rejected' | 'failed' | 'cancelled';
+
+export interface ProviderExecutionResult {
+  status: ProviderResultStatus;
+  /** The provider's own reference for the operation, when it gives one. */
+  providerOperationId: string | null;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  /** Sanitized, structured detail read from the provider's response. */
+  metadata: Record<string, string | number | boolean | null>;
+  /** State the operation observed, never copied from what was requested. */
+  observed: {
+    revision?: string;
+    health?: 'healthy' | 'unhealthy';
+    healthStatus?: number;
+    healthUrl?: string;
+  };
+  /** One sentence a person can act on. Sanitized. */
+  summary: string;
+}
 
 export interface ActionPlanStep {
   order: number;
@@ -358,6 +421,14 @@ export interface ActionRecord {
   };
   /** The person who approved an Action the authority would not run on its own. */
   approvedBy?: string;
+  /**
+   * The deterministic checks made before any provider was invoked, and when
+   * they passed. A provider is reached only after every one of them passed.
+   */
+  preflight?: { checks: VerificationCheck[]; passedAt?: string; failedAt?: string };
+  execution?: ActionExecutionSummary;
+  /** Why the Action failed, in which phase. Never a generic message. */
+  failure?: { phase: ActionFailurePhase; outcome: ActionOutcome; reason: string };
   createdBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -502,11 +573,14 @@ export type ActionOutcome =
   | 'succeeded'
   | 'capability-unavailable'
   | 'provider-unavailable'
+  | 'resource-unavailable'
+  | 'credential-unavailable'
   | 'autonomy-denied'
   | 'authority-unavailable'
   | 'awaiting-approval'
   | 'execution-failed'
   | 'verification-failed'
+  | 'verification-unavailable'
   | 'cancelled';
 
 /**
@@ -521,6 +595,8 @@ export interface ProviderExecution {
   capability: string;
   operation: string;
   resource: string;
+  /** The provider-side resource the Factory resource was bound to. */
+  providerResource?: string;
   environment: Record<string, string>;
   credentials: string[];
   idempotency: { key: string; exactlyOnce: boolean; note?: string };
@@ -595,10 +671,29 @@ export interface StructuredEvidence {
     capability: string;
     operation: string;
     resource: string;
+    /** The provider-side resource the environment or repository was bound to. */
+    providerResource?: string;
     parameters: Record<string, string>;
     credentials: string[];
     idempotency: { key: string; exactlyOnce: boolean; note?: string };
   };
+  /** What the provider reported, as the adapter read it. Sanitized. */
+  providerResult?: ProviderExecutionResult;
+  /** How the process actually ended, from the execution boundary. */
+  execution?: {
+    terminationReason: TerminationReason;
+    signal: string | null;
+    timedOut: boolean;
+    cancelled: boolean;
+    timeoutMs: number;
+    truncated: { stdout: boolean; stderr: boolean };
+    outputBytes: { stdout: number; stderr: number };
+    workspace?: string;
+    /** Credential names the boundary resolved for the process. Never values. */
+    credentialsResolved: string[];
+  };
+  /** Requested against observed. Observed comes only from the operation itself. */
+  revision?: { requested?: string; observed?: string };
   principal?: string;
   tenantId?: string;
   operation?: string;
@@ -685,6 +780,12 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   reconciliationTickMs?: number;
   /** Provider adapters to register. Defaults to the built-in set. */
   providerAdapters?: readonly import('./adapters.js').ProviderAdapter[];
+  /**
+   * Where credential values come from, by name, at the execution boundary
+   * only. Defaults to this process's environment. Nothing outside the boundary
+   * ever receives a value.
+   */
+  credentialResolver?: (name: string) => string | undefined;
   authBoundryControlPlane?: import('./provisioning.js').AuthBoundryControlPlane;
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;

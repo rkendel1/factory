@@ -117,7 +117,11 @@ the rest.
 AI may eventually propose plans. It is not an authority layer and cannot stand
 in for AuthBoundry.
 
-See [docs/product-surface.md](docs/product-surface.md) for the full surface map.
+See [docs/product-surface.md](docs/product-surface.md) for the full surface map,
+and [docs/real-execution.md](docs/real-execution.md) for how an Action crosses the
+provider boundary for real: preflight, credential resolution, the structured
+provider result, verification against reality, and the runtime configuration
+each provider needs.
 
 ### Product surface
 
@@ -138,7 +142,7 @@ connection because `AUTHBOUNDRY_URL` is set.
 - `POST /v1/projects/:id/environments/:environmentId/reconcile`
 - `GET|POST /v1/projects/:id/actions`, `GET /v1/actions/:id`, `POST /v1/actions/:id/run`
 - `GET /v1/projects/:id/runs`
-- `GET|POST /v1/action-graphs`, `GET /v1/action-graphs/:id`, `POST /v1/action-graphs/:id/run|cancel`, `POST /v1/actions/:id/retry`
+- `GET|POST /v1/action-graphs`, `GET /v1/action-graphs/:id`, `POST /v1/action-graphs/:id/run|cancel`, `POST /v1/actions/:id/retry|cancel`
 - `GET|POST /v1/operational-work`, `GET /v1/operational-work/:id`, `GET /v1/operational-work/:id/events`, `POST /v1/operational-work/:id/cancel` — the Attn ↔ Factory contract (`factory.operational-work/1`), carried as the AppPort capability `softwarefactory.operationalwork@1`; see [docs/product-surface.md](docs/product-surface.md#requested-work-the-attn--factory-contract)
 - `GET /v1/reconciliation`
 - `GET|POST|PATCH|DELETE /v1/projects/:id/environments/:environmentId/reconciliation`

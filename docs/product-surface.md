@@ -137,6 +137,11 @@ a repository, an authority and a provider is not arbitrary caller input.
 
 ## Operational capabilities and provider adapters
 
+How an Action actually crosses the provider boundary — preflight, credential
+resolution, the structured provider result, verification against reality and
+the runtime configuration per provider — is described in
+[real-execution.md](real-execution.md).
+
 An Action names what Factory needs done; a provider adapter knows how to do it
 on one external system. Keeping the two apart is what lets the same graph
 deploy to a different provider without a different coordination model.

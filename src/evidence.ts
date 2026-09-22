@@ -1,6 +1,11 @@
-import type { ExecutionContract, InvariantEvidence, JevEvaluation, StructuredEvidence } from './types.js';
+import type { ExecutionContract, InvariantEvidence, JevEvaluation, StructuredEvidence, TerminationReason } from './types.js';
 
-interface RawExecutionResult {
+/**
+ * What the execution boundary reports. Everything here is measured at the
+ * boundary — timestamps from the process, output as captured and bounded,
+ * termination as observed — and nothing is filled in from the plan.
+ */
+export interface RawExecutionResult {
   status: 'completed' | 'failed' | 'cancelled';
   exitCode: number | null;
   startedAt: string;
@@ -9,6 +14,15 @@ interface RawExecutionResult {
   stdout: string;
   stderr: string;
   paxVersion?: string;
+  signal?: string | null;
+  terminationReason?: TerminationReason;
+  timedOut?: boolean;
+  cancelled?: boolean;
+  timeoutMs?: number;
+  truncated?: { stdout: boolean; stderr: boolean };
+  outputBytes?: { stdout: number; stderr: number };
+  workspace?: string;
+  credentialsResolved?: string[];
 }
 
 function matchField(label: string, text: string): string | undefined {
@@ -75,11 +89,29 @@ export function buildEvidence(
         capability: contract.provider.capability,
         operation: contract.provider.operation,
         resource: contract.provider.resource,
+        ...(contract.provider.providerResource ? { providerResource: contract.provider.providerResource } : {}),
         parameters: contract.provider.environment,
         credentials: contract.provider.credentials,
         idempotency: contract.provider.idempotency,
       },
     } : {}),
+    ...(result.terminationReason ? {
+      execution: {
+        terminationReason: result.terminationReason,
+        signal: result.signal ?? null,
+        timedOut: result.timedOut ?? false,
+        cancelled: result.cancelled ?? false,
+        timeoutMs: result.timeoutMs ?? contract.limits.timeoutMs,
+        truncated: result.truncated ?? { stdout: false, stderr: false },
+        outputBytes: result.outputBytes ?? { stdout: Buffer.byteLength(result.stdout), stderr: Buffer.byteLength(result.stderr) },
+        ...(result.workspace ? { workspace: result.workspace } : {}),
+        credentialsResolved: result.credentialsResolved ?? [],
+      },
+    } : {}),
+    revision: {
+      ...(contract.repository.commit ? { requested: contract.repository.commit } : {}),
+      ...(repositoryCommit ? { observed: repositoryCommit } : {}),
+    },
     principal: contract.principal,
     tenantId: contract.tenantId,
     operation: contract.operation,
@@ -106,7 +138,9 @@ export function buildEvidence(
     repository: {
       owner: contract.repository.owner,
       name: contract.repository.name,
-      commit: repositoryCommit,
+      // Only what the checkout observed. A requested commit is recorded above
+      // as requested, never promoted to reality.
+      ...(repositoryCommit ? { commit: repositoryCommit } : {}),
     },
     stdout: result.stdout,
     stderr: result.stderr,
@@ -139,6 +173,7 @@ export function buildFailureEvidence(
   startedAt: string,
   completedAt: string,
   status: 'failed' | 'cancelled' = 'failed',
+  terminationReason: TerminationReason = status === 'cancelled' ? 'cancelled' : 'spawn-failed',
 ): StructuredEvidence {
   return buildEvidence(
     contract,
@@ -150,8 +185,14 @@ export function buildFailureEvidence(
       durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
       stdout: '',
       stderr: error.message,
+      terminationReason,
+      signal: null,
+      timedOut: false,
+      cancelled: status === 'cancelled',
+      credentialsResolved: [],
     },
-    contract.repository.commit,
+    // Nothing ran, so nothing was observed; the requested commit stays requested.
+    undefined,
   );
 }
 

@@ -41,6 +41,16 @@ notification/webhook/job state, and secret metadata are managed through AppPort
 Services. GitHub credentials and provider configuration remain
 integration-owned. None belong in Factory environment configuration.
 
+Provider credentials that Factory's Actions need are platform secrets too,
+named exactly as the provider adapter names them and never present in source
+or `.env.local`. Factory resolves them by name inside its execution boundary at
+the moment an authorized operation is spawned; see
+[real-execution.md](real-execution.md#runtime-configuration):
+
+```sh
+fly secrets set FLY_API_TOKEN="..." -a factory-idvhpa
+```
+
 Deploy and verify:
 
 ```sh
