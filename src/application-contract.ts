@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { APPBOUNDRY_CERTIFICATION_PROTOCOL } from '@appport/appboundry';
 import { defineApplication, defineCapability, s, type ApplicationManifest, type AuthoredApplication } from '@appport/sdk';
 import type { FlowBlock, FlowSpec } from '@feltdb/core';
+import { operationalWorkCapability } from './operational-work.js';
 
 interface AppBoundryContract {
   protocol: 'AppBoundry/contract/1';
@@ -105,14 +106,21 @@ export function createCanonicalApplicationContract(flowSpec: FlowSpec): Canonica
       flowFingerprint: sourceFingerprint,
       appBoundryProtocol: APPBOUNDRY_CERTIFICATION_PROTOCOL,
     },
-    provides: capabilities.map((capability) => defineCapability({
-      name: appPortCapabilityName(capability.operation),
-      version: 1,
-      input: s.object({}),
-      output: s.object({ accepted: s.boolean() }),
-      authorization: capability.grants,
-      handler: async () => ({ accepted: true }),
-    })),
+    provides: [
+      ...capabilities.map((capability) => defineCapability({
+        name: appPortCapabilityName(capability.operation),
+        version: 1,
+        input: s.object({}),
+        output: s.object({ accepted: s.boolean() }),
+        authorization: capability.grants,
+        handler: async () => ({ accepted: true }),
+      })),
+      // The Attn ↔ Factory contract, declared here so the manifest advertises
+      // it with its typed schema. The runtime handler lives on the service.
+      operationalWorkCapability(async () => {
+        throw new Error('operational work is handled by the Factory service runtime');
+      }),
+    ],
     requires: [...new Map(capabilities
       .filter((capability) => capability.service && capability.capability)
       .map((capability) => ({

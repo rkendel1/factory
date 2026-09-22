@@ -121,7 +121,7 @@ See [docs/product-surface.md](docs/product-surface.md) for the full surface map.
 
 ### Product surface
 
-`/factory` is the landing page: Overview, Projects, Actions, Runs, Providers,
+`/factory` is the landing page: Overview, Projects, Actions, Runs, Operations, Requested work, Providers,
 AppPort Services, Settings. Providers and their capabilities are read from
 `.flow`, never hard-coded in the UI, and the Overview reports the association
 state — `associated`, `unassociated`, `unverified` — rather than claiming a
@@ -139,6 +139,7 @@ connection because `AUTHBOUNDRY_URL` is set.
 - `GET|POST /v1/projects/:id/actions`, `GET /v1/actions/:id`, `POST /v1/actions/:id/run`
 - `GET /v1/projects/:id/runs`
 - `GET|POST /v1/action-graphs`, `GET /v1/action-graphs/:id`, `POST /v1/action-graphs/:id/run|cancel`, `POST /v1/actions/:id/retry`
+- `GET|POST /v1/operational-work`, `GET /v1/operational-work/:id`, `GET /v1/operational-work/:id/events`, `POST /v1/operational-work/:id/cancel` — the Attn ↔ Factory contract (`factory.operational-work/1`), carried as the AppPort capability `softwarefactory.operationalwork@1`; see [docs/product-surface.md](docs/product-surface.md#requested-work-the-attn--factory-contract)
 - `GET /v1/reconciliation`
 - `GET|POST|PATCH|DELETE /v1/projects/:id/environments/:environmentId/reconciliation`
 - `POST /v1/projects/:id/environments/:environmentId/reconcile-now`

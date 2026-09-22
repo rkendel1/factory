@@ -14,6 +14,7 @@ export const PRODUCT_NAV = [
   { id: 'actions', label: 'Actions', href: '/factory/actions' },
   { id: 'runs', label: 'Runs', href: '/factory/runs' },
   { id: 'graphs', label: 'Operations', href: '/factory/graphs' },
+  { id: 'work', label: 'Requested work', href: '/factory/work' },
   { id: 'providers', label: 'Providers', href: '/factory/providers' },
   { id: 'services', label: 'AppPort Services', href: '/services' },
   { id: 'settings', label: 'Settings', href: '/factory/settings' },
@@ -828,6 +829,80 @@ async function render() {
     target.querySelectorAll('[data-retry]').forEach((button) => {
       button.onclick = async () => { button.disabled = true; try { await api('/v1/actions/' + button.dataset.retry + '/retry', { method: 'POST', body: JSON.stringify({}) }); await render(); } catch (error) { fail(target, error); } };
     });
+  } catch (error) { fail(target, error); }
+}
+await render();
+`);
+}
+
+export function workListPage(): string {
+  return productPage('work', 'Requested work', `
+<h1>Requested work</h1>
+<p class="lede">Operational work other systems asked Factory for. The origin says who asked; Factory decides nothing from it and reads nothing behind it.</p>
+<div id="work"><p class="muted">Loading…</p></div>
+`, `
+const { api, esc, statusPill, fail } = window.factory;
+const target = document.querySelector('#work');
+try {
+  const { work } = await api('/v1/operational-work');
+  target.innerHTML = work.length
+    ? '<table><thead><tr><th>Work</th><th>Origin</th><th>Intent</th><th>Status</th><th>Outcome</th><th>Updated</th></tr></thead><tbody>'
+      + work.map((item) =>
+        '<tr><td><a href="/factory/work/' + esc(item.workId) + '">' + esc(item.workId.slice(0, 16)) + '</a></td>'
+        + '<td>' + esc(item.origin.system) + ' · ' + esc(item.origin.type) + ' <code>' + esc(item.origin.id) + '</code></td>'
+        + '<td class="muted">' + esc(item.intent || '—') + '</td>'
+        + '<td>' + statusPill(item.status) + '</td>'
+        + '<td>' + (item.outcome ? statusPill(item.outcome) : '<span class="muted">—</span>') + '</td>'
+        + '<td class="muted">' + esc(item.updatedAt) + '</td></tr>').join('')
+      + '</tbody></table>'
+    : '<div class="empty">No work has been requested by another system yet.</div>';
+} catch (error) { fail(target, error); }
+`);
+}
+
+export function workPage(workId: string): string {
+  return productPage('work', 'Requested work', `
+<h1 id="title">Requested work</h1>
+<p class="lede" id="subtitle"></p>
+<div id="work"><p class="muted">Loading…</p></div>
+<h2>History</h2>
+<div id="events"><p class="muted">Loading…</p></div>
+`, `
+const { api, esc, statusPill, fail } = window.factory;
+${GRAPH_NODE_MARK}
+const workId = ${scriptLiteral(workId)};
+const target = document.querySelector('#work');
+const history = document.querySelector('#events');
+async function render() {
+  try {
+    const work = await api('/v1/operational-work/' + workId);
+    document.querySelector('#title').innerHTML = 'Requested work ' + statusPill(work.status)
+      + (work.outcome ? ' ' + statusPill(work.outcome) : '');
+    document.querySelector('#subtitle').textContent = 'Origin: ' + work.origin.system + ' ' + work.origin.type + ' ' + work.origin.id
+      + ' · contract ' + work.contract + (work.intent ? ' · ' + work.intent : '');
+    target.innerHTML =
+      '<div class="banner"><p><strong>Origin</strong> ' + esc(work.origin.system) + ' · ' + esc(work.origin.type) + ' <code>' + esc(work.origin.id) + '</code></p>'
+      + '<p class="muted">A reference Factory records, never a source it reads. Whether each step may run was decided by AuthBoundry, not by the request.</p></div>'
+      + (work.graphId ? '<p><a href="/factory/graphs/' + esc(work.graphId) + '">Action graph ' + esc(work.graphId) + '</a></p>' : '<p class="muted">Not yet planned.</p>')
+      + '<div class="nodes">' + work.actions.map((node) =>
+        '<div class="node ' + esc(node.status) + '"><div class="node-head"><span class="mark">' + mark(node.status) + '</span> '
+        + '<a href="/factory/actions/' + esc(node.actionId) + '">' + esc(node.key) + '</a> ' + statusPill(node.status)
+        + (node.outcome && node.outcome !== 'succeeded' ? ' ' + statusPill(node.outcome) : '')
+        + (node.implied ? ' <span class="muted">(added by Factory operational rules)</span>' : '') + '</div>'
+        + '<div class="muted">' + esc(node.capability) + (node.provider ? ' · ' + esc(node.provider) : '') + '</div>'
+        + (node.runId ? '<div class="muted">run: <a href="/factory/runs/' + esc(node.runId) + '">' + esc(node.runId) + '</a>'
+            + (node.evidenceId ? ' · <a href="/v1/runs/' + esc(node.runId) + '/evidence">evidence</a>' : '') + '</div>' : '')
+        + '</div>').join('<div class="arrow">↓</div>') + '</div>'
+      + '<p>' + (!['completed', 'failed', 'cancelled'].includes(work.status) ? '<button id="cancel">Cancel</button>' : '') + '</p>';
+    const cancel = target.querySelector('#cancel');
+    if (cancel) cancel.onclick = async () => { if (!confirm('Cancel this work?')) return; try { await api('/v1/operational-work/' + workId + '/cancel', { method: 'POST', body: JSON.stringify({}) }); await render(); } catch (error) { fail(target, error); } };
+    const { events } = await api('/v1/operational-work/' + workId + '/events');
+    history.innerHTML = events.length
+      ? '<table><thead><tr><th>Event</th><th>Status</th><th>Outcome</th><th>When</th></tr></thead><tbody>'
+        + events.map((event) => '<tr><td>' + esc(event.type) + '</td><td>' + statusPill(event.status) + '</td>'
+          + '<td>' + (event.outcome ? statusPill(event.outcome) : '<span class="muted">—</span>') + '</td>'
+          + '<td class="muted">' + esc(event.createdAt) + '</td></tr>').join('') + '</tbody></table>'
+      : '<p class="muted">No events yet.</p>';
   } catch (error) { fail(target, error); }
 }
 await render();

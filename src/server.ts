@@ -36,6 +36,8 @@ import {
   runPage,
   runsPage,
   settingsPage,
+  workListPage,
+  workPage,
 } from './product-ui.js';
 import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
@@ -90,7 +92,23 @@ import {
 } from './appport-services.js';
 import { composeProductUi, factoryUiContribution, factoryUiContributor, type UiContributor } from './ui.js';
 import type { AppPortUiContext, ComposedUi } from '@appport/client';
-import { filterUiContribution, type UiDiscoveryDocument } from '@appport/protocol';
+import { filterUiContribution, type AppRequest, type AppResponse, type UiDiscoveryDocument } from '@appport/protocol';
+import { AppPortApplication, permissionAuthorizer } from '@appport/sdk';
+import {
+  OPERATIONAL_WORK_TERMINAL_EVENTS,
+  operationalWorkCapability,
+  operationalWorkFingerprint,
+  operationalWorkId,
+  operationalWorkResult,
+  operationalWorkStatus,
+  OperationalWorkConflictError,
+  OperationalWorkRequestError,
+  parseOperationalWorkRequest,
+  plannedActions,
+  planOperationalWork,
+  toAppPortError,
+  type OperationalWorkResult,
+} from './operational-work.js';
 import {
   formatDeploymentConfigDiagnostics,
   readDeploymentConfig,
@@ -100,6 +118,8 @@ import {
 import type {
   ActionGraphOrigin,
   ActionGraphRecord,
+  OperationalWorkRecord,
+  OperationalWorkStatus,
   ActionOutcome,
   ActionRecord,
   ProviderExecution,
@@ -121,6 +141,9 @@ import type {
   StructuredEvidence,
   WorkRecord,
 } from './types.js';
+
+/** Namespaced AppPort extension carrying Factory's own invocation token. */
+const INVOCATION_EXTENSION = 'factory.invocation';
 
 function isTerminal(status: RunRecord['status']): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
@@ -245,6 +268,14 @@ export class FactoryService {
   private readonly domain: FactoryDomain;
   private readonly registry: ProviderRegistry;
   private readonly controlPlane: AuthBoundryControlPlane | null;
+  /**
+   * The AppPort runtime for capabilities other systems call on Factory. Attn
+   * reaches the operational work contract through it, over the same protocol
+   * as every other AppPort application, with the caller already authenticated
+   * by AuthBoundry before any envelope is opened.
+   */
+  private readonly appPortRuntime: AppPortApplication;
+  private readonly invocations = new Map<string, { context: AuthenticatedContext; probe?: CapabilityProbe }>();
   private connection: FactoryConnectionState = {
     status: 'unverified',
     reason: 'the Factory application association has not been checked yet',
@@ -266,6 +297,25 @@ export class FactoryService {
     });
     this.association = factoryAssociation(this.flowSpec);
     this.domain = new FactoryDomain(db);
+    this.appPortRuntime = new AppPortApplication({
+      application: { id: application.identity.id, name: application.identity.name, version: application.identity.version },
+      capabilities: [operationalWorkCapability(async (input, capabilityContext) => {
+        // The authenticated context is found by a token Factory itself put on
+        // the envelope, never by the caller's requestId, which two callers
+        // may share.
+        const token = capabilityContext.extensions[INVOCATION_EXTENSION];
+        const invocation = typeof token === 'string' ? this.invocations.get(token) : undefined;
+        if (!invocation) throw new AuthBoundryAuthenticationError('AppPort request has no authenticated Factory context');
+        try {
+          return (await this.createOperationalWork(invocation.context, input, invocation.probe)).result;
+        } catch (error) {
+          return toAppPortError(error, capabilityContext);
+        }
+      })],
+      authorizer: permissionAuthorizer(),
+      mode: 'production',
+      builtins: false,
+    });
     this.registry = new ProviderRegistry(this.flowSpec, config.providerAdapters);
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
@@ -854,6 +904,8 @@ export class FactoryService {
    * graph is durable state only: nothing here authorizes or executes.
    */
   async createActionGraph(context: AuthenticatedContext, input: {
+    /** A caller-derived identity, when the graph must be found again after a restart. */
+    id?: string;
     projectId: string;
     environmentId?: string;
     origin?: Partial<ActionGraphOrigin>;
@@ -889,7 +941,7 @@ export class FactoryService {
 
     const timestamp = new Date().toISOString();
     const graph = await this.domain.createGraph({
-      id: `graph_${randomUUID()}`,
+      id: input.id ?? `graph_${randomUUID()}`,
       tenantId,
       projectId: input.projectId,
       ...(input.environmentId ? { environmentId: input.environmentId } : {}),
@@ -1099,6 +1151,234 @@ export class FactoryService {
             : null,
       })),
     };
+  }
+
+  /* -----------------------------------------------------------------------
+   * Operational work: the Attn ↔ Factory boundary.
+   * -------------------------------------------------------------------- */
+
+  /**
+   * Accept operational work from another system and act on it.
+   *
+   * The request is validated against the contract, translated into Factory's
+   * own Action Graph, and coordinated through the same path as any graph:
+   * each node asks AuthBoundry whether it may run, and the answer decides.
+   * The origin on the request is recorded as provenance and nothing more.
+   *
+   * The same origin and idempotency key always name the same work. A retry —
+   * from the caller, or from this process after a restart — finds the work
+   * already created, finishes whatever step was interrupted, and returns
+   * the same identifiers rather than creating anything twice.
+   */
+  async createOperationalWork(
+    context: AuthenticatedContext,
+    input: unknown,
+    probe?: CapabilityProbe,
+    options: { coordinate?: boolean } = {},
+  ): Promise<{ created: boolean; result: OperationalWorkResult }> {
+    const request = parseOperationalWorkRequest(input);
+    const tenantId = context.tenant;
+    const id = operationalWorkId(tenantId, request);
+    const fingerprint = operationalWorkFingerprint(request);
+
+    let work = await this.domain.getOperationalWork(tenantId, id);
+    let created = false;
+    if (work) {
+      if (work.requestFingerprint !== fingerprint) {
+        throw new OperationalWorkConflictError(
+          `idempotency key ${request.idempotencyKey} from ${request.origin.system} ${request.origin.type} ${request.origin.id} `
+          + 'already names different work; a new request needs a new key',
+        );
+      }
+    } else {
+      // Tenant-scoped reads: a project or environment another tenant owns is
+      // simply not found, so nothing can be requested against it.
+      if (!await this.domain.getProject(tenantId, request.project)) {
+        throw new DomainValidationError(`project ${request.project} was not found`);
+      }
+      if (request.environment && !await this.domain.getEnvironment(tenantId, request.project, request.environment)) {
+        throw new DomainValidationError(`environment ${request.environment} was not found`);
+      }
+      const timestamp = new Date().toISOString();
+      const record: OperationalWorkRecord = {
+        id,
+        tenantId,
+        projectId: request.project,
+        ...(request.environment ? { environmentId: request.environment } : {}),
+        contract: request.contract,
+        origin: request.origin,
+        idempotencyKey: request.idempotencyKey,
+        requestFingerprint: fingerprint,
+        requestedBy: context.principal,
+        ...(request.intent ? { intent: request.intent } : {}),
+        requested: request.actions,
+        plan: planOperationalWork(request),
+        status: 'accepted',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      try {
+        work = await this.domain.createOperationalWork(record);
+        created = true;
+        await this.domain.appendOperationalWorkEvent({
+          workId: id, tenantId, type: 'OperationalWorkAccepted', status: 'accepted', origin: record.origin,
+        });
+      } catch (error) {
+        // Two identical requests at once: the one that lost the insert
+        // continues with the record the other wrote.
+        const existing = await this.domain.getOperationalWork(tenantId, id);
+        if (!existing) throw error;
+        work = existing;
+      }
+    }
+
+    if (!work.graphId && work.status !== 'cancelled') {
+      work = (await this.domain.patchOperationalWork(tenantId, id, { status: 'planning' })) ?? work;
+      // The graph's identity is derived from the work's, so a restart between
+      // creating the graph and recording it adopts the graph instead of
+      // creating a second one.
+      const graphId = `graph_${id.slice('owk_'.length)}`;
+      let graph = await this.domain.getGraph(tenantId, graphId);
+      if (!graph) {
+        graph = (await this.createActionGraph(context, {
+          id: graphId,
+          projectId: work.projectId,
+          ...(work.environmentId ? { environmentId: work.environmentId } : {}),
+          origin: { kind: 'external', sourceSystem: work.origin.system, sourceType: work.origin.type, sourceId: work.origin.id },
+          actions: plannedActions(work),
+        }, probe)).graph;
+      }
+      work = (await this.domain.patchOperationalWork(tenantId, id, { graphId: graph.id })) ?? work;
+      await this.domain.appendOperationalWorkEvent({
+        workId: id, tenantId, type: 'OperationalWorkPlanned', status: 'ready', origin: work.origin, graphId: graph.id,
+      });
+    }
+
+    if (options.coordinate !== false && work.graphId && work.status !== 'cancelled') {
+      // Another system asked, so Factory acts on its own behalf here: every
+      // node needs AuthBoundry's permission to run autonomously, and a node
+      // it refuses waits for a person exactly as it would in any graph.
+      await this.coordinateGraph(context, work.graphId, { ...(probe ? { probe } : {}), autonomous: true });
+    }
+
+    return { created, result: (await this.operationalWorkView(context, id))! };
+  }
+
+  /** The current result, derived from the graph, with state transitions recorded once. */
+  async operationalWorkView(context: AuthenticatedContext, workId: string): Promise<OperationalWorkResult | null> {
+    const tenantId = context.tenant;
+    const work = await this.domain.getOperationalWork(tenantId, workId);
+    if (!work) return null;
+    return this.syncOperationalWork(work);
+  }
+
+  async listOperationalWork(context: AuthenticatedContext, projectId?: string): Promise<OperationalWorkResult[]> {
+    const records = await this.domain.listOperationalWork(context.tenant, projectId);
+    return Promise.all(records.map((work) => this.syncOperationalWork(work)));
+  }
+
+  async operationalWorkEvents(context: AuthenticatedContext, workId: string) {
+    return this.domain.listOperationalWorkEvents(context.tenant, workId);
+  }
+
+  /** Stop the work: its graph is cancelled and nodes that never ran stay that way. */
+  async cancelOperationalWork(context: AuthenticatedContext, workId: string): Promise<OperationalWorkResult | null> {
+    const tenantId = context.tenant;
+    const work = await this.domain.getOperationalWork(tenantId, workId);
+    if (!work) return null;
+    if (work.status === 'cancelled' || work.status === 'completed' || work.status === 'failed') {
+      return this.syncOperationalWork(work);
+    }
+    if (work.graphId) {
+      // The graph is the state; cancelling it is what makes the work cancelled,
+      // and the sync below records that transition once.
+      await this.cancelActionGraph(context, work.graphId);
+      return this.syncOperationalWork(work);
+    }
+    const cancelled = (await this.domain.patchOperationalWork(tenantId, workId, {
+      status: 'cancelled', completedAt: new Date().toISOString(),
+    })) ?? work;
+    await this.domain.appendOperationalWorkEvent({
+      workId, tenantId, type: 'OperationalWorkCancelled', status: 'cancelled', outcome: 'cancelled', origin: work.origin,
+    });
+    return this.syncOperationalWork(cancelled);
+  }
+
+  /**
+   * Handle the contract as an AppPort request envelope.
+   *
+   * The caller was authenticated by AuthBoundry before this is reached; the
+   * envelope is dispatched through Factory's AppPort runtime, which validates
+   * it against the capability's typed schema and answers with a protocol
+   * envelope. There is no Attn-specific transport.
+   */
+  async handleOperationalWorkEnvelope(
+    context: AuthenticatedContext,
+    envelope: AppRequest,
+    probe?: CapabilityProbe,
+  ): Promise<AppResponse> {
+    if (envelope.idempotencyKey && envelope.input && typeof envelope.input === 'object'
+      && !Array.isArray(envelope.input) && (envelope.input as Record<string, unknown>).idempotencyKey === undefined) {
+      envelope = { ...envelope, input: { ...(envelope.input as Record<string, unknown>), idempotencyKey: envelope.idempotencyKey } };
+    }
+    const token = randomUUID();
+    this.invocations.set(token, { context, ...(probe ? { probe } : {}) });
+    try {
+      const now = new Date().toISOString();
+      return await this.appPortRuntime.handleRequest({
+        ...envelope,
+        extensions: { ...envelope.extensions, [INVOCATION_EXTENSION]: token },
+      }, {
+        principal: { id: context.principal, type: 'service' },
+        session: {
+          id: `factory:${envelope.requestId}`,
+          principal: { id: context.principal, type: 'service' },
+          applicationId: this.applicationId,
+          createdAt: now,
+          // The one permission this route was authenticated for. AppPort
+          // re-checks it; it does not widen it.
+          permissions: ['factory.run'],
+        },
+        transport: 'http',
+      });
+    } finally {
+      this.invocations.delete(token);
+    }
+  }
+
+  private async syncOperationalWork(work: OperationalWorkRecord): Promise<OperationalWorkResult> {
+    const tenantId = work.tenantId;
+    const graph = work.graphId ? await this.domain.getGraph(tenantId, work.graphId) : null;
+    const actions = graph ? await this.domain.graphActions(tenantId, graph.id) : [];
+    const evidence = new Map<string, StructuredEvidence>();
+    for (const action of actions) {
+      if (!action.runId) continue;
+      const record = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(action.runId);
+      if (record) evidence.set(action.runId, record);
+    }
+    const status: OperationalWorkStatus = operationalWorkStatus(work, graph, actions);
+    let current = work;
+    if (status !== work.status) {
+      const terminal = status === 'completed' || status === 'failed' || status === 'cancelled';
+      current = (await this.domain.patchOperationalWork(tenantId, work.id, {
+        status,
+        ...(terminal && !work.completedAt ? { completedAt: new Date().toISOString() } : {}),
+      })) ?? work;
+      const type = OPERATIONAL_WORK_TERMINAL_EVENTS[status];
+      if (type) {
+        const result = operationalWorkResult({ work: current, graph, actions, evidence, status });
+        await this.domain.appendOperationalWorkEvent({
+          workId: work.id, tenantId, type, status, outcome: result.outcome, origin: work.origin,
+          ...(work.graphId ? { graphId: work.graphId } : {}),
+          summary: {
+            completedActions: result.completedActions,
+            blockedActions: result.blockedActions,
+            failedActions: result.failedActions,
+          },
+        });
+      }
+    }
+    return operationalWorkResult({ work: current, graph, actions, evidence, status });
   }
 
   private async providerContext(
@@ -2151,6 +2431,9 @@ function productSurface(pathname: string): string | null {
   if (pathname === '/factory/providers') return providersPage();
   if (pathname === '/factory/settings') return settingsPage();
   if (pathname === '/factory/graphs') return graphsPage();
+  if (pathname === '/factory/work') return workListPage();
+  const work = pathname.match(/^\/factory\/work\/([A-Za-z0-9._:-]{1,128})$/);
+  if (work) return workPage(work[1]!);
   const graph = pathname.match(/^\/factory\/graphs\/([A-Za-z0-9._:-]{1,128})$/);
   if (graph) return graphPage(graph[1]!);
   const project = pathname.match(/^\/factory\/projects\/([A-Za-z0-9._:-]{1,128})$/);
@@ -2311,6 +2594,10 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           if (error instanceof DomainValidationError || error instanceof IntervalError
             || error instanceof GraphValidationError) {
             writeJson(response, 400, { error: error.message, code: 'INVALID_REQUEST' });
+            return;
+          }
+          if (error instanceof OperationalWorkRequestError || error instanceof OperationalWorkConflictError) {
+            writeJson(response, error.status, { error: error.message, code: error.code });
             return;
           }
           if (error instanceof FactoryAssociationError

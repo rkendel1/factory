@@ -689,3 +689,82 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;
 }
+
+/* -------------------------------------------------------------------------
+ * Operational work requested across the Attn ↔ Factory boundary.
+ *
+ * One record per request identity (tenant, origin, idempotency key). It
+ * remembers what was asked and how Factory translated it; everything about
+ * what then happened lives on the Action Graph, its Actions, their Runs and
+ * their Evidence. Nothing is duplicated here.
+ * ---------------------------------------------------------------------- */
+
+export type OperationalWorkStatus =
+  | 'accepted'
+  | 'planning'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface OperationalWorkPlanStep {
+  key: string;
+  verb: string;
+  capability: string;
+  /** Added by Factory's operational rules rather than requested. */
+  implied: boolean;
+  reason: string;
+  dependsOn: string[];
+  parameters?: Record<string, string | number | boolean>;
+}
+
+export interface OperationalWorkRecord {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  environmentId?: string;
+  contract: string;
+  /** Provenance of the request. Referenced, never dereferenced. */
+  origin: { system: string; type: string; id: string };
+  idempotencyKey: string;
+  /** Hash of the whole request, so a reused key with a different request is refused. */
+  requestFingerprint: string;
+  requestedBy: string;
+  intent?: string;
+  requested: { verb: string; target?: string; parameters?: Record<string, string | number | boolean> }[];
+  plan: OperationalWorkPlanStep[];
+  graphId?: string;
+  status: OperationalWorkStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  __version?: number;
+}
+
+export type OperationalWorkEventType =
+  | 'OperationalWorkAccepted'
+  | 'OperationalWorkPlanned'
+  | 'OperationalWorkCompleted'
+  | 'OperationalWorkFailed'
+  | 'OperationalWorkBlocked'
+  | 'OperationalWorkCancelled';
+
+/**
+ * A durable notice that work changed state, for Attn to read through Factory's
+ * API. It carries identifiers and outcomes only: no command, no log, no
+ * credential, and nothing Attn would need Factory's database to interpret.
+ */
+export interface OperationalWorkEventRecord {
+  id: string;
+  workId: string;
+  tenantId: string;
+  type: OperationalWorkEventType;
+  status: OperationalWorkStatus;
+  outcome?: string | null;
+  origin: { system: string; type: string; id: string };
+  graphId?: string;
+  summary?: { completedActions: string[]; blockedActions: string[]; failedActions: string[] };
+  createdAt: string;
+}
