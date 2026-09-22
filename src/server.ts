@@ -41,6 +41,15 @@ import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
 import { createReconciliationScheduler, type SchedulerHandle } from './scheduler.js';
 import {
+  planOperation,
+  providerExecution,
+  ProviderRegistry,
+  resolveProvider,
+  verifyOperation,
+  type ProviderContext,
+} from './adapters.js';
+import { isOperationalCapability, REQUIRED_VERIFICATION } from './capabilities.js';
+import {
   blockingDependencies,
   graphStatus,
   GraphValidationError,
@@ -93,6 +102,7 @@ import type {
   ActionGraphRecord,
   ActionOutcome,
   ActionRecord,
+  ProviderExecution,
   AuthorityContextRecord,
   AutonomyDecision,
   ReconciliationOutcome,
@@ -106,6 +116,7 @@ import type {
   FactoryServiceConfig,
   RunEventRecord,
   RunRecord,
+  DesiredStateRecord,
   RunRequest,
   StructuredEvidence,
   WorkRecord,
@@ -232,6 +243,7 @@ export class FactoryService {
   private readonly environmentId: string;
   private readonly association: FactoryAssociation;
   private readonly domain: FactoryDomain;
+  private readonly registry: ProviderRegistry;
   private readonly controlPlane: AuthBoundryControlPlane | null;
   private connection: FactoryConnectionState = {
     status: 'unverified',
@@ -254,6 +266,7 @@ export class FactoryService {
     });
     this.association = factoryAssociation(this.flowSpec);
     this.domain = new FactoryDomain(db);
+    this.registry = new ProviderRegistry(this.flowSpec, config.providerAdapters);
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
         && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
@@ -856,6 +869,16 @@ export class FactoryService {
     const ordered = orderPlan(input.actions);
     const authorities = getOperationAuthorities(this.flowSpec);
     for (const entry of ordered) {
+      const capability = entry.action.capability ?? (isOperationalCapability(entry.action.type) ? entry.action.type : undefined);
+      if (capability) {
+        if (!isOperationalCapability(capability)) {
+          throw new GraphValidationError(`action ${entry.key}: ${capability} is not an operational capability Factory knows`);
+        }
+        if (this.registry.providersFor(capability).length === 0) {
+          throw new GraphValidationError(`action ${entry.key}: no .flow operation declares ${capability}`);
+        }
+        continue;
+      }
       const operation = entry.action.operation ?? entry.action.type;
       if (!authorities.has(operation)) {
         throw new GraphValidationError(
@@ -885,6 +908,7 @@ export class FactoryService {
         ...(entry.action.intent ? { intent: entry.action.intent } : {}),
         ...(input.environmentId ? { environmentId: input.environmentId } : {}),
         ...(entry.action.operation ? { operation: entry.action.operation } : {}),
+        ...(entry.action.capability ? { capability: entry.action.capability } : {}),
         ...(entry.action.parameters ? { parameters: entry.action.parameters } : {}),
         graph: {
           id: graph.id,
@@ -1060,8 +1084,99 @@ export class FactoryService {
         previousRunIds: action.previousRunIds ?? [],
         verification: action.verification ?? [],
         executionProvider: action.executionProvider ?? null,
+        capability: action.capability ?? null,
+        provider: action.provider ?? null,
+        resource: action.resource ?? null,
+        // The specific reason, from durable state, never a generic "failed".
+        reason: (action.blockedBy ?? []).length
+          ? (action.blockedBy ?? []).map((id) => {
+              const dependency = byId.get(id);
+              return `${dependency?.type ?? id} — ${dependency?.outcome ?? 'failed'}`;
+            }).join('; ')
+          : action.outcome && action.outcome !== 'succeeded'
+            ? `${action.outcome}${action.verification?.find((check) => check.status === 'failed')?.detail
+                ? ': ' + action.verification.find((check) => check.status === 'failed')!.detail : ''}`
+            : null,
       })),
     };
+  }
+
+  private async providerContext(
+    tenantId: string,
+    action: ActionRecord,
+    repository: RepositoryRecord | null,
+    desiredState: DesiredStateRecord | null,
+    idempotencyKey: string,
+  ): Promise<ProviderContext> {
+    const environment = action.environmentId
+      ? await this.domain.getEnvironment(tenantId, action.projectId, action.environmentId)
+      : null;
+    const discovery = this.config.repositoryRoot
+      ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
+      : null;
+    return { repository, environment, desiredState, discovery, idempotencyKey };
+  }
+
+  providerRegistry(): ProviderRegistry {
+    return this.registry;
+  }
+
+  /**
+   * What each provider can do from here, and whether it can do it now.
+   *
+   * `unsupported` means `.flow` declares nothing for it; `unavailable` means
+   * the adapter cannot reach its system from this process. Neither is an
+   * authorization: whether Factory may perform an operation is AuthBoundry's
+   * answer, asked per Action, and nothing on this page stands in for it.
+   */
+  async operationalProviders(context?: AuthenticatedContext): Promise<Record<string, unknown>[]> {
+    const tenantId = context?.tenant;
+    const environments = tenantId
+      ? (await Promise.all((await this.domain.listProjects(tenantId)).map(async (project) => ({
+          project,
+          environments: await this.domain.listEnvironments(tenantId, project.id),
+          desiredState: await this.domain.getDesiredState(tenantId, project.id),
+        }))))
+      : [];
+    const actions = tenantId ? await this.domain.listActions(tenantId) : [];
+
+    return Promise.all(this.registry.adapters.map(async (adapter) => {
+      const capabilities = this.registry.capabilitiesOf(adapter.id);
+      const availability = await adapter.availability();
+      const projects = environments
+        .filter(({ environments: list, desiredState }) =>
+          list.some((environment) => environment.provider === adapter.id) || desiredState?.targetProvider === adapter.id)
+        .map(({ project, environments: list }) => ({
+          id: project.id,
+          name: project.name,
+          environments: list.filter((environment) => environment.provider === adapter.id).map((environment) => environment.name),
+        }));
+      const recent = actions.filter((action) => action.provider === adapter.id).slice(0, 10);
+      return {
+        id: adapter.id,
+        name: adapter.displayName,
+        status: capabilities.length === 0 ? 'unsupported' : availability.state,
+        detail: capabilities.length === 0 ? 'no .flow operation declares a capability for this provider' : availability.detail,
+        configured: projects.length > 0,
+        credentials: [...adapter.credentials],
+        note: 'configured and available describe reachability; authorization is decided per Action by AuthBoundry',
+        capabilities: capabilities.map((entry) => ({
+          capability: entry.capability,
+          operation: entry.operation,
+          requiredAuthority: [...entry.authority.capabilities],
+          verificationRequires: REQUIRED_VERIFICATION[entry.capability] ?? null,
+          idempotency: adapter.idempotency(entry.capability),
+          recent: recent.filter((action) => action.capability === entry.capability).map((action) => ({
+            id: action.id, status: action.status, outcome: action.outcome ?? null, updatedAt: action.updatedAt,
+          })),
+        })),
+        projects,
+        recentActions: recent.map((action) => ({
+          id: action.id, capability: action.capability ?? null, resource: action.resource ?? null,
+          status: action.status, outcome: action.outcome ?? null, updatedAt: action.updatedAt,
+        })),
+      };
+    }));
   }
 
   /**
@@ -1095,21 +1210,34 @@ export class FactoryService {
    * only planned here: nothing is authorized and nothing executes.
    */
   async createAction(context: AuthenticatedContext, projectId: string, input: {
-    type: string;
+    type?: string;
     intent?: string;
     environmentId?: string;
     repositoryId?: string;
     operation?: string;
+    capability?: string;
     parameters?: Record<string, unknown>;
     graph?: { id: string; dependsOn: string[]; sequence: number };
   }, probe?: CapabilityProbe): Promise<ActionRecord> {
     const tenantId = context.tenant;
     const project = await this.domain.getProject(tenantId, projectId);
     if (!project) throw new DomainValidationError(`project ${projectId} was not found`);
-
-    const operation = input.operation ?? input.type;
     const authorities = getOperationAuthorities(this.flowSpec);
-    if (!authorities.has(operation)) {
+
+    /*
+     * An Action names what it needs done. When that is an operational
+     * capability, the provider and the `.flow` operation are resolved from
+     * durable configuration rather than named by the caller; when it is an
+     * operation, the operation is checked against `.flow` as before.
+     */
+    const capability = input.capability ?? (isOperationalCapability(input.type) ? input.type : undefined);
+    if (capability !== undefined && !isOperationalCapability(capability)) {
+      throw new DomainValidationError(`${capability} is not an operational capability Factory knows`);
+    }
+    const type = input.type ?? capability;
+    if (!type) throw new DomainValidationError('an action needs a type or a capability');
+    let operation = input.operation ?? type;
+    if (!capability && !authorities.has(operation)) {
       throw new DomainValidationError(
         `no .flow operation named ${operation}; declared operations are ${[...authorities.keys()].sort().join(', ')}`,
       );
@@ -1130,13 +1258,46 @@ export class FactoryService {
     const discovery = this.config.repositoryRoot
       ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
       : null;
+
+    // Provider resolution is deterministic and never falls back. A capability
+    // no `.flow` operation declares is refused; a capability whose configured
+    // provider cannot satisfy it becomes a durable, explicit outcome.
+    const providerContext: ProviderContext = { repository, environment, desiredState, discovery, idempotencyKey: '' };
+    let resolved: ReturnType<typeof resolveProvider> | null = null;
+    let unavailable: { outcome: 'provider-unavailable'; reason: string } | null = null;
+    if (capability) {
+      resolved = resolveProvider(this.registry, capability, providerContext);
+      if (!resolved.ok && resolved.outcome === 'capability-unavailable') {
+        throw new DomainValidationError(resolved.reason);
+      }
+      if (!resolved.ok) unavailable = { outcome: 'provider-unavailable', reason: resolved.reason };
+      else operation = resolved.operation;
+    } else {
+      const authority = authorities.get(operation);
+      if (authority?.provider && isOperationalCapability(authority.operationalCapability)) {
+        resolved = resolveProvider(this.registry, authority.operationalCapability, providerContext);
+        if (!resolved.ok) resolved = null;
+      }
+    }
+    const providerPlan = resolved?.ok ? planOperation(this.registry, resolved, providerContext) : null;
+
     const plan = planFromDiscovery({
-      type: input.type,
+      type,
       desiredState,
       discovery,
       repository,
       ...(environment ? { environmentName: environment.name } : {}),
     });
+
+    if (providerPlan) {
+      plan.splice(plan.length - 1, 0, {
+        order: plan.length,
+        summary: `${providerPlan.provider} performs ${providerPlan.capability} on ${providerPlan.resource}`,
+        detail: providerPlan.expectedEffects.join('; '),
+        basis: 'provider adapter plan',
+      });
+      plan.forEach((step, index) => { step.order = index + 1; });
+    }
 
     const autonomy = await this.autonomyDecision(probe);
     const timestamp = new Date().toISOString();
@@ -1145,21 +1306,30 @@ export class FactoryService {
       projectId,
       ...(environment ? { environmentId: environment.id } : {}),
       tenantId,
-      type: input.type,
+      type,
       intent: input.intent?.trim()
         || `Make ${project.name} match its desired state by running ${operation}`,
       plan,
       ...(discovery ? { discovery } : {}),
-      operation,
-      ...(providerForOperation(this.flowSpec, operation)
+      ...(unavailable ? {} : { operation }),
+      ...(!unavailable && providerForOperation(this.flowSpec, operation)
         ? { executionProvider: providerForOperation(this.flowSpec, operation)! }
+        : {}),
+      ...(capability ? { capability } : resolved?.ok ? { capability: resolved.capability } : {}),
+      ...(resolved?.ok ? { provider: resolved.provider, resource: resolved.resource } : {}),
+      ...(resolved?.ok && REQUIRED_VERIFICATION[resolved.capability]
+        ? { verificationRequires: REQUIRED_VERIFICATION[resolved.capability]! }
         : {}),
       /*
        * Whether this waits for a person is the authority's answer, not a rule
        * Factory holds. An Action nobody is allowed to run autonomously is the
        * one a human is asked about.
        */
-      status: autonomy.allowed ? 'planned' : 'awaiting-approval',
+      status: unavailable ? 'failed' : autonomy.allowed ? 'planned' : 'awaiting-approval',
+      ...(unavailable ? {
+        outcome: unavailable.outcome,
+        verification: [{ name: 'provider', status: 'failed' as const, detail: unavailable.reason }],
+      } : {}),
       autonomy,
       ...(input.parameters ? { parameters: input.parameters } : {}),
       ...(input.graph ? {
@@ -1192,6 +1362,10 @@ export class FactoryService {
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
     if (action.status === 'running') return action;
+    // A finished Action is finished. Running it again would reach the provider
+    // boundary a second time; a failed one comes back only through an explicit
+    // retry, which returns it to planned first.
+    if (action.status === 'succeeded' || action.status === 'failed') return action;
 
     /*
      * The authority is asked again here rather than trusting the answer stored
@@ -1242,6 +1416,27 @@ export class FactoryService {
     const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
     await this.domain.patchAction(tenantId, actionId, { status: 'running' });
 
+    /*
+     * Only now, after AuthBoundry has answered, does the provider adapter get
+     * asked for what to run. The adapter hands over parameters and credential
+     * names; the execution boundary resolves the values at spawn time.
+     */
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState,
+      action.retries ? `${action.id}:retry:${action.retries}` : action.id);
+    let execution: ProviderExecution | undefined;
+    if (action.provider && isOperationalCapability(action.capability)) {
+      const resolution = resolveProvider(this.registry, action.capability, providerContext);
+      if (!resolution.ok || resolution.provider !== action.provider) {
+        return await this.domain.patchAction(tenantId, actionId, {
+          status: 'failed',
+          outcome: 'provider-unavailable',
+          verification: [{ name: 'provider', status: 'failed', detail: resolution.ok
+            ? `provider ${action.provider} is no longer the configured provider` : resolution.reason }],
+        }) ?? action;
+      }
+      execution = providerExecution(this.registry, resolution, providerContext);
+    }
+
     const run = await this.startRun({
       workId: work.id,
       repository: {
@@ -1253,7 +1448,7 @@ export class FactoryService {
       operation: action.operation ?? action.type,
       // A retried Action is admitted as a new Run; the earlier Run is history.
       ...(action.retries ? { idempotencyKey: `${action.id}:retry:${action.retries}` } : {}),
-    }, context);
+    }, context, execution);
 
     await this.patchRun(run.id, {
       actionId: action.id,
@@ -1266,6 +1461,11 @@ export class FactoryService {
 
     const settled = await this.getRun(run.id, context);
     const verification = await this.verifyRun(settled?.id ?? run.id, desiredState?.healthRequirement);
+    // The adapter reads the operation's result back; Factory keeps the verdict.
+    const evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(run.id);
+    if (evidenceRecord && settled?.status === 'completed') {
+      verification.push(...verifyOperation(this.registry, action, evidenceRecord, providerContext));
+    }
     const succeeded = settled?.status === 'completed'
       && verification.every((check) => check.status !== 'failed');
 
@@ -1661,7 +1861,11 @@ export class FactoryService {
     }
   }
 
-  async startRun(request: RunRequest, principalOrContext: string | AuthenticatedContext): Promise<RunRecord> {
+  async startRun(
+    request: RunRequest,
+    principalOrContext: string | AuthenticatedContext,
+    execution?: ProviderExecution,
+  ): Promise<RunRecord> {
     if (this.shuttingDown) {
       throw new Error('Factory service is shutting down');
     }
@@ -1729,7 +1933,7 @@ export class FactoryService {
         this.connection.status === 'associated' ? this.connection.association : null,
         context.principal,
       ),
-    });
+    }, execution);
     run = await this.patchRun(run.id, { authorizationDecisionId: authorization.decision.id });
 
     if (!authorization.allowed || !authorization.contract) {

@@ -23,11 +23,20 @@ test('AppPort SDK is the canonical Factory protocol contract', () => {
     ],
   });
   assert.equal(manifest.application.id, 'software_factory');
+  // Every .flow operation, provider-backed ones included, is projected as an
+  // AppPort capability. The neutral operational vocabulary is a separate axis.
   assert.deepEqual(manifest.provides.map((capability) => capability.name), [
     'softwarefactory.architectureconformance',
+    'softwarefactory.buildrun',
+    'softwarefactory.flydeploymentcreate',
+    'softwarefactory.flyenvironmenthealth',
+    'softwarefactory.flyenvironmentinspect',
     'softwarefactory.pullrequestmerge',
     'softwarefactory.repoecho',
     'softwarefactory.repositorieslist',
+    'softwarefactory.repositorycheckout',
+    'softwarefactory.repositoryinspect',
+    'softwarefactory.testrun',
   ]);
   assert.equal(factoryAppPortApplication.fingerprint(), contract.appBoundry.contractFingerprint);
   assert.equal(contract.fingerprint, contract.appBoundry.contractFingerprint);

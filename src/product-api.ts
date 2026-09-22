@@ -224,11 +224,12 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     async handle({ service, context, params, body, probe }) {
       const input = asRecord(body);
       return json(201, await service.createAction(context, params[0]!, {
-        type: text(input.type, 'type')!,
+        type: text(input.type ?? input.capability, 'type')!,
         ...(input.intent === undefined ? {} : { intent: text(input.intent, 'intent')! }),
         ...(input.environmentId === undefined ? {} : { environmentId: text(input.environmentId, 'environmentId')! }),
         ...(input.repositoryId === undefined ? {} : { repositoryId: text(input.repositoryId, 'repositoryId')! }),
         ...(input.operation === undefined ? {} : { operation: text(input.operation, 'operation')! }),
+        ...(input.capability === undefined ? {} : { capability: text(input.capability, 'capability')! }),
       }, probe));
     },
   },
@@ -389,9 +390,10 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
         const record = asRecord(entry);
         return {
           ...(record.key === undefined ? {} : { key: text(record.key, `actions[${index}].key`)! }),
-          type: text(record.type, `actions[${index}].type`)!,
+          type: text(record.type ?? record.capability, `actions[${index}].type`)!,
           ...(record.intent === undefined ? {} : { intent: text(record.intent, `actions[${index}].intent`)! }),
           ...(record.operation === undefined ? {} : { operation: text(record.operation, `actions[${index}].operation`)! }),
+          ...(record.capability === undefined ? {} : { capability: text(record.capability, `actions[${index}].capability`)! }),
           ...(record.parameters === undefined ? {} : { parameters: asRecord(record.parameters) }),
           ...(record.dependsOn === undefined ? {} : {
             dependsOn: (Array.isArray(record.dependsOn) ? record.dependsOn : [record.dependsOn])
@@ -454,8 +456,26 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     method: 'GET',
     pattern: /^\/v1\/providers$/,
     capability: PRODUCT_CAPABILITIES.read,
-    async handle({ service }) {
-      return json(200, { providers: service.providers() });
+    async handle({ service, context }) {
+      return json(200, { providers: await service.operationalProviders(context), engines: service.providers() });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/providers\/([^/]+)$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const provider = (await service.operationalProviders(context)).find((entry) => entry.id === params[0]);
+      return provider ? json(200, provider) : json(404, { error: 'Provider not found' });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/providers\/([^/]+)\/capabilities$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const provider = (await service.operationalProviders(context)).find((entry) => entry.id === params[0]);
+      return provider ? json(200, { provider: provider.id, capabilities: provider.capabilities }) : json(404, { error: 'Provider not found' });
     },
   },
   {

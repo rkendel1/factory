@@ -124,6 +124,8 @@ export interface ExecutionContract {
     mergeMethod?: 'merge' | 'squash' | 'rebase';
   };
   command?: string[];
+  /** Provider-backed execution, derived server-side; never from the request. */
+  provider?: ProviderExecution;
   limits: {
     timeoutMs: number;
   };
@@ -271,6 +273,8 @@ export interface RepositoryDiscovery {
     /** The commit the repository is actually at, when it is a git checkout. */
     headCommit?: string;
     flyConfigured?: boolean;
+    /** The Fly app fly.toml names, when it names one. */
+    flyApp?: string;
     vercelConfigured?: boolean;
     githubWorkflows?: string[];
   };
@@ -327,6 +331,12 @@ export interface ActionRecord {
   observedStateRevision?: string;
   /** Deterministic identity of the drift this Action closes. */
   reconciliationFingerprint?: string;
+  /* Operational identity: what is needed, who performs it, on what. */
+  capability?: string;
+  provider?: string;
+  resource?: string;
+  /** The capability that must also succeed for this one to count. */
+  verificationRequires?: string;
   /* Graph coordination. The Action stays the unit of work. */
   graphId?: string;
   dependsOn?: string[];
@@ -490,12 +500,31 @@ export interface ActionRelationship {
 /** How an Action ended, kept apart so nothing is flattened into "failed". */
 export type ActionOutcome =
   | 'succeeded'
+  | 'capability-unavailable'
+  | 'provider-unavailable'
   | 'autonomy-denied'
   | 'authority-unavailable'
   | 'awaiting-approval'
   | 'execution-failed'
   | 'verification-failed'
   | 'cancelled';
+
+/**
+ * What a provider adapter hands the execution boundary.
+ *
+ * `environment` carries non-secret parameters the operation needs. `credentials`
+ * names the variables the boundary resolves from its own process at spawn time;
+ * their values never enter a contract, an Action, or evidence.
+ */
+export interface ProviderExecution {
+  provider: string;
+  capability: string;
+  operation: string;
+  resource: string;
+  environment: Record<string, string>;
+  credentials: string[];
+  idempotency: { key: string; exactlyOnce: boolean; note?: string };
+}
 
 export interface RunEventRecord {
   id: string;
@@ -559,6 +588,16 @@ export interface StructuredEvidence {
     tenantId: string;
     principalId: string;
     delegationId: string;
+  };
+  /** What Factory asked the provider to do, and where. Names only, no values. */
+  provider?: {
+    id: string;
+    capability: string;
+    operation: string;
+    resource: string;
+    parameters: Record<string, string>;
+    credentials: string[];
+    idempotency: { key: string; exactlyOnce: boolean; note?: string };
   };
   principal?: string;
   tenantId?: string;
@@ -644,6 +683,8 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
    */
   factoryServiceCredential?: string;
   reconciliationTickMs?: number;
+  /** Provider adapters to register. Defaults to the built-in set. */
+  providerAdapters?: readonly import('./adapters.js').ProviderAdapter[];
   authBoundryControlPlane?: import('./provisioning.js').AuthBoundryControlPlane;
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;

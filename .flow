@@ -350,12 +350,134 @@ app software_factory {
     visibility internal
     operation repo-echo
     principal factory-service
+    provider local
+    operational_capability repository.inspect
     execution_mode native
     command ["node","-e","console.log('authorized')"]
     timeoutMs 10000
     grant repository.read
     grant evidence.write
     appport_operation repo-echo
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability GitRepositoryInspect {
+    visibility internal
+    operation repository.inspect
+    principal factory-service
+    provider git
+    operational_capability repository.inspect
+    execution_mode native
+    command ["git","rev-parse","--short","HEAD"]
+    timeoutMs 30000
+    grant repository.read
+    grant evidence.write
+    appport_operation repository.inspect
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability GitRepositoryCheckout {
+    visibility internal
+    operation repository.checkout
+    principal factory-service
+    provider git
+    operational_capability repository.checkout
+    execution_mode native
+    command ["git","status","--short","--branch"]
+    timeoutMs 30000
+    grant repository.read
+    grant evidence.write
+    appport_operation repository.checkout
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability LocalBuildRun {
+    visibility internal
+    operation build.run
+    principal factory-service
+    provider local
+    operational_capability build.run
+    execution_mode native
+    command ["npm","run","build","--if-present"]
+    timeoutMs 600000
+    grant repository.read
+    grant artifact.write
+    grant evidence.write
+    appport_operation build.run
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability LocalTestRun {
+    visibility internal
+    operation test.run
+    principal factory-service
+    provider local
+    operational_capability test.run
+    execution_mode native
+    command ["npm","run","test","--if-present"]
+    timeoutMs 600000
+    grant repository.read
+    grant evidence.write
+    appport_operation test.run
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability FlyDeploymentCreate {
+    visibility internal
+    operation fly.deployment.create
+    principal factory-service
+    provider fly
+    operational_capability deployment.create
+    execution_mode native
+    command ["fly","deploy","--remote-only","--yes"]
+    timeoutMs 900000
+    grant repository.read
+    grant evidence.write
+    appport_operation fly.deployment.create
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability FlyEnvironmentInspect {
+    visibility internal
+    operation fly.environment.inspect
+    principal factory-service
+    provider fly
+    operational_capability environment.inspect
+    execution_mode native
+    command ["fly","status","--json"]
+    timeoutMs 60000
+    grant repository.read
+    grant evidence.write
+    appport_operation fly.environment.inspect
+    appport_service execution
+    appport_capability repository.read
+    jev bounded
+  }
+
+  capability FlyEnvironmentHealth {
+    visibility internal
+    operation fly.environment.health
+    principal factory-service
+    provider fly
+    operational_capability environment.health
+    execution_mode native
+    command ["node","-e","const url=process.env.FACTORY_HEALTH_URL;if(!url){console.log(JSON.stringify({ok:false,error:'no health url'}));process.exit(0)}fetch(url).then(r=>console.log(JSON.stringify({ok:r.ok,status:r.status,url})),e=>console.log(JSON.stringify({ok:false,error:String(e.message||e),url})))"]
+    timeoutMs 60000
+    grant repository.read
+    grant evidence.write
+    appport_operation fly.environment.health
     appport_service execution
     appport_capability repository.read
     jev bounded

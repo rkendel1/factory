@@ -68,6 +68,7 @@ tr.drift td,tr.drift th{background:color-mix(in srgb,var(--warn) 12%,transparent
 .banner p{margin:.25rem 0}
 .banner.drift{border-left-color:var(--warn)}
 .recon{margin-top:.75rem;border:1px solid var(--line);border-radius:8px;padding:.75rem;background:var(--panel)}
+.provider{margin-bottom:1rem}.caps{list-style:none;padding:0;margin:.25rem 0}.caps li{margin:.2rem 0}.caps details{margin:0;padding:.4rem .6rem}
 .nodes{display:flex;flex-direction:column;align-items:stretch;gap:0;margin:.75rem 0}
 .node{border:1px solid var(--line);border-radius:8px;padding:.7rem;background:var(--panel)}
 .node.completed{border-left:3px solid var(--ok)}.node.running{border-left:3px solid var(--accent)}
@@ -587,8 +588,15 @@ async function render() {
         + '<div class="card"><h3>Delegation</h3><p>' + esc(authority.delegation || '—') + '</p></div>'
         + '<div class="card"><h3>Authorization decision</h3><p>' + esc(authority.authorizationDecisionId || '—') + '</p></div>'
       + '</div>'
+      + '<h2>Operation</h2><div class="grid">'
+        + '<div class="card"><h3>Capability</h3><p>' + esc(action.capability || '—') + '</p></div>'
+        + '<div class="card"><h3>Provider</h3><p>' + esc(action.provider || '—') + '</p>'
+          + (action.verificationRequires ? '<p class="muted">verified by ' + esc(action.verificationRequires) + '</p>' : '') + '</div>'
+        + '<div class="card"><h3>Resource</h3><p>' + esc(action.resource || '—') + '</p></div>'
+        + '<div class="card"><h3>Operation</h3><p>' + esc(action.operation || '—') + '</p></div>'
+      + '</div>'
       + '<h2>Execution</h2><div class="grid">'
-        + '<div class="card"><h3>Provider</h3><p>' + esc(action.executionProvider || '—') + '</p></div>'
+        + '<div class="card"><h3>Engine</h3><p>' + esc(action.executionProvider || '—') + '</p></div>'
         + '<div class="card"><h3>Environment</h3><p>' + esc(action.environmentId || '—') + '</p></div>'
         + '<div class="card"><h3>Status</h3><p>' + statusPill(action.status) + '</p></div>'
       + '</div>'
@@ -687,21 +695,41 @@ try {
 export function providersPage(): string {
   return productPage('providers', 'Providers', `
 <h1>Providers</h1>
-<p class="lede">Execution providers and the capabilities <code>.flow</code> declares for each.</p>
+<p class="lede">Who performs operational work, what each can do from here, and whether it can do it now. Whether Factory <em>may</em> do it is AuthBoundry's answer, asked per Action.</p>
 <div id="providers"><p class="muted">Loading…</p></div>
+<h2>Execution engines</h2>
+<div id="engines" class="muted"></div>
 `, `
 const { api, esc, statusPill, fail } = window.factory;
 const target = document.querySelector('#providers');
 try {
-  const { providers } = await api('/v1/providers');
-  target.innerHTML = providers.length ? '<div class="grid">' + providers.map((provider) =>
-    '<div class="card"><h3>' + esc(provider.name) + ' ' + statusPill(provider.connectionState) + '</h3>'
-    + '<p class="muted">' + esc(provider.connectionDetail) + '</p>'
-    + '<p><strong>Capabilities</strong><br>' + provider.capabilities.map(esc).join('<br>') + '</p>'
-    + '<p><strong>Operates on</strong><br>' + provider.operatesOn.map(esc).join(', ') + '</p>'
-    + '<p><strong>Operations</strong><br>' + provider.operations.map((operation) => esc(operation.operation)).join('<br>') + '</p>'
-    + '</div>').join('') + '</div>'
-    : '<div class="empty">No providers are declared in .flow.</div>';
+  const { providers, engines } = await api('/v1/providers');
+  target.innerHTML = providers.length ? providers.map((provider) =>
+    '<section class="card provider"><h3>' + esc(provider.name) + ' ' + statusPill(provider.status)
+    + (provider.configured ? ' <span class="pill">configured</span>' : '') + '</h3>'
+    + '<p class="muted">' + esc(provider.detail) + '</p>'
+    + (provider.credentials.length ? '<p class="muted">Credentials resolved at execution: ' + provider.credentials.map(esc).join(', ') + ' (names only)</p>' : '')
+    + '<p><strong>Capabilities</strong></p>'
+    + (provider.capabilities.length ? '<ul class="caps">' + provider.capabilities.map((entry) =>
+        '<li><details><summary>' + esc(entry.capability) + ' <span class="muted">via ' + esc(entry.operation) + '</span></summary>'
+        + '<p class="muted">Requires authority: ' + entry.requiredAuthority.map(esc).join(', ') + '</p>'
+        + (entry.verificationRequires ? '<p class="muted">Verified by: ' + esc(entry.verificationRequires) + '</p>' : '')
+        + '<p class="muted">Idempotency: ' + (entry.idempotency.exactlyOnce ? 'exactly-once' : 'not exactly-once') + (entry.idempotency.note ? ' — ' + esc(entry.idempotency.note) : '') + '</p>'
+        + (entry.recent.length ? '<p>Recent: ' + entry.recent.map((action) =>
+            '<a href="/factory/actions/' + esc(action.id) + '">' + esc(action.id.slice(0, 12)) + '</a> ' + statusPill(action.outcome || action.status)).join(' ') + '</p>' : '<p class="muted">No executions yet.</p>')
+        + '</details></li>').join('') + '</ul>'
+      : '<p class="muted">None declared in .flow.</p>')
+    + (provider.projects.length ? '<p><strong>Projects</strong><br>' + provider.projects.map((project) =>
+        '<a href="/factory/projects/' + esc(project.id) + '">' + esc(project.name) + '</a>'
+        + (project.environments.length ? ' <span class="muted">(' + project.environments.map(esc).join(', ') + ')</span>' : '')).join('<br>') + '</p>' : '')
+    + (provider.recentActions.length ? '<p><strong>Recent Actions</strong></p><table><thead><tr><th>Action</th><th>Capability</th><th>Resource</th><th>Result</th></tr></thead><tbody>'
+        + provider.recentActions.map((action) => '<tr><td><a href="/factory/actions/' + esc(action.id) + '">' + esc(action.id.slice(0, 12)) + '</a></td>'
+          + '<td>' + esc(action.capability || '—') + '</td><td>' + esc(action.resource || '—') + '</td><td>' + statusPill(action.outcome || action.status) + '</td></tr>').join('')
+        + '</tbody></table>' : '')
+    + '</section>').join('')
+    : '<div class="empty">No providers.</div>';
+  document.querySelector('#engines').innerHTML = engines.map((engine) =>
+    esc(engine.name) + ' ' + statusPill(engine.connectionState) + ' — ' + esc(engine.connectionDetail)).join('<br>');
 } catch (error) { fail(target, error); }
 `);
 }
@@ -779,8 +807,9 @@ async function render() {
       + '<a href="/factory/actions/' + esc(node.actionId) + '">' + esc(node.type) + '</a> ' + statusPill(node.status)
       + (node.outcome && node.outcome !== 'succeeded' ? ' ' + statusPill(node.outcome) : '') + '</div>'
       + '<div class="muted">' + esc(node.intent) + '</div>'
+      + (node.capability ? '<div class="muted">' + esc(node.provider || '?') + ' · ' + esc(node.capability) + (node.resource ? ' · ' + esc(node.resource) : '') + '</div>' : '')
       + (node.dependsOn.length ? '<div class="muted">after: ' + node.dependsOn.map((id) => esc(byId[id]?.type || id)).join(', ') + '</div>' : '')
-      + (node.blockedBy.length ? '<div class="muted">blocked by: ' + node.blockedBy.map((id) => esc(byId[id]?.type || id)).join(', ') + '</div>' : '')
+      + (node.reason ? '<div class="banner ' + (node.blockedBy.length ? '' : 'drift') + '"><strong>' + (node.blockedBy.length ? 'Blocked by' : 'Blocked') + ':</strong> ' + esc(node.reason) + '</div>' : '')
       + '<div class="muted">authority: ' + esc(node.autonomy ? (node.autonomy.allowed ? 'autonomous' : 'needs a person') : 'not asked')
       + (node.authority?.delegation ? ' · ' + esc(node.authority.delegation) : '') + '</div>'
       + (node.runId ? '<div class="muted">run: <a href="/factory/runs/' + esc(node.runId) + '">' + esc(node.runId) + '</a>'

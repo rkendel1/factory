@@ -3,6 +3,7 @@ import { COLLECTIONS } from './felt.js';
 import type {
   AuthorizationDecisionRecord,
   ExecutionContract,
+  ProviderExecution,
   RepositoryRef,
   RunRequest,
   WorkRecord,
@@ -28,6 +29,10 @@ export interface OperationAuthority {
   appportCapability?: string;
   integration?: string;
   githubOperation?: string;
+  /** Which provider implementation performs this operation. */
+  provider?: string;
+  /** The neutral operational capability this operation fulfils. */
+  operationalCapability?: string;
 }
 
 export interface AuthorizationResolution {
@@ -83,6 +88,8 @@ function parseOperationAuthority(block: FlowBlock): OperationAuthority | null {
     appportCapability,
     integration,
     githubOperation,
+    provider: statementValue(block, 'provider '),
+    operationalCapability: statementValue(block, 'operational_capability '),
   };
 }
 
@@ -123,6 +130,7 @@ export async function authorizeExecution(
     association: FactoryAssociation;
     authorized: AuthorizedApplicationContext | null;
   },
+  providerExecution?: ProviderExecution,
 ): Promise<AuthorizationResolution> {
   const principal = context.principal;
   const decisionCollection = db.collection<AuthorizationDecisionRecord>(COLLECTIONS.authorizationDecisions);
@@ -326,6 +334,7 @@ export async function authorizeExecution(
         },
       } : {}),
       command: authority.command,
+      ...(providerExecution ? { provider: providerExecution } : {}),
       limits: { timeoutMs: authority.timeoutMs },
       evidence: { required: true },
     };

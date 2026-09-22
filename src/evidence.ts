@@ -69,6 +69,17 @@ export function buildEvidence(
     // The application context the authority authorized, so the durable chain
     // records which association an Action executed under.
     ...(contract.authorizedApplication ? { authorizedApplication: contract.authorizedApplication } : {}),
+    ...(contract.provider ? {
+      provider: {
+        id: contract.provider.provider,
+        capability: contract.provider.capability,
+        operation: contract.provider.operation,
+        resource: contract.provider.resource,
+        parameters: contract.provider.environment,
+        credentials: contract.provider.credentials,
+        idempotency: contract.provider.idempotency,
+      },
+    } : {}),
     principal: contract.principal,
     tenantId: contract.tenantId,
     operation: contract.operation,

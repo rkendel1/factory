@@ -68,6 +68,13 @@ the Action that would close it. Reality is observed from the repository and from
 the durable evidence of the run that last reconciled the environment; a field
 Factory cannot observe is reported as unknown rather than assumed.
 
+Actions are provider-backed operational work. An Action names a neutral
+capability — `deployment.create`, `environment.health`, `build.run` — and
+Factory resolves the provider deterministically from durable configuration,
+asks AuthBoundry, and hands the provider adapter to the execution boundary.
+Credentials are resolved there by name and never recorded. `.flow` decides
+which capabilities Factory can perform at all.
+
 Multi-step operational work is an Action Graph: durable coordination over
 ordinary Actions with dependencies. The graph coordinates; it does not execute.
 Each node runs through the one execution path, is authorized on its own, and
@@ -135,7 +142,7 @@ connection because `AUTHBOUNDRY_URL` is set.
 - `GET /v1/reconciliation`
 - `GET|POST|PATCH|DELETE /v1/projects/:id/environments/:environmentId/reconciliation`
 - `POST /v1/projects/:id/environments/:environmentId/reconcile-now`
-- `GET /v1/providers`
+- `GET /v1/providers`, `GET /v1/providers/:id`, `GET /v1/providers/:id/capabilities`
 - `POST /v1/runs`
 - `GET /v1/runs/:runId`
 - `GET /v1/runs/:runId/evidence`

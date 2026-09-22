@@ -40,7 +40,20 @@ export interface ExecutionOutcome {
   repositoryCommit?: string;
 }
 
+/**
+ * The environment a provider operation runs in.
+ *
+ * Parameters come from the contract. Credentials come from this process, by
+ * the names the contract lists, at the moment of spawning: they are resolved
+ * inside the execution boundary and nowhere else, so no Action, contract, or
+ * evidence ever holds a value.
+ */
 function createExecutionEnvironment(contract: ExecutionContract): Record<string, string> {
+  const credentials: Record<string, string> = {};
+  for (const name of contract.provider?.credentials ?? []) {
+    const value = process.env[name];
+    if (value) credentials[name] = value;
+  }
   return {
     PATH: process.env.PATH ?? '',
     HOME: process.env.HOME ?? '',
@@ -48,6 +61,14 @@ function createExecutionEnvironment(contract: ExecutionContract): Record<string,
     FACTORY_RUN_ID: contract.runId,
     FACTORY_WORK_ID: contract.workId,
     FACTORY_OPERATION: contract.operation,
+    ...(contract.provider ? {
+      FACTORY_PROVIDER: contract.provider.provider,
+      FACTORY_CAPABILITY: contract.provider.capability,
+      FACTORY_RESOURCE: contract.provider.resource,
+      FACTORY_IDEMPOTENCY_KEY: contract.provider.idempotency.key,
+      ...contract.provider.environment,
+    } : {}),
+    ...credentials,
     npm_config_loglevel: 'error',
   };
 }
