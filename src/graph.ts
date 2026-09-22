@@ -25,6 +25,7 @@ export interface PlannedAction {
   parameters?: Record<string, unknown>;
   dependsOn?: string[];
   operation?: string;
+  capability?: string;
 }
 
 export class GraphValidationError extends Error {

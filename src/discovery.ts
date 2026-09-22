@@ -100,6 +100,14 @@ export async function discoverRepository(
     }
   }
 
+  let flyApp: string | undefined;
+  if (found.includes('fly.toml')) {
+    try {
+      const toml = await readFile(path.join(root, 'fly.toml'), 'utf8');
+      flyApp = toml.match(/^\s*app\s*=\s*["']([^"']+)["']/m)?.[1];
+    } catch { /* reported as present and nothing more */ }
+  }
+
   return {
     inspectedAt: new Date().toISOString(),
     ...(repository ? { repositoryId: repository.id } : {}),
@@ -110,6 +118,7 @@ export async function discoverRepository(
       containerized: found.includes('Dockerfile'),
       ...(commit ? { headCommit: commit } : {}),
       flyConfigured: found.includes('fly.toml'),
+      ...(flyApp ? { flyApp } : {}),
       vercelConfigured: found.includes('vercel.json') || found.includes('.vercel/project.json'),
       ...(githubWorkflows.length ? { githubWorkflows } : {}),
     },

@@ -135,6 +135,63 @@ adding the credential later resumes rather than restarts.
 Intervals are clamped between one minute and one day: how often Factory talks to
 a repository, an authority and a provider is not arbitrary caller input.
 
+## Operational capabilities and provider adapters
+
+An Action names what Factory needs done; a provider adapter knows how to do it
+on one external system. Keeping the two apart is what lets the same graph
+deploy to a different provider without a different coordination model.
+
+```text
+Action → Capability → Provider → Adapter → Execution → Verification → Evidence
+```
+
+**The vocabulary is provider-neutral.** `deployment.create`, `environment.health`,
+`build.run` — never `fly.deploy`. Provider names belong to provider
+implementations.
+
+**`.flow` decides what Factory can perform.** An operation declares its
+`operational_capability` and `provider`; the registry is the intersection of
+what `.flow` declares and what an adapter implements. A capability in the
+vocabulary that no operation declares (`migration.run`, `deployment.rollback`)
+is refused, not improvised.
+
+**Provider resolution is deterministic and never falls back.** A repository
+capability goes to the provider `.flow` declares. An environment capability goes
+to the provider the environment or desired state names, and only that one:
+when it cannot satisfy the capability, or nothing names a provider, the outcome
+is `provider-unavailable` — durable, explicit, and distinct from
+`capability-unavailable`, `authority-unavailable` and `autonomy-denied`.
+
+**Resources are bound from durable state.** `environment:production`,
+`repository:owner/name`. A caller cannot supply one.
+
+**Credentials are resolved at the execution boundary, by name.** An adapter
+declares which variables it needs; the contract and evidence carry the names;
+the boundary reads the values from its own process at spawn time. No Action,
+contract, or evidence ever holds a value, and a test proves it.
+
+**Verification is provider-aware and stays distinct from execution.** The
+adapter reads the operation's result back; Factory keeps the verdict. A health
+probe that completes and finds HTTP 503 is `verification-failed`, not
+`execution-failed`. `deployment.create` declares `environment.health` as the
+verification it requires: a deploy that exited 0 is not yet a deployment that
+serves traffic.
+
+**Idempotency is claimed only where it holds.** `fly deploy` has no
+idempotency key, so a retried deployment may deploy again; the evidence says so
+rather than hiding it. The provider idempotency identity is the durable Action
+identity.
+
+| Provider | Capabilities | Needs |
+| --- | --- | --- |
+| git | `repository.inspect`, `repository.checkout` | git on PATH |
+| local | `build.run`, `test.run` | npm on PATH |
+| fly | `deployment.create`, `environment.inspect`, `environment.health` | fly CLI, `FLY_API_TOKEN` |
+
+Not built: Fly rollback (no supported command to stand behind), Vercel (this
+project has no Vercel configuration), workflow YAML execution (inspected as
+evidence, never run).
+
 ## Action graphs
 
 Factory is the Actions Coordinator for the product ecosystem. It coordinates
