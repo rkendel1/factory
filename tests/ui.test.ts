@@ -9,7 +9,7 @@ import { createTempWorkspace } from './helpers.js';
 import type { Authenticator } from '../src/auth.js';
 
 const capabilities = [
-  'repository.read', 'evidence.write', 'artifact.write',
+  'factory.ui.read', 'repository.read', 'evidence.write', 'artifact.write',
   'configuration.read', 'apikeys.read', 'apikeys.create', 'apikeys.revoke',
   'notifications.read', 'webhooks.read', 'jobs.read',
 ];
@@ -40,7 +40,13 @@ test('generic product composition preserves shared context and only granted capa
 
   assert.deepEqual(composed.products.map(({ id }) => id), ['software_factory', 'appport-services']);
   assert.deepEqual(composed.context, context);
-  assert.deepEqual([...composed.capabilities].sort(), [...capabilities].sort());
+  // Composition surfaces only the capabilities its surfaces actually require,
+  // and every one of them is a capability the context was granted.
+  assert.ok([...composed.capabilities].every((capability) => capabilities.includes(capability)));
+  assert.ok(composed.capabilities.includes('factory.ui.read'));
+  assert.ok(composed.surfaces.some(({ route }) => route === '/factory'));
+  assert.ok(composed.surfaces.some(({ route }) => route === '/factory/projects'));
+  assert.ok(composed.surfaces.some(({ route }) => route === '/factory/actions'));
   assert.ok(composed.surfaces.some(({ route }) => route === '/factory/runs'));
   assert.ok(composed.surfaces.some(({ route }) => route === '/configuration'));
   assert.ok(composed.surfaces.every(({ capabilities: required }) => required.every((capability) => capabilities.includes(capability))));
@@ -98,8 +104,11 @@ test('authenticated AppPort discovery returns a filtered Factory contribution', 
     const body = await discoverUi(`http://127.0.0.1:${address.port}`);
     assert.equal(body.protocol, UI_PROTOCOL_ID);
     assert.deepEqual(body.product, { id: 'software_factory', version: '1.0.0' });
-    assert.deepEqual(body.surfaces.map(({ id }) => id), ['work', 'runs', 'evidence', 'artifacts']);
-    assert.deepEqual(body.capabilities, ['artifact.write', 'evidence.write', 'repository.read']);
+    assert.deepEqual(
+      body.surfaces.map(({ id }) => id),
+      ['overview', 'projects', 'actions', 'runs', 'providers', 'evidence', 'settings'],
+    );
+    assert.deepEqual(body.capabilities, ['evidence.write', 'factory.ui.read']);
     assert.deepEqual(seen, ['factory.ui.read']);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

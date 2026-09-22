@@ -48,8 +48,58 @@ is not a Factory runtime dependency and is published and consumed separately.
 The `test:external` check installs the registry artifact into a clean temporary
 project, compiles a public import, and executes a state operation.
 
+## Factory is an Actions Orchestrator
+
+Factory's product surface is the orchestration of Actions, not the management of
+AppPort Services. AppPort Services remains the infrastructure and configuration
+area and stays reachable from the navigation, but it is no longer where a new
+user lands.
+
+The product model keeps four questions in four records, because collapsing them
+loses exactly what the product exists to answer:
+
+| Record | Question |
+| --- | --- |
+| Desired State | What should be true? |
+| Action | What are we going to do to make it true? |
+| Run | What actually happened? |
+| Evidence | What proves what happened? |
+
+Projects group repositories, environments, and desired state. The lifecycle is
+intent → plan → authorization → execution → verification → evidence. An Action
+plan is derived from what the repository actually contains — `package.json`,
+`Dockerfile`, `fly.toml`, Vercel configuration, GitHub workflows — so an
+operator states the outcome rather than the commands. Each plan step cites the
+desired-state field or repository file it came from.
+
+Executing an Action goes through the same authority, contract, and evidence path
+as any other Factory run. There is no separate Action execution path: the Action
+supplies intent and a durable work record, and `.flow` plus AuthBoundry decide
+the rest.
+
+AI may eventually propose plans. It is not an authority layer and cannot stand
+in for AuthBoundry.
+
+See [docs/product-surface.md](docs/product-surface.md) for the full surface map.
+
+### Product surface
+
+`/factory` is the landing page: Overview, Projects, Actions, Runs, Providers,
+AppPort Services, Settings. Providers and their capabilities are read from
+`.flow`, never hard-coded in the UI, and the Overview reports the association
+state — `associated`, `unassociated`, `unverified` — rather than claiming a
+connection because `AUTHBOUNDRY_URL` is set.
+
 ## HTTP API
 
+- `GET /v1/overview`
+- `GET|POST /v1/projects`, `GET|PATCH /v1/projects/:id`
+- `GET|POST /v1/projects/:id/repositories`, `DELETE /v1/projects/:id/repositories/:repositoryId`
+- `GET|POST /v1/projects/:id/environments`, `GET /v1/projects/:id/environments/:environmentId`
+- `GET|PUT /v1/projects/:id/desired-state`
+- `GET|POST /v1/projects/:id/actions`, `GET /v1/actions/:id`, `POST /v1/actions/:id/run`
+- `GET /v1/projects/:id/runs`
+- `GET /v1/providers`
 - `POST /v1/runs`
 - `GET /v1/runs/:runId`
 - `GET /v1/runs/:runId/evidence`
@@ -72,6 +122,7 @@ Protected requests are authenticated and authorized by AuthBoundry. Configure it
 - Authorization is evaluated before a contract is created. The Factory derives an immutable, fingerprinted contract from `.flow` and the authorized FeltDB work record; the runner verifies that fingerprint before execution.
 - Execution contracts are service-owned artifacts. The current `.flow` policy grammar does not express a distinct service writer subject, so the service enforces create-once semantics and rejects mutations. There is intentionally no contract creation endpoint.
 - Evidence records the request, authorization decision, contract fingerprint, principal, operation, repository ref, execution mode, and PAX invocation needed to reconstruct the durable chain.
+- Product routes use the same authorization middleware as the rest of Factory and the capability names the Factory application association already carries. Factory declares no capability of its own: a name AuthBoundry does not grant would be a second authorization vocabulary.
 - Every protected read and cancellation is checked against the AuthBoundry principal and tenant. A run ID is not a bearer capability, and AuthBoundry outages fail closed.
 - Factory registers its `.flow` service principals as AuthBoundry agents and resolves its authority from the Factory application association AuthBoundry maintains. The application id in `.flow` is a contract identity, not a grant: an Action executes in the application context AuthBoundry authorized, and a service principal with no such context fails closed. See [docs/factory-authority-association.md](docs/factory-authority-association.md).
 - The Factory Runner never executes caller-supplied commands.

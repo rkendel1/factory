@@ -19,6 +19,21 @@ import { BrowserAdapterError, type BrowserRedirectResult } from '@authboundry/co
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
 import { createCanonicalApplicationContract } from './application-contract.js';
 import { createFactoryGitHubAdapter, type FactoryGitHubAdapter } from './integrations/github.js';
+import { DomainValidationError, FactoryDomain } from './domain.js';
+import { handleProductRoute, matchProductRoute } from './product-api.js';
+import {
+  actionPage,
+  actionsPage,
+  overviewPage,
+  projectPage,
+  projectsPage,
+  providersPage,
+  runPage,
+  runsPage,
+  settingsPage,
+} from './product-ui.js';
+import { discoverRepository, planFromDiscovery } from './discovery.js';
+import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
 import {
   assertFactoryAssociation,
   authorizedApplicationContext,
@@ -48,13 +63,19 @@ import {
   validateDeploymentConfig,
 } from './bootstrap.js';
 import type {
+  ActionRecord,
+  AuthorityContextRecord,
+  EnvironmentRecord,
   ExecutionContractRecord,
   ExecutionRequestRecord,
+  RepositoryRecord,
+  VerificationCheck,
   FactoryServiceConfig,
   RunEventRecord,
   RunRecord,
   RunRequest,
   StructuredEvidence,
+  WorkRecord,
 } from './types.js';
 
 function isTerminal(status: RunRecord['status']): boolean {
@@ -144,6 +165,7 @@ export class FactoryService {
   private readonly applicationId: string;
   private readonly environmentId: string;
   private readonly association: FactoryAssociation;
+  private readonly domain: FactoryDomain;
   private readonly controlPlane: AuthBoundryControlPlane | null;
   private connection: FactoryConnectionState = {
     status: 'unverified',
@@ -164,6 +186,7 @@ export class FactoryService {
       application,
     });
     this.association = factoryAssociation(this.flowSpec);
+    this.domain = new FactoryDomain(db);
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
         && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
@@ -273,6 +296,337 @@ export class FactoryService {
       };
     }
     return this.connection;
+  }
+
+  /** The product model store. Every read is tenant- and project-scoped. */
+  projects(): FactoryDomain {
+    return this.domain;
+  }
+
+  providers(): ExecutionProvider[] {
+    return executionProviders(this.flowSpec, {
+      ...(this.paxVersion ? { paxVersion: this.paxVersion } : {}),
+      githubConfigured: Boolean(this.config.githubIntegration),
+    });
+  }
+
+  /**
+   * The authority context an Action or Run acts under, as AuthBoundry resolved
+   * it. There is no manufactured fallback: an unassociated or unverified
+   * authority yields no context, and the caller fails closed on it.
+   */
+  authorityContext(context: AuthenticatedContext): AuthorityContextRecord | null {
+    const authorized = authorizedApplicationContext(
+      this.connection.status === 'associated' ? this.connection.association : null,
+      context.principal,
+    );
+    if (!authorized) return null;
+    return {
+      application: authorized.applicationId,
+      resource: authorized.resource,
+      tenant: authorized.tenantId,
+      principal: authorized.principalId,
+      delegation: authorized.delegationId,
+      ...(context.authority ? { authority: context.authority } : {}),
+    };
+  }
+
+  /**
+   * Plan an Action against a project's desired state.
+   *
+   * The plan is derived from what the repository actually contains, so an
+   * operator states the outcome and Factory works out the steps. The Action is
+   * only planned here: nothing is authorized and nothing executes.
+   */
+  async createAction(context: AuthenticatedContext, projectId: string, input: {
+    type: string;
+    intent?: string;
+    environmentId?: string;
+    repositoryId?: string;
+    operation?: string;
+  }): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const project = await this.domain.getProject(tenantId, projectId);
+    if (!project) throw new DomainValidationError(`project ${projectId} was not found`);
+
+    const operation = input.operation ?? input.type;
+    const authorities = getOperationAuthorities(this.flowSpec);
+    if (!authorities.has(operation)) {
+      throw new DomainValidationError(
+        `no .flow operation named ${operation}; declared operations are ${[...authorities.keys()].sort().join(', ')}`,
+      );
+    }
+
+    const repositories = await this.domain.listRepositories(tenantId, projectId);
+    const desiredState = await this.domain.getDesiredState(tenantId, projectId);
+    const repository = input.repositoryId
+      ? repositories.find((candidate) => candidate.id === input.repositoryId) ?? null
+      : repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
+
+    let environment: EnvironmentRecord | null = null;
+    if (input.environmentId) {
+      environment = await this.domain.getEnvironment(tenantId, projectId, input.environmentId);
+      if (!environment) throw new DomainValidationError(`environment ${input.environmentId} was not found`);
+    }
+
+    const discovery = this.config.repositoryRoot
+      ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
+      : null;
+    const plan = planFromDiscovery({
+      type: input.type,
+      desiredState,
+      discovery,
+      repository,
+      ...(environment ? { environmentName: environment.name } : {}),
+    });
+
+    const timestamp = new Date().toISOString();
+    const action: ActionRecord = {
+      id: `act_${randomUUID()}`,
+      projectId,
+      ...(environment ? { environmentId: environment.id } : {}),
+      tenantId,
+      type: input.type,
+      intent: input.intent?.trim()
+        || `Make ${project.name} match its desired state by running ${operation}`,
+      plan,
+      ...(discovery ? { discovery } : {}),
+      operation,
+      ...(providerForOperation(this.flowSpec, operation)
+        ? { executionProvider: providerForOperation(this.flowSpec, operation)! }
+        : {}),
+      /*
+       * A plan that would change a running environment waits for a person.
+       *
+       * This is the only thing that puts an Action in front of a human, so it
+       * is deliberately narrow: deployment is enabled in desired state, which
+       * is the operator's own statement that this project deploys. Everything
+       * else is planned and can be run when someone chooses to.
+       */
+      status: desiredState?.deploymentEnabled ? 'awaiting-approval' : 'planned',
+      createdBy: context.principal,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    return this.domain.createAction(action);
+  }
+
+  /**
+   * Authorize and execute a planned Action.
+   *
+   * Execution goes through the same authority, contract, and evidence path as
+   * any other Factory run: the Action supplies intent and a durable work
+   * record, and `.flow` plus AuthBoundry decide the rest. There is no separate
+   * Action execution path and no demonstration path.
+   */
+  async runAction(
+    context: AuthenticatedContext,
+    actionId: string,
+    approved = true,
+  ): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const action = await this.domain.getAction(tenantId, actionId);
+    if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
+    if (action.status === 'running') return action;
+    // Running an Action is the approval: a caller authorized for `factory.run`
+    // is the human the awaiting-approval state was waiting for.
+    if (action.status === 'awaiting-approval' && !approved) {
+      throw new DomainValidationError(`action ${actionId} is awaiting approval`);
+    }
+
+    const authority = this.authorityContext(context);
+    if (!authority) {
+      const reason = this.connection.status === 'associated'
+        ? `AuthBoundry authorized no application context for ${context.principal}`
+        : this.connection.reason;
+      return await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed',
+        verification: [{ name: 'authority', status: 'failed', detail: reason }],
+      }) ?? action;
+    }
+
+    const repositories = await this.domain.listRepositories(tenantId, action.projectId);
+    const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId)
+      ?? repositories[0];
+    if (!repository) {
+      throw new DomainValidationError(`project ${action.projectId} has no repository to act on`);
+    }
+
+    await this.domain.patchAction(tenantId, actionId, { status: 'authorized', authority });
+
+    const work = await this.ensureActionWork(action, repository, context, desiredState?.sourceBranch);
+    await this.domain.patchAction(tenantId, actionId, { status: 'running' });
+
+    const run = await this.startRun({
+      workId: work.id,
+      repository: {
+        provider: repository.provider,
+        owner: repository.owner,
+        name: repository.name,
+        ref: desiredState?.sourceBranch ?? repository.defaultBranch,
+      },
+      operation: action.operation ?? action.type,
+    }, context);
+
+    await this.patchRun(run.id, {
+      actionId: action.id,
+      projectId: action.projectId,
+      ...(action.environmentId ? { environmentId: action.environmentId } : {}),
+      ...(authority.application ? { applicationId: authority.application } : {}),
+      ...(authority.delegation ? { delegationId: authority.delegation } : {}),
+      ...(action.executionProvider ? { executionProvider: action.executionProvider } : {}),
+    });
+
+    const settled = await this.getRun(run.id, context);
+    const verification = await this.verifyRun(settled?.id ?? run.id, desiredState?.healthRequirement);
+    const succeeded = settled?.status === 'completed'
+      && verification.every((check) => check.status !== 'failed');
+
+    return await this.domain.patchAction(tenantId, actionId, {
+      status: succeeded ? 'succeeded' : 'failed',
+      runId: run.id,
+      authority: {
+        ...authority,
+        ...(settled?.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}),
+      },
+      verification,
+    }) ?? action;
+  }
+
+  /**
+   * Verification reads the durable evidence rather than the process that wrote
+   * it, so a check reports what a later reader of FeltDB would also see.
+   */
+  private async verifyRun(runId: string, healthRequirement?: string): Promise<VerificationCheck[]> {
+    const evidence = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
+    const checks: VerificationCheck[] = [{
+      name: 'evidence recorded',
+      status: evidence ? 'passed' : 'failed',
+      detail: evidence ? `evidence ${evidence.id}` : 'no durable evidence was written for this run',
+    }];
+    if (evidence) {
+      checks.push({
+        name: 'deterministic result',
+        status: evidence.finalResult === 'PASS' ? 'passed' : 'failed',
+        detail: `${evidence.deterministicResult} / ${evidence.finalResult}`,
+      });
+      checks.push({
+        name: 'authorized application context',
+        status: evidence.authorizedApplication ? 'passed' : 'failed',
+        detail: evidence.authorizedApplication
+          ? `${evidence.authorizedApplication.resource} via ${evidence.authorizedApplication.delegationId}`
+          : 'evidence carries no authorized application context',
+      });
+    }
+    if (healthRequirement) {
+      checks.push({
+        name: healthRequirement,
+        status: evidence?.finalResult === 'PASS' ? 'passed' : 'skipped',
+        detail: 'derived from the run evidence; no external probe is performed',
+      });
+    }
+    return checks;
+  }
+
+  /**
+   * Actions act through a durable work record, because `.flow` authorization is
+   * evaluated against authoritative work state rather than a request body.
+   */
+  private async ensureActionWork(
+    action: ActionRecord,
+    repository: RepositoryRecord,
+    context: AuthenticatedContext,
+    branch?: string,
+  ): Promise<WorkRecord> {
+    const works = this.db.collection<WorkRecord>(COLLECTIONS.work);
+    const id = `work_${action.id}`;
+    const existing = await works.get(id);
+    if (existing) return existing;
+    const record: WorkRecord = {
+      id,
+      ownerPrincipal: context.principal,
+      tenantId: context.tenant,
+      operation: action.operation ?? action.type,
+      repositoryProvider: repository.provider,
+      repositoryOwner: repository.owner,
+      repositoryName: repository.name,
+      repositoryRef: branch ?? repository.defaultBranch,
+      status: 'active',
+    };
+    await works.put(record, record.id);
+    return record;
+  }
+
+  /**
+   * The dashboard answer: what exists, what is in flight, what needs a human,
+   * and on whose authority Factory is acting.
+   */
+  async overview(context: AuthenticatedContext): Promise<Record<string, unknown>> {
+    const tenantId = context.tenant;
+    const [projects, actions, runs] = await Promise.all([
+      this.domain.listProjects(tenantId),
+      this.domain.listActions(tenantId),
+      this.domain.listRuns(tenantId),
+    ]);
+
+    const environmentsByProject = new Map<string, EnvironmentRecord[]>();
+    for (const project of projects) {
+      environmentsByProject.set(project.id, await this.domain.listEnvironments(tenantId, project.id));
+    }
+
+    const active = actions.filter((action) =>
+      action.status === 'running' || action.status === 'authorized');
+    const attention = actions.filter((action) =>
+      action.status === 'awaiting-approval' || action.status === 'failed');
+
+    return {
+      projects: projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        environments: (environmentsByProject.get(project.id) ?? []).map((environment) => ({
+          id: environment.id,
+          name: environment.name,
+          state: environment.currentState ?? null,
+        })),
+        activeActions: active.filter((action) => action.projectId === project.id).length,
+        attentionRequired: attention.filter((action) => action.projectId === project.id).length,
+      })),
+      activeActions: active.map((action) => ({
+        id: action.id,
+        type: action.type,
+        intent: action.intent,
+        projectId: action.projectId,
+        environmentId: action.environmentId ?? null,
+        status: action.status,
+        startedAt: action.updatedAt,
+      })),
+      recentActivity: runs.slice(0, 20).map((run) => ({
+        id: run.id,
+        actionId: run.actionId ?? null,
+        projectId: run.projectId ?? null,
+        operation: run.operation,
+        status: run.status,
+        evidenceId: run.evidenceId ?? null,
+        completedAt: run.completedAt ?? null,
+      })),
+      attentionRequired: attention.map((action) => ({
+        id: action.id,
+        projectId: action.projectId,
+        status: action.status,
+        intent: action.intent,
+      })),
+      authority: {
+        application: this.association.applicationId,
+        principals: this.association.agents.map((agent) => agent.principalId),
+        // The association state, never "connected because a URL exists".
+        state: this.connection.status,
+        ...(this.connection.status === 'associated'
+          ? { tenant: this.connection.association.tenantId, resource: this.connection.association.resource }
+          : { reason: this.connection.reason }),
+      },
+    };
   }
 
   connectionState(): FactoryConnectionState {
@@ -754,6 +1108,22 @@ export class FactoryService {
   }
 }
 
+function productSurface(pathname: string): string | null {
+  if (pathname === '/factory') return overviewPage();
+  if (pathname === '/factory/projects') return projectsPage();
+  if (pathname === '/factory/actions') return actionsPage();
+  if (pathname === '/factory/runs') return runsPage();
+  if (pathname === '/factory/providers') return providersPage();
+  if (pathname === '/factory/settings') return settingsPage();
+  const project = pathname.match(/^\/factory\/projects\/([A-Za-z0-9._:-]{1,128})$/);
+  if (project) return projectPage(project[1]!);
+  const action = pathname.match(/^\/factory\/actions\/([A-Za-z0-9._:-]{1,128})$/);
+  if (action) return actionPage(action[1]!);
+  const run = pathname.match(/^\/factory\/runs\/([A-Za-z0-9._:-]{1,128})$/);
+  if (run) return runPage(run[1]!);
+  return null;
+}
+
 export async function createHttpServer(config: FactoryServiceConfig): Promise<{ service: FactoryService; server: Server; }> {
   const service = await FactoryService.create(config);
   // Protected requests are authenticated by AuthBoundry and then held to the
@@ -778,7 +1148,7 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           } else {
             await browserAuthenticator.authenticate(request, 'factory.ui.read');
           }
-          response.writeHead(302, { location: '/configuration' });
+          response.writeHead(302, { location: '/factory' });
         } catch {
           response.writeHead(302, { location: '/api/auth/login/github?return_to=%2F' });
         }
@@ -844,6 +1214,56 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
           return;
         }
         writeJson(response, 200, service.discoverUi(context));
+        return;
+      }
+
+      // The Factory product surface. Each page is authorized for reading the
+      // product UI before any of it is served.
+      if (request.method === 'GET' && (url.pathname === '/factory' || url.pathname.startsWith('/factory/'))) {
+        try {
+          await getAuthenticator().authenticate(request, 'factory.ui.read');
+        } catch (error) {
+          writeAuthError(response, error);
+          return;
+        }
+        const page = productSurface(url.pathname);
+        if (!page) {
+          writeJson(response, 404, { error: 'Not found' });
+          return;
+        }
+        response.statusCode = 200;
+        response.setHeader('content-type', 'text/html; charset=utf-8');
+        response.end(page);
+        return;
+      }
+
+      // Factory's own product surface. Every route is authenticated and
+      // authorized through the same middleware as the rest of Factory.
+      if (matchProductRoute(request.method ?? 'GET', url.pathname)) {
+        let body: unknown;
+        if (request.method === 'POST' || request.method === 'PATCH' || request.method === 'PUT') {
+          try {
+            body = await readJson<unknown>(request);
+          } catch {
+            writeJson(response, 400, { error: 'A JSON body is required', code: 'INVALID_REQUEST' });
+            return;
+          }
+        }
+        try {
+          await handleProductRoute({ service, authenticator: getAuthenticator, request, response, url, body });
+        } catch (error) {
+          if (error instanceof DomainValidationError) {
+            writeJson(response, 400, { error: error.message, code: 'INVALID_REQUEST' });
+            return;
+          }
+          if (error instanceof FactoryAssociationError
+            || error instanceof AuthBoundryAuthorizationError
+            || error instanceof AuthBoundryAuthenticationError) {
+            writeAuthError(response, error);
+            return;
+          }
+          throw error;
+        }
         return;
       }
 

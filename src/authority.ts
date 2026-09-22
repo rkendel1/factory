@@ -13,7 +13,7 @@ import { createCanonicalApplicationContract } from './application-contract.js';
 import type { AuthorizedApplicationContext, FactoryAssociation } from './association.js';
 import { isFactoryAgentPrincipal } from './association.js';
 
-interface OperationAuthority {
+export interface OperationAuthority {
   name: string;
   operation: string;
   principals: string[];
