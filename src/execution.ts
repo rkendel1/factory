@@ -5,6 +5,7 @@ import { buildEvidence, type RawExecutionResult } from './evidence.js';
 import { createWorkspace, destroyWorkspace, materializeRepository, type WorkspaceHandle } from './workspace.js';
 import type { ExecutionContract, StructuredEvidence, TerminationReason } from './types.js';
 import { assertContractIntegrity } from './contract.js';
+import { gitCredentialEnvironment } from './repository-connection.js';
 
 export async function verifyPax(executable = process.env.PAX_BIN ?? 'pax'): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -185,7 +186,12 @@ export async function executeContract(
   }
   // Credentials are checked before anything is created, so a missing one
   // leaves no workspace and no half-started operation behind.
-  const credentials = resolveCredentials(contract, options.credentialResolver ?? processCredentialResolver);
+  const resolver = options.credentialResolver ?? processCredentialResolver;
+  const credentials = resolveCredentials(contract, resolver);
+  // The repository's own credential, for cloning a connected remote. Named
+  // in evidence, redacted from output, never in the contract.
+  const repositoryCredential = gitCredentialEnvironment(contract.repository.provider, resolver);
+  const secrets = { ...credentials, ...repositoryCredential.secrets };
   const paxVersion = contract.execution.mode === 'pax'
     ? await verifyPax(options.paxExecutable)
     : undefined;
@@ -193,13 +199,13 @@ export async function executeContract(
   let repositoryCommit: string | undefined;
 
   try {
-    ({ commit: repositoryCommit } = await materializeRepository(contract.repository, workspace, options.repositoryRoot));
-    const result = await runBoundedCommand(contract, workspace, credentials, options.onHandle, options.paxExecutable, paxVersion, options.onSpawned);
+    ({ commit: repositoryCommit } = await materializeRepository(contract.repository, workspace, options.repositoryRoot, { credentialEnv: repositoryCredential.env }));
+    const result = await runBoundedCommand(contract, workspace, credentials, options.onHandle, options.paxExecutable, paxVersion, options.onSpawned, secrets, repositoryCredential.credential);
     return { evidence: buildEvidence(contract, result, repositoryCommit), repositoryCommit };
   } catch (error) {
     // Anything that names the workspace or a value must be sanitized before it
     // becomes a message a caller can persist.
-    if (error instanceof Error) error.message = redactSecrets(error.message, credentials);
+    if (error instanceof Error) error.message = redactSecrets(error.message, secrets);
     throw error;
   } finally {
     await destroyWorkspace(workspace);
@@ -214,6 +220,8 @@ async function runBoundedCommand(
   paxExecutable = process.env.PAX_BIN ?? 'pax',
   paxVersion?: string,
   onSpawned?: () => Promise<void> | void,
+  secrets: Record<string, string> = credentials,
+  repositoryCredential?: string,
 ): Promise<RawExecutionResult> {
   return new Promise((resolve, reject) => {
     const command = contract.execution.mode === 'pax' ? paxExecutable : contract.command?.[0];
@@ -295,7 +303,7 @@ async function runBoundedCommand(
         error.code === 'ENOENT'
           ? `${command} is not installed on the execution host`
           : `${command} could not be started: ${error.message}`,
-        credentials,
+        secrets,
       )));
     });
     child.on('close', (code, signal) => {
@@ -316,12 +324,12 @@ async function runBoundedCommand(
         startedAt,
         completedAt,
         durationMs: completedAtMs - startedAtMs,
-        stdout: redactSecrets(stdout.text(), credentials),
-        stderr: redactSecrets(stderr.text(), credentials),
+        stdout: redactSecrets(stdout.text(), secrets),
+        stderr: redactSecrets(stderr.text(), secrets),
         truncated: { stdout: stdout.truncated, stderr: stderr.truncated },
         outputBytes: { stdout: stdout.total, stderr: stderr.total },
         workspace: workspace.repositoryPath,
-        credentialsResolved: Object.keys(credentials),
+        credentialsResolved: [...Object.keys(credentials), ...(repositoryCredential ? [repositoryCredential] : [])],
         artifacts: [...listWorkspace()].filter((entry) => !before.has(entry)).sort().slice(0, 50),
         ...(paxVersion ? { paxVersion } : {}),
       };

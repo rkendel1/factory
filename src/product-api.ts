@@ -174,13 +174,24 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
         return json(404, { error: 'Project not found' });
       }
       const input = asRecord(body);
-      return json(201, await service.projects().addRepository(context.tenant, projectId, {
+      const added = await service.projects().addRepository(context.tenant, projectId, {
         ...(input.provider === undefined ? {} : { provider: text(input.provider, 'provider')! }),
         owner: text(input.owner, 'owner')!,
         name: text(input.name, 'name')!,
         ...(input.defaultBranch === undefined ? {} : { defaultBranch: text(input.defaultBranch, 'defaultBranch')! }),
         ...(input.repositoryUrl === undefined ? {} : { repositoryUrl: text(input.repositoryUrl, 'repositoryUrl')! }),
-      }));
+      });
+      // A repository is connected when Factory can reach it, and the record says whether it can.
+      return json(201, (await service.connectRepository(context, projectId, added.id)) ?? added);
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/projects\/([^/]+)\/repositories\/([^/]+)\/verify$/,
+    capability: PRODUCT_CAPABILITIES.write,
+    async handle({ service, context, params }) {
+      const repository = await service.connectRepository(context, params[0]!, params[1]!);
+      return repository ? json(200, repository) : json(404, { error: 'Repository not found' });
     },
   },
   {
@@ -366,6 +377,15 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
     async handle({ service, context, params }) {
       const record = await service.projects().getReconciliation(context.tenant, params[0]!, params[1]!);
       return record ? json(200, record) : json(404, { error: 'Reconciliation is not configured' });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reconciliation\/cycles$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      // The durable history of every reconciliation cycle, newest first.
+      return json(200, { cycles: await service.projects().listReconciliationCycles(context.tenant, params[0]!, params[1]!) });
     },
   },
   {

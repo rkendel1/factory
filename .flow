@@ -189,6 +189,7 @@ app software_factory {
     created_at: datetime
     index project_id using hash(project_id)
     index projectId using hash(projectId)
+    connection: json?
   }
 
   collection Environment {
@@ -357,6 +358,22 @@ app software_factory {
     index type using hash(type)
   }
 
+  collection ReconciliationCycle {
+    reconciliationId: ref Reconciliation?
+    tenantId: text?
+    project_id: text
+    projectId: ref Project?
+    environmentId: ref Environment?
+    workerId: text?
+    outcome: json
+    createdAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index environmentId using hash(environmentId)
+    index reconciliationId using hash(reconciliationId)
+  }
+
   capability FactoryApplicationAccess {
     visibility internal
     application factory
@@ -514,7 +531,7 @@ app software_factory {
     provider fly
     operational_capability environment.health
     execution_mode native
-    command ["node","-e","const url=process.env.FACTORY_HEALTH_URL;if(!url){console.log(JSON.stringify({ok:false,error:'no health url'}));process.exit(0)}fetch(url).then(r=>console.log(JSON.stringify({ok:r.ok,status:r.status,url})),e=>console.log(JSON.stringify({ok:false,error:String(e.message||e),url})))"]
+    command ["node","-e","const url=process.env.FACTORY_HEALTH_URL;if(!url){console.log(JSON.stringify({ok:false,error:'no health url'}));process.exit(0)}fetch(url).then(async r=>{let version=null;try{const j=await r.json();version=j.version??j.revision??j.commit??null}catch{}console.log(JSON.stringify({ok:r.ok,status:r.status,url,version}))},e=>console.log(JSON.stringify({ok:false,error:String(e.message||e),url})))"]
     timeoutMs 60000
     grant repository.read
     grant evidence.write
@@ -555,6 +572,11 @@ app software_factory {
   }
 
   policy OperationalWork {
+    read: authenticated
+    write: none
+  }
+
+  policy ReconciliationCycle {
     read: authenticated
     write: none
   }

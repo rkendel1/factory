@@ -21,6 +21,8 @@ export interface RepositoryRef {
   ref: string;
   commit?: string;
   path?: string;
+  /** The remote to clone when no local mirror is configured. */
+  url?: string;
 }
 
 export interface RunRequest {
@@ -246,8 +248,23 @@ export interface RepositoryRecord {
   name: string;
   defaultBranch: string;
   repositoryUrl?: string;
+  /** Whether Factory can actually reach this repository, as last verified against the remote. */
+  connection?: RepositoryConnection;
   createdAt: string;
   __version?: number;
+}
+
+export interface RepositoryConnection {
+  status: 'connected' | 'unreachable' | 'unconfigured';
+  checkedAt: string;
+  url?: string;
+  /** The credential name used, or null when none was configured. Never a value. */
+  credential: string | null;
+  headCommit?: string;
+  /** The tip of the configured default branch on the remote. */
+  branchCommit?: string;
+  defaultBranch?: string;
+  detail: string;
 }
 
 /**
@@ -265,6 +282,25 @@ export interface EnvironmentCurrentState {
   health?: 'healthy' | 'unhealthy' | 'unknown';
   reconciledRunId?: string;
   reconciledEvidenceId?: string;
+  /**
+   * How this state was obtained. `observed`: the resource itself answered;
+   * `recorded`: the evidence of the last verified operation, because the
+   * environment offers nothing to observe live; the rest say why nothing
+   * could be observed. None of the failures is drift.
+   */
+  observation?: EnvironmentObservation;
+}
+
+export type ObservationKind = 'observed' | 'recorded' | 'unknown' | 'provider-unavailable' | 'resource-unavailable' | 'unsupported';
+
+export interface EnvironmentObservation {
+  kind: ObservationKind;
+  at: string;
+  detail: string;
+  /** Where the observation came from, so a reader can repeat it. */
+  source?: string;
+  /** What the resource itself reported, when it did. */
+  reported?: { revision?: string; health?: 'healthy' | 'unhealthy'; status?: number };
 }
 
 export interface EnvironmentRecord {
@@ -528,9 +564,42 @@ export interface ReconciliationRecord {
   /** Claim held by the worker currently running this pass. */
   leaseOwner?: string;
   leaseExpiresAt?: string;
+  /**
+   * Durable retry policy for the drift currently being worked. A failure of
+   * the same fingerprint advances the attempt and pushes the next eligible
+   * time back; a change of desired or observed state resets it. Nothing here
+   * lives in a worker's memory.
+   */
+  retry?: ReconciliationRetryState;
   createdAt: string;
   updatedAt: string;
   __version?: number;
+}
+
+export interface ReconciliationRetryState {
+  fingerprint: string;
+  attempts: number;
+  lastResult: ReconciliationResult;
+  lastActionId?: string;
+  lastAttemptAt: string;
+  nextEligibleAt: string;
+  suspended: boolean;
+}
+
+/**
+ * One reconciliation cycle, appended durably so the loop can be explained
+ * later: what was desired, what was observed, what drift was found, what
+ * Factory did about it, and what it observed afterwards.
+ */
+export interface ReconciliationCycleRecord {
+  id: string;
+  reconciliationId?: string;
+  tenantId: string;
+  projectId: string;
+  environmentId: string;
+  workerId?: string;
+  outcome: ReconciliationOutcome;
+  createdAt: string;
 }
 
 /**
@@ -542,15 +611,27 @@ export interface ReconciliationRecord {
  * and a single `failed` would hide which one happened.
  */
 export type ReconciliationResult =
+  /** Desired and observed match. */
   | 'converged'
+  /** Nothing has observed this environment, and it offers nothing to observe live. */
   | 'unobserved'
+  /** Observation was attempted and could not be made; never treated as drift. */
+  | 'unavailable'
   | 'drift-detected'
   | 'awaiting-approval'
   | 'autonomy-denied'
   | 'authority-unavailable'
+  /** Executed, verified, and re-observed as matching. */
   | 'executed'
+  /** The open Action for this drift is still executing. */
+  | 'executing'
+  /** The open Action's external outcome is unknown; reality was asked, not the provider. */
+  | 'unknown'
   | 'execution-failed'
   | 'verification-failed'
+  | 'provider-unavailable'
+  /** The same drift has failed repeatedly; no new Action until the backoff elapses or the inputs change. */
+  | 'retry-suspended'
   | 'duplicate-suppressed'
   | 'error';
 
@@ -559,6 +640,11 @@ export interface ReconciliationOutcome {
   observedAt: string;
   /** Plain sentences explaining what happened, in order. */
   explanation: string[];
+  /** What was observed before deciding, and after executing. */
+  observation?: EnvironmentObservation;
+  reobservation?: EnvironmentObservation;
+  /** The drift determination, field by field. */
+  drift?: { status: string; fields: { field: string; desired: string | null; current: string | null; drifted: boolean }[] };
   fingerprint?: string;
   desiredStateRevision?: string;
   observedStateRevision?: string;

@@ -329,21 +329,32 @@ async function render() {
         const record = records.find((entry) => entry.environmentId === report.environmentId);
         const host = panel.querySelector('[data-env="' + report.environmentId + '"]');
         if (!host) return;
-        host.innerHTML = '<h3>Reconciliation</h3>'
+        // Three different questions: what should exist, what exists (never
+        // derived from an Action's status), and what Factory is doing about it.
+        const observation = report.observation || record?.observation;
+        const verification = record?.lastVerification || [];
+        const failedCheck = verification.find((check) => check.status === 'failed');
+        const healthCheck = verification.find((check) => check.name === 'environment responds healthy');
+        host.innerHTML = '<h3>Reality</h3>'
+          + '<p class="muted">Observation: ' + esc(observation ? observation.kind + ' — ' + observation.detail : 'none recorded') + '</p>'
+          + (record && record.action ? '<h3>Operations</h3>'
+              + '<p><strong>Factory</strong> ' + esc(record.action.status === 'succeeded' ? 'finished' : record.action.status === 'unknown' ? 'is verifying an uncertain outcome for' : record.action.status === 'failed' ? 'could not complete' : 'is working on') + ': '
+                + '<a href="/factory/actions/' + esc(record.action.id) + '">' + esc(record.action.intent) + '</a></p>'
+              + '<p class="muted">Action: ' + statusPill(record.action.status) + (record.action.outcome && record.action.outcome !== 'succeeded' ? ' ' + statusPill(record.action.outcome) : '')
+                + ' · Run: ' + (record.run ? '<a href="/factory/runs/' + esc(record.run.id) + '">' + statusPill(record.run.status) + '</a>' : 'none')
+                + ' · Verification: ' + (verification.length ? statusPill(failedCheck ? 'failed' : ['succeeded', 'failed'].includes(record.action.status) ? 'passed' : 'pending') : 'pending')
+                + (healthCheck ? ' · Last verification: ' + esc(healthCheck.detail || healthCheck.status) : '') + '</p>'
+              + '<p class="muted">Autonomy: ' + esc(record.action.autonomy ? (record.action.autonomy.allowed ? 'authorized' : 'denied') : 'not asked') + '</p>'
+            : '')
+          + '<h3>Reconciliation</h3>'
           + (record
-            ? '<p>' + statusPill(record.enabled ? record.status : 'disabled') + ' ' + esc(record.schedule) + '</p>'
+            ? '<p>' + statusPill(record.enabled ? record.status : 'disabled') + ' ' + esc(record.schedule) + (record.result ? ' · last cycle: ' + statusPill(record.result) : '') + '</p>'
               + '<p class="muted">Last observed: ' + esc(record.lastObservedAt || 'never')
               + '<br>Last reconciled: ' + esc(record.lastReconciledAt || 'never')
               + '<br>Next due: ' + esc(record.nextDueAt || '—') + '</p>'
+              + (record.retry ? '<p class="muted">Retry: ' + esc(record.retry.attempts) + ' attempt(s), last ' + esc(record.retry.lastResult) + (record.retry.suspended ? '; suspended until desired state or reality changes' : '; next eligible ' + esc(record.retry.nextEligibleAt)) + '</p>' : '')
               + (record.lastError ? '<p class="muted">' + esc(record.lastError) + '</p>' : '')
               + (record.graphId ? '<p><a href="/factory/graphs/' + esc(record.graphId) + '">Action graph</a></p>' : '')
-              + (record.action
-                ? '<p><strong>Action</strong><br><a href="/factory/actions/' + esc(record.action.id) + '">'
-                  + esc(record.action.intent) + '</a> ' + statusPill(record.action.status) + '</p>'
-                  + '<p class="muted">Autonomy: '
-                  + esc(record.action.autonomy ? (record.action.autonomy.allowed ? 'authorized' : 'denied') : 'not asked')
-                  + '</p>'
-                : '')
               + '<p><button data-toggle="' + esc(report.environmentId) + '" data-enabled="' + record.enabled + '">'
               + (record.enabled ? 'Disable' : 'Enable') + '</button> '
               + '<button data-now="' + esc(report.environmentId) + '">Reconcile Now</button></p>'
@@ -398,23 +409,46 @@ async function render() {
       });
     } else if (current === 'Repositories') {
       const { repositories } = await api('/v1/projects/' + projectId + '/repositories');
+      // A repository is connected when Factory can reach it. The record says
+      // so, from the last verification against the remote, never from the
+      // fact that it was added.
+      const connection = (repository) => {
+        const state = repository.connection;
+        if (!state) return '<span class="muted">not verified</span>';
+        return statusPill(state.status) + ' <span class="muted">' + esc(state.detail) + '</span>'
+          + (state.status === 'connected' && (state.branchCommit || state.headCommit) ? '<br><span class="muted">' + esc(repository.defaultBranch) + ' at ' + esc((state.branchCommit || state.headCommit).slice(0, 12)) + ' · checked ' + esc(state.checkedAt) + '</span>' : '')
+          + (state.credential ? '<br><span class="muted">authenticated with ' + esc(state.credential) + ' (name only)</span>' : '');
+      };
       panel.innerHTML = '<form id="add"><input name="owner" placeholder="owner" required>'
         + '<input name="name" placeholder="repository" required><input name="defaultBranch" placeholder="main">'
-        + '<button>Add repository</button></form>'
+        + '<input name="repositoryUrl" placeholder="remote URL (optional; GitHub is derived)">'
+        + '<button>Add and verify repository</button></form>'
         + (repositories.length
-          ? '<table><thead><tr><th>Repository</th><th>Provider</th><th>Default branch</th><th></th></tr></thead><tbody>'
+          ? '<table><thead><tr><th>Repository</th><th>Provider</th><th>Default branch</th><th>Connection</th><th></th></tr></thead><tbody>'
             + repositories.map((repository) =>
               '<tr><td>' + esc(repository.owner) + '/' + esc(repository.name) + '</td><td>' + esc(repository.provider) + '</td>'
               + '<td>' + esc(repository.defaultBranch) + '</td>'
-              + '<td><button data-remove="' + esc(repository.id) + '">Remove</button></td></tr>').join('')
+              + '<td>' + connection(repository) + '</td>'
+              + '<td><button data-verify="' + esc(repository.id) + '">Verify</button> <button data-remove="' + esc(repository.id) + '">Remove</button></td></tr>').join('')
             + '</tbody></table>'
           : '<div class="empty">No repositories yet.</div>');
       panel.querySelector('#add').onsubmit = async (event) => {
         event.preventDefault();
-        await api('/v1/projects/' + projectId + '/repositories', {
-          method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
-        await render();
+        const data = Object.fromEntries(new FormData(event.target));
+        if (!data.repositoryUrl) delete data.repositoryUrl;
+        if (!data.defaultBranch) delete data.defaultBranch;
+        try {
+          await api('/v1/projects/' + projectId + '/repositories', { method: 'POST', body: JSON.stringify(data) });
+          await render();
+        } catch (error) { fail(panel, error); }
       };
+      panel.querySelectorAll('[data-verify]').forEach((button) => {
+        button.onclick = async () => {
+          button.disabled = true;
+          try { await api('/v1/projects/' + projectId + '/repositories/' + button.dataset.verify + '/verify', { method: 'POST' }); await render(); }
+          catch (error) { fail(panel, error); }
+        };
+      });
     } else if (current === 'Environments') {
       const { environments } = await api('/v1/projects/' + projectId + '/environments');
       panel.innerHTML = '<form id="add"><select name="name"><option>development</option><option>staging</option><option>production</option></select>'

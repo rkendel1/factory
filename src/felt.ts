@@ -21,6 +21,7 @@ export const COLLECTIONS = {
   actionGraphs: 'ActionGraph',
   operationalWork: 'OperationalWork',
   operationalWorkEvents: 'OperationalWorkEvent',
+  reconciliationCycles: 'ReconciliationCycle',
 } as const;
 
 const DEFAULT_NAMESPACE = 'software-factory';

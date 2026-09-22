@@ -28,7 +28,13 @@ export interface RealityField {
   source: string;
 }
 
-export type DriftStatus = 'reconciled' | 'drifted' | 'unknown';
+/**
+ * `unknown`: nothing has observed this environment. `unavailable`: an
+ * observation was attempted and could not be made (provider or resource
+ * unreachable, or observation unsupported and nothing recorded). Neither is
+ * drift: Factory does not remediate an environment because it cannot see it.
+ */
+export type DriftStatus = 'reconciled' | 'drifted' | 'unknown' | 'unavailable';
 
 export interface DriftReport {
   projectId: string;
@@ -120,9 +126,13 @@ export function compareReality(input: {
   ];
 
   const drifted = fields.filter((field) => field.drifted);
+  const observation = current?.observation;
+  const unavailable = observation !== undefined && observation.kind !== 'observed' && observation.kind !== 'recorded';
   const status: DriftStatus = !current
     ? 'unknown'
-    : drifted.length > 0 ? 'drifted' : 'reconciled';
+    : unavailable
+      ? 'unavailable'
+      : drifted.length > 0 ? 'drifted' : 'reconciled';
 
   return {
     projectId: input.project.id,
@@ -130,8 +140,9 @@ export function compareReality(input: {
     environmentName: environment.name,
     status,
     observedAt: current?.observedAt ?? new Date().toISOString(),
-    fields,
     explanation: explain({ environment, fields: drifted, status, desiredBranch, desiredCommit, current }),
+    // Reality can only be compared when it was actually seen.
+    fields: unavailable ? fields.map((field) => ({ ...field, drifted: false })) : fields,
     proposal: status === 'drifted'
       ? {
           type: 'reconcile',
@@ -152,6 +163,10 @@ function explain(input: {
   if (input.status === 'unknown') {
     return [`Factory has not observed ${input.environment.name} yet. `
       + 'No run has reconciled this environment, so there is nothing to compare desired state against.'];
+  }
+  if (input.status === 'unavailable') {
+    return [`${input.environment.name} could not be observed: ${input.current?.observation?.detail ?? 'the observation failed'}. `
+      + 'Factory does not treat an environment it cannot see as drifted.'];
   }
   if (input.status === 'reconciled') {
     return [`${input.environment.name} matches its desired state.`];

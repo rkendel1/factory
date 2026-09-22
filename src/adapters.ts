@@ -96,7 +96,9 @@ export interface ProviderAdapter {
    * external effect or is exactly-once, so a repeat is safe; `undetermined`:
    * reality cannot say yet.
    */
-  observe(capability: OperationalCapability, context: ProviderContext): Promise<Observation>;
+  observe(capability: OperationalCapability, context: ProviderContext, intended?: { revision?: string }): Promise<Observation>;
+  /** Observe the environment itself, without acting. Absent when the provider cannot. */
+  observeEnvironment?(context: ProviderContext): Promise<EnvironmentLiveObservation>;
   /** What the operation is expected to change, for planning and review. */
   effects(capability: OperationalCapability, context: ProviderContext): string[];
   /** Whether the provider makes an operation exactly-once under our key. */
@@ -309,17 +311,47 @@ export const localAdapter: ProviderAdapter = {
 };
 
 /** Probe a health URL for real. Never throws; a failure is an observation. */
-export async function probeHealth(url: string, timeoutMs = 10000): Promise<{ ok: boolean; status?: number; error?: string }> {
+export async function probeHealth(url: string, timeoutMs = 10000): Promise<{ ok: boolean; status?: number; error?: string; version?: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
-    return { ok: response.ok, status: response.status };
+    // A health endpoint that says which revision it runs is reality reporting
+    // itself; it is read, never assumed.
+    let version: string | undefined;
+    try {
+      const body = await response.json() as Record<string, unknown>;
+      const claimed = body.version ?? body.revision ?? body.commit;
+      if (typeof claimed === 'string' && claimed.trim()) version = claimed.trim();
+    } catch { /* not JSON, or no body */ }
+    return { ok: response.ok, status: response.status, ...(version ? { version } : {}) };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * What a provider can say about an environment right now, without acting.
+ *
+ * `kind` distinguishes an answer from the resource (`observed`) from the
+ * reasons there is none: the provider could not be reached, the resource is
+ * not bound, or nothing is configured to observe. Only `observed` is a fact
+ * about reality; the others are facts about Factory's view of it.
+ */
+export interface EnvironmentLiveObservation {
+  kind: 'observed' | 'provider-unavailable' | 'resource-unavailable' | 'unsupported';
+  detail: string;
+  source?: string;
+  reported?: { revision?: string; health?: 'healthy' | 'unhealthy'; status?: number };
+}
+
+export async function observeEnvironmentLive(adapter: ProviderAdapter | null, context: ProviderContext): Promise<EnvironmentLiveObservation> {
+  if (!adapter?.observeEnvironment) {
+    return { kind: 'unsupported', detail: adapter ? `${adapter.id} offers no live observation of an environment` : 'no provider is configured for this environment' };
+  }
+  return adapter.observeEnvironment(context);
 }
 
 function flyApp(context: ProviderContext): string | null {
@@ -329,9 +361,14 @@ function flyApp(context: ProviderContext): string | null {
   return typeof discovered === 'string' && discovered ? discovered : null;
 }
 
-function flyHealthUrl(context: ProviderContext): string | null {
+function configuredHealthUrl(context: ProviderContext): string | null {
   const configured = context.environment?.configuration?.healthUrl;
-  if (typeof configured === 'string' && configured) return configured;
+  return typeof configured === 'string' && configured ? configured : null;
+}
+
+function flyHealthUrl(context: ProviderContext): string | null {
+  const configured = configuredHealthUrl(context);
+  if (configured) return configured;
   const app = flyApp(context);
   return app ? `https://${app}.fly.dev/health` : null;
 }
@@ -385,17 +422,18 @@ export const flyAdapter: ProviderAdapter = {
   },
   interpret(capability, evidence) {
     if (capability === 'environment.health') {
-      let observed: { ok?: boolean; status?: number; error?: string; url?: string } = {};
+      let observed: { ok?: boolean; status?: number; error?: string; url?: string; version?: string | null } = {};
       try { observed = JSON.parse(lastLine(evidence.stdout) || '{}'); } catch { /* not JSON */ }
-      const result = baseResult(evidence, observed.ok ? `${observed.url} returned HTTP ${observed.status}` : observed.error ?? (observed.status ? `HTTP ${observed.status}` : 'no health response'));
+      const result = baseResult(evidence, observed.ok ? `${observed.url} returned HTTP ${observed.status}${observed.version ? `, reporting revision ${observed.version}` : ''}` : observed.error ?? (observed.status ? `HTTP ${observed.status}` : 'no health response'));
       return {
         ...result,
         status: evidence.status === 'cancelled' ? 'cancelled' : evidence.exitCode === 0 ? 'succeeded' : result.status,
-        metadata: { ...result.metadata, httpStatus: observed.status ?? null, url: observed.url ?? null },
+        metadata: { ...result.metadata, httpStatus: observed.status ?? null, url: observed.url ?? null, reportedVersion: observed.version ?? null },
         observed: {
           health: observed.ok ? 'healthy' : 'unhealthy',
           ...(observed.status !== undefined ? { healthStatus: observed.status } : {}),
           ...(observed.url ? { healthUrl: observed.url } : {}),
+          ...(observed.version ? { revision: observed.version } : {}),
         },
       };
     }
@@ -449,18 +487,54 @@ export const flyAdapter: ProviderAdapter = {
       checks.push({
         name: 'environment responds healthy',
         status: probe.ok ? 'passed' : 'failed',
-        detail: probe.ok ? `${url} returned HTTP ${probe.status}` : probe.error ?? `${url} returned HTTP ${probe.status}`,
+        detail: probe.ok ? `${url} returned HTTP ${probe.status}${probe.version ? `, reporting revision ${probe.version}` : ''}` : probe.error ?? `${url} returned HTTP ${probe.status}`,
       });
+      // When the environment reports which revision it runs, the deployment
+      // is verified against it: the intended revision must be what serves.
+      const intended = evidence.revision?.observed ?? evidence.repository.commit;
+      if (probe.ok && probe.version && intended) {
+        const matches = intended === probe.version || intended.startsWith(probe.version) || probe.version.startsWith(intended);
+        checks.push({
+          name: 'environment serves the deployed revision',
+          status: matches ? 'passed' : 'failed',
+          detail: matches ? `${url} reports ${probe.version}` : `${url} reports ${probe.version}, but ${intended} was deployed`,
+        });
+      }
       return checks;
     }
     return [{ name: `${capability} completed`, status: evidence.exitCode === 0 ? 'passed' : 'failed', detail: lastLine(evidence.exitCode === 0 ? evidence.stdout : evidence.stderr) }];
   },
-  async observe(capability, context) {
+  async observeEnvironment(context) {
+    /*
+     * Reality is observed only where the environment is explicitly configured
+     * to be observed. A guessed URL would make an unrelated host's answer, or
+     * its absence, into a fact about this environment.
+     */
+    const url = configuredHealthUrl(context);
+    if (!url) {
+      return { kind: 'unsupported', detail: 'no health URL is configured for this environment (environment.configuration.healthUrl); recorded state from verified operations is used' };
+    }
+    const probe = await probeHealth(url);
+    if (probe.error) {
+      return { kind: 'provider-unavailable', detail: `${url} could not be reached: ${probe.error}`, source: url };
+    }
+    return {
+      kind: 'observed',
+      detail: `${url} returned HTTP ${probe.status}${probe.version ? `, reporting revision ${probe.version}` : ''}`,
+      source: url,
+      reported: { health: probe.ok ? 'healthy' : 'unhealthy', status: probe.status!, ...(probe.version ? { revision: probe.version } : {}) },
+    };
+  },
+  async observe(capability, context, intended) {
     if (capability !== 'deployment.create') return retrySafe(capability, 'is read-only');
-    // A deployment whose result was lost is established only when the
-    // environment is observably serving and healthy. Anything else stays
-    // uncertain: an unhealthy or unreachable app does not prove the deploy
-    // never happened, and a repeat would be a second deployment.
+    /*
+     * A deployment whose result was lost is established only when the
+     * environment is observably serving and healthy — and, when the
+     * environment reports which revision it runs, running the intended one.
+     * A healthy environment on another revision shows the deployment did not
+     * take effect; an unhealthy or unreachable one proves nothing either way,
+     * and a repeat would be a second deployment.
+     */
     const url = flyHealthUrl(context);
     if (!url) {
       return { outcome: 'undetermined', detail: 'no health URL is configured, so the deployment cannot be observed', checks: [], observed: {} };
@@ -469,11 +543,24 @@ export const flyAdapter: ProviderAdapter = {
     const check: VerificationCheck = {
       name: 'environment responds healthy',
       status: probe.ok ? 'passed' : 'failed',
-      detail: probe.ok ? `${url} returned HTTP ${probe.status}` : probe.error ?? `${url} returned HTTP ${probe.status}`,
+      detail: probe.ok ? `${url} returned HTTP ${probe.status}${probe.version ? `, reporting revision ${probe.version}` : ''}` : probe.error ?? `${url} returned HTTP ${probe.status}`,
     };
-    return probe.ok
-      ? { outcome: 'established', detail: `the environment is serving and healthy at ${url}`, checks: [check], observed: { health: 'healthy', healthStatus: probe.status!, healthUrl: url } }
-      : { outcome: 'undetermined', detail: `the environment is not healthy (${check.detail}); whether the deployment happened cannot be determined`, checks: [check], observed: { health: 'unhealthy', healthUrl: url, ...(probe.status !== undefined ? { healthStatus: probe.status } : {}) } };
+    if (!probe.ok) {
+      return { outcome: 'undetermined', detail: `the environment is not healthy (${check.detail}); whether the deployment happened cannot be determined`, checks: [check], observed: { health: 'unhealthy', healthUrl: url, ...(probe.status !== undefined ? { healthStatus: probe.status } : {}) } };
+    }
+    const observed = { health: 'healthy' as const, healthStatus: probe.status!, healthUrl: url, ...(probe.version ? { revision: probe.version } : {}) };
+    if (probe.version && intended?.revision) {
+      const matches = intended.revision === probe.version || intended.revision.startsWith(probe.version) || probe.version.startsWith(intended.revision);
+      const revisionCheck: VerificationCheck = {
+        name: 'environment serves the deployed revision',
+        status: matches ? 'passed' : 'failed',
+        detail: matches ? `${url} reports ${probe.version}` : `${url} reports ${probe.version}, not the intended ${intended.revision}`,
+      };
+      return matches
+        ? { outcome: 'established', detail: `the environment is serving and healthy at ${url}, at the intended revision ${probe.version}`, checks: [check, revisionCheck], observed }
+        : { outcome: 'absent', detail: `the environment is healthy but serves ${probe.version}, not the intended ${intended.revision}; the deployment did not take effect`, checks: [check, revisionCheck], observed };
+    }
+    return { outcome: 'established', detail: `the environment is serving and healthy at ${url}${probe.version ? ` at revision ${probe.version}` : ''}`, checks: [check], observed };
   },
   effects(capability, context) {
     const app = flyApp(context) ?? 'the Fly app';
