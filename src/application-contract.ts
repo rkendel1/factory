@@ -113,7 +113,11 @@ export function createCanonicalApplicationContract(flowSpec: FlowSpec): Canonica
         input: s.object({}),
         output: s.object({ accepted: s.boolean() }),
         authorization: capability.grants,
-        handler: async () => ({ accepted: true }),
+        // Declared for the manifest only. A .flow operation executes through a
+        // Factory Run, never through AppPort dispatch, so this can never answer.
+        handler: async () => {
+          throw new Error(`${capability.operation} executes through a Factory Run, not through AppPort dispatch`);
+        },
       })),
       // The Attn ↔ Factory contract, declared here so the manifest advertises
       // it with its typed schema. The runtime handler lives on the service.

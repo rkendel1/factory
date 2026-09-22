@@ -129,10 +129,28 @@ function lastLine(text: string): string {
   return text.trim().split('\n').filter(Boolean).pop() ?? '';
 }
 
+/** `git status --porcelain=v2 --branch`, as git prints it. */
+export function parseGitStatus(stdout: string): { oid: string | null; branch: string | null; upstream: string | null; changes: number } {
+  let oid: string | null = null;
+  let branch: string | null = null;
+  let upstream: string | null = null;
+  let changes = 0;
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('# branch.oid ')) oid = line.slice('# branch.oid '.length).trim() || null;
+    else if (line.startsWith('# branch.head ')) { const head = line.slice('# branch.head '.length).trim(); branch = head === '(detached)' ? null : head; }
+    else if (line.startsWith('# branch.upstream ')) upstream = line.slice('# branch.upstream '.length).trim() || null;
+    else if (line.trim() && !line.startsWith('#')) changes += 1;
+  }
+  return { oid: oid === '(initial)' ? null : oid, branch, upstream, changes };
+}
+
 /** A provider's own refusal reads differently from a process that could not run. */
 function rejectionOf(evidence: StructuredEvidence): string | null {
   const text = `${evidence.stderr}\n${evidence.stdout}`;
-  const match = text.match(/^.*\b(unauthorized|not authorized|forbidden|permission denied|authentication|could not find app|app not found|invalid token|401|403|404)\b.*$/im);
+  // The provider refusing the request, as distinct from the request failing
+  // to run: authentication, authorization, a missing target, or a request it
+  // will not accept.
+  const match = text.match(/^.*\b(unauthorized|not authorized|forbidden|permission denied|authentication|could not find app|app not found|invalid token|invalid configuration|invalid (?:app|config|request)|rejected|bad request|401|403|404|422)\b.*$/im);
   return match ? match[0].trim() : null;
 }
 
@@ -173,31 +191,49 @@ export const gitAdapter: ProviderAdapter = {
       parameters: {},
     };
   },
-  interpret(capability, evidence) {
-    const result = baseResult(evidence, capability === 'repository.inspect' ? 'repository head observed' : 'repository checked out');
+  interpret(capability, evidence, context) {
+    const result = baseResult(evidence, capability === 'repository.inspect' ? 'repository state observed' : 'repository checked out');
     const observed = evidence.revision?.observed ?? evidence.repository.commit;
-    const printed = lastLine(evidence.stdout);
+    const state = capability === 'repository.inspect' ? parseGitStatus(evidence.stdout) : null;
+    const remote = context.repository ? `${context.repository.provider}:${context.repository.owner}/${context.repository.name}` : null;
     return {
       ...result,
       providerOperationId: observed ?? null,
-      metadata: { ...result.metadata, head: printed || null },
+      metadata: {
+        ...result.metadata,
+        remote,
+        ...(state ? { branch: state.branch, upstream: state.upstream, head: state.oid, dirty: state.changes > 0, changes: state.changes } : { head: lastLine(evidence.stdout) || null }),
+      },
       observed: observed ? { revision: observed } : {},
-      summary: result.status === 'succeeded' && observed ? `${result.summary} at ${observed.slice(0, 12)}` : result.summary,
+      summary: result.status === 'succeeded' && observed
+        ? state
+          ? `${state.branch ?? 'detached'} at ${observed.slice(0, 12)}, ${state.changes > 0 ? `${state.changes} uncommitted change(s)` : 'clean'}`
+          : `${result.summary} at ${observed.slice(0, 12)}`
+        : result.summary,
     };
   },
   async verify(capability, evidence) {
     const observed = evidence.revision?.observed ?? evidence.repository.commit ?? null;
     const requested = evidence.revision?.requested ?? null;
+    const state = capability === 'repository.inspect' ? parseGitStatus(evidence.stdout) : null;
     const checks: VerificationCheck[] = [{
-      name: capability === 'repository.inspect' ? 'repository head observed' : 'checkout reached a revision',
+      name: capability === 'repository.inspect' ? 'repository state observed' : 'checkout reached a revision',
       status: evidence.exitCode === 0 && observed ? 'passed' : 'failed',
-      detail: observed ? `HEAD is ${observed}` : evidence.exitCode === 0 ? 'git reported no revision' : lastLine(evidence.stderr) || 'git did not exit 0',
+      detail: observed
+        ? state
+          ? `HEAD is ${observed} on ${state.branch ?? 'a detached HEAD'}${state.upstream ? ` tracking ${state.upstream}` : ''}; ${state.changes > 0 ? `${state.changes} uncommitted change(s)` : 'working tree clean'}`
+          : `HEAD is ${observed}`
+        : evidence.exitCode === 0 ? 'git reported no revision' : lastLine(evidence.stderr) || 'git did not exit 0',
     }];
+    if (state && observed && state.oid && !observed.startsWith(state.oid) && !state.oid.startsWith(observed)) {
+      checks.push({ name: 'inspected HEAD matches the checked-out revision', status: 'failed', detail: `git status reports ${state.oid}, the checkout reported ${observed}` });
+    }
     if (capability === 'repository.checkout') {
       checks.push({
         name: 'resulting revision matches the requested one',
-        status: !requested ? 'skipped' : observed && (observed === requested || observed.startsWith(requested)) ? 'passed' : 'failed',
-        detail: requested ? `requested ${requested}, observed ${observed ?? 'nothing'}` : `no revision was requested; ${evidence.ref} resolved to ${observed ?? 'nothing'}`,
+        // With no specific revision requested, the branch tip is the request.
+        status: !requested ? (observed ? 'passed' : 'failed') : observed && (observed === requested || observed.startsWith(requested)) ? 'passed' : 'failed',
+        detail: requested ? `requested ${requested}, observed ${observed ?? 'nothing'}` : `no specific revision was requested; ${evidence.ref} resolved to ${observed ?? 'nothing'}`,
       });
     }
     return checks;
@@ -255,7 +291,9 @@ export const localAdapter: ProviderAdapter = {
       name: `${capability} completed`,
       status: evidence.exitCode === 0 ? 'passed' : 'failed',
       detail: evidence.exitCode === 0
-        ? script ? `package.json ${script} script exited 0` : 'command exited 0'
+        ? script
+          ? `package.json ${script} script exited 0${evidence.artifacts.length ? `; produced ${evidence.artifacts.join(', ')}` : '; produced no new top-level artifacts'}`
+          : 'command exited 0'
         : lastLine(evidence.stderr) || `exited ${evidence.exitCode}`,
     }];
   },

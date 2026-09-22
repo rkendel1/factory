@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import type { Readable } from 'node:stream';
 import { buildEvidence, type RawExecutionResult } from './evidence.js';
 import { createWorkspace, destroyWorkspace, materializeRepository, type WorkspaceHandle } from './workspace.js';
@@ -225,6 +226,10 @@ async function runBoundedCommand(
     }
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
+    // What the operation leaves behind is observed, not inferred: the
+    // workspace's top-level entries before and after, bounded.
+    const listWorkspace = () => { try { return new Set(readdirSync(workspace.repositoryPath)); } catch { return new Set<string>(); } };
+    const before = listWorkspace();
     const stdout = new BoundedOutput(MAX_OUTPUT_BYTES);
     const stderr = new BoundedOutput(MAX_OUTPUT_BYTES);
     let child: ChildProcessByStdio<null, Readable, Readable> | undefined;
@@ -317,6 +322,7 @@ async function runBoundedCommand(
         outputBytes: { stdout: stdout.total, stderr: stderr.total },
         workspace: workspace.repositoryPath,
         credentialsResolved: Object.keys(credentials),
+        artifacts: [...listWorkspace()].filter((entry) => !before.has(entry)).sort().slice(0, 50),
         ...(paxVersion ? { paxVersion } : {}),
       };
 

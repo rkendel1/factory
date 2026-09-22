@@ -85,6 +85,30 @@ function appPortErrorStatus(error: AppErrorObject): number {
   }
 }
 
+/**
+ * Action parameters are plain values the Action's own operation may read (a
+ * revision to check out). They never name a provider resource or carry a
+ * credential; resources bind from durable configuration and credentials are
+ * resolved by name at the execution boundary.
+ */
+function actionParameters(value: unknown): Record<string, string | number | boolean> {
+  const record = asRecord(value);
+  const parameters: Record<string, string | number | boolean> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) throw new DomainValidationError(`parameters.${key} is not a valid parameter name`);
+    if (/(api[-_]?key|token|password|passwd|secret|credential|private[-_]?key|bearer|cookie)/i.test(key)) {
+      throw new DomainValidationError(`parameters.${key} looks like a credential; Factory resolves credentials by name at execution time`);
+    }
+    if (typeof entry !== 'string' && typeof entry !== 'number' && typeof entry !== 'boolean') {
+      throw new DomainValidationError(`parameters.${key} must be a string, number or boolean`);
+    }
+    if (typeof entry === 'string' && entry.length > 500) throw new DomainValidationError(`parameters.${key} must be at most 500 characters`);
+    if (typeof entry === 'string' && entry.trim() === '') continue;
+    parameters[key] = entry;
+  }
+  return parameters;
+}
+
 const RECONCILIATION_PATH = /^\/v1\/projects\/([^/]+)\/environments\/([^/]+)\/reconciliation$/;
 
 export const PRODUCT_ROUTES: ProductRoute[] = [
@@ -252,6 +276,7 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
         ...(input.repositoryId === undefined ? {} : { repositoryId: text(input.repositoryId, 'repositoryId')! }),
         ...(input.operation === undefined ? {} : { operation: text(input.operation, 'operation')! }),
         ...(input.capability === undefined ? {} : { capability: text(input.capability, 'capability')! }),
+        ...(input.parameters === undefined ? {} : { parameters: actionParameters(input.parameters) }),
       }, probe));
     },
   },

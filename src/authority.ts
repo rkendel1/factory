@@ -297,6 +297,9 @@ export async function authorizeExecution(
         owner: work.repositoryOwner,
         name: work.repositoryName,
         ref: work.repositoryRef,
+        // The revision the Action asked to reach; recorded as requested, and
+        // reality is whatever the checkout then reports.
+        ...(request.repository.commit ? { commit: request.repository.commit } : {}),
       },
       operation: request.operation,
       capabilities: authority.capabilities,

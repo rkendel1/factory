@@ -457,18 +457,40 @@ async function render() {
       };
     } else if (current === 'Actions') {
       const { actions } = await api('/v1/projects/' + projectId + '/actions');
-      panel.innerHTML = '<form id="plan"><input name="type" placeholder=".flow operation, e.g. repo-echo" required>'
+      const { providers } = await api('/v1/providers');
+      const { environments } = await api('/v1/projects/' + projectId + '/environments');
+      // Only capabilities Factory can actually perform from here are offered;
+      // the rest are shown, disabled, with the reason.
+      const options = providers.flatMap((provider) => provider.capabilities.map((entry) =>
+        '<option value="' + esc(entry.capability) + '"' + (entry.executable ? '' : ' disabled') + '>'
+        + esc(entry.capability) + ' via ' + esc(provider.id) + (entry.executable ? '' : ' — ' + esc(entry.reasons.join('; '))) + '</option>')).join('');
+      panel.innerHTML = '<form id="plan"><select name="capability" required><option value="">capability…</option>' + options + '</select>'
+        + '<select name="environmentId"><option value="">no environment</option>'
+          + environments.map((environment) => '<option value="' + esc(environment.id) + '">' + esc(environment.name) + (environment.provider ? ' (' + esc(environment.provider) + ')' : '') + '</option>').join('') + '</select>'
+        + '<input name="revision" placeholder="revision (checkout only)" pattern="[0-9a-fA-F]{7,40}">'
         + '<input name="intent" placeholder="intent"><button>Plan action</button></form>'
+        + '<details><summary class="muted">Plan a declared .flow operation instead</summary><form id="plan-operation"><input name="type" placeholder=".flow operation, e.g. repo-echo" required>'
+        + '<input name="intent" placeholder="intent"><button>Plan operation</button></form></details>'
         + (actions.length
           ? '<table><thead><tr><th>Action</th><th>Status</th><th>Provider</th><th>Updated</th></tr></thead><tbody>'
             + actions.map((action) =>
               '<tr><td><a href="/factory/actions/' + esc(action.id) + '">' + esc(action.type) + '</a>'
               + '<div class="muted">' + esc(action.intent) + '</div></td>'
-              + '<td>' + statusPill(action.status) + '</td><td>' + esc(action.executionProvider || '—') + '</td>'
+              + '<td>' + statusPill(action.status) + (action.outcome && action.outcome !== 'succeeded' ? ' ' + statusPill(action.outcome) : '') + '</td><td>' + esc(action.provider || action.executionProvider || '—') + '</td>'
               + '<td class="muted">' + esc(action.updatedAt) + '</td></tr>').join('')
             + '</tbody></table>'
           : '<div class="empty">No actions yet.</div>');
       panel.querySelector('#plan').onsubmit = async (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(event.target));
+        const body = { capability: data.capability, ...(data.environmentId ? { environmentId: data.environmentId } : {}),
+          ...(data.intent ? { intent: data.intent } : {}), ...(data.revision ? { parameters: { revision: data.revision } } : {}) };
+        try {
+          const created = await api('/v1/projects/' + projectId + '/actions', { method: 'POST', body: JSON.stringify(body) });
+          location.href = '/factory/actions/' + created.id;
+        } catch (error) { fail(panel, error); }
+      };
+      panel.querySelector('#plan-operation').onsubmit = async (event) => {
         event.preventDefault();
         await api('/v1/projects/' + projectId + '/actions', {
           method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
