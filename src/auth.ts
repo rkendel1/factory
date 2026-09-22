@@ -39,6 +39,17 @@ export interface AuthorizationGrant {
   delegationId: string | null;
 }
 
+/**
+ * Ask AuthBoundry a capability question without turning a denial into an error.
+ *
+ * Some Factory questions have a meaningful "no" — whether an Action may run
+ * without a person is one — so the answer is returned rather than thrown.
+ */
+export type CapabilityProbe = (capability: string) => Promise<{
+  allowed: boolean;
+  reason: string;
+}>;
+
 export interface Authenticator {
   session?(request: IncomingMessage): Promise<AuthenticatedContext>;
   authenticate(request: IncomingMessage, operation: string): Promise<AuthenticatedContext>;

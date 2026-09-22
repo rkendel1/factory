@@ -5,6 +5,7 @@ import type {
   ActionRecord,
   ActionStatus,
   DesiredStateRecord,
+  EnvironmentCurrentState,
   EnvironmentRecord,
   ProjectRecord,
   RepositoryRecord,
@@ -165,6 +166,23 @@ export class FactoryDomain {
     };
     await this.environments().insert(record, record.id);
     return record;
+  }
+
+  /**
+   * Record what Factory observed an environment to be. Written only by
+   * reconciliation, from durable run evidence.
+   */
+  async setEnvironmentState(
+    tenantId: string,
+    projectId: string,
+    id: string,
+    currentState: EnvironmentCurrentState,
+  ): Promise<EnvironmentRecord | null> {
+    const current = await this.getEnvironment(tenantId, projectId, id);
+    if (!current) return null;
+    const next: EnvironmentRecord = { ...current, currentState, updatedAt: new Date().toISOString() };
+    await this.environments().put(next, next.id);
+    return next;
   }
 
   // -- Desired state -------------------------------------------------------

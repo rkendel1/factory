@@ -86,6 +86,19 @@ export function authorizedApplicationContext(
 }
 
 /**
+ * The capability that lets an Action execute without a person.
+ *
+ * Factory asks AuthBoundry this question instead of deciding for itself which
+ * Actions need human judgement. The default answer is the safe one and needs no
+ * coordination: an authority that does not grant this capability denies it, so
+ * an Action waits for a person until someone deliberately grants autonomy.
+ *
+ * Factory determines what needs to happen. AuthBoundry determines what may
+ * cause it to happen without a human.
+ */
+export const AUTONOMOUS_EXECUTION_CAPABILITY = 'factory.action.autonomous';
+
+/**
  * Factory's connection to its authority, as the authority answered it.
  *
  * `associated` means AuthBoundry holds the delegation; `unassociated` means it

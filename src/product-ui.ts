@@ -60,6 +60,12 @@ form{display:flex;gap:.5rem;flex-wrap:wrap;margin:.75rem 0}
 input,select,button,textarea{font:inherit;padding:.45rem .6rem;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}
 button{cursor:pointer}
 .empty{border:1px dashed var(--line);border-radius:10px;padding:1.25rem;color:var(--muted);text-align:center}
+.reality{margin-bottom:2rem}
+.reality th{text-transform:none;letter-spacing:0;font-size:.92rem;color:var(--fg);width:8rem}
+tr.drift td,tr.drift th{background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.banner{border:1px solid var(--line);border-left-width:3px;border-radius:8px;padding:.75rem;background:var(--panel)}
+.banner p{margin:.25rem 0}
+.banner.drift{border-left-color:var(--warn)}
 @media (max-width:640px){main{padding:1rem}table{font-size:.86rem}}
 `;
 
@@ -234,7 +240,7 @@ export function projectPage(projectId: string): string {
 const { api, esc, statusPill, fail } = window.factory;
 const projectId = ${scriptLiteral(projectId)};
 const panel = document.querySelector('#panel');
-const TABS = ['Overview','Repositories','Environments','Desired State','Actions','Runs'];
+const TABS = ['Overview','Reality','Repositories','Environments','Desired State','Actions','Runs'];
 let current = location.hash.replace('#','') || 'Overview';
 
 document.querySelector('#tabs').innerHTML = TABS.map((tab) =>
@@ -264,6 +270,33 @@ async function render() {
         + '<div class="card"><h3>Environments</h3><p>' + environments.environments.map((e) => esc(e.name)).join(', ') + '</p></div>'
         + '<div class="card"><h3>Active Actions</h3><p>' + actions.actions.filter((a) => a.status === 'running' || a.status === 'authorized').length + '</p></div>'
         + '<div class="card"><h3>Recent Runs</h3><p>' + runs.runs.length + '</p></div></div>';
+    } else if (current === 'Reality') {
+      const { environments } = await api('/v1/projects/' + projectId + '/reality');
+      panel.innerHTML = environments.length ? environments.map((report) => {
+        const rows = report.fields.map((field) =>
+          '<tr' + (field.drifted ? ' class="drift"' : '') + '><th>' + esc(field.label) + '</th>'
+          + '<td>' + esc(field.desired ?? '—') + '</td><td>' + esc(field.current ?? '—') + '</td></tr>').join('');
+        return '<section class="reality"><h2>' + esc(report.environmentName) + ' ' + statusPill(report.status) + '</h2>'
+          + '<table><thead><tr><th></th><th>Desired</th><th>Current</th></tr></thead><tbody>' + rows + '</tbody></table>'
+          + '<div class="' + (report.status === 'drifted' ? 'banner drift' : 'banner') + '">'
+          + report.explanation.map((line) => '<p>' + esc(line) + '</p>').join('')
+          + (report.proposal
+            ? '<p><strong>Action available</strong><br>' + esc(report.proposal.intent) + '</p>'
+              + '<button data-reconcile="' + esc(report.environmentId) + '">Review Action</button>'
+            : '') + '</div></section>';
+      }).join('') : '<div class="empty">No environments yet.</div>';
+      panel.querySelectorAll('[data-reconcile]').forEach((button) => {
+        button.onclick = async () => {
+          button.disabled = true;
+          try {
+            const result = await api(
+              '/v1/projects/' + projectId + '/environments/' + button.dataset.reconcile + '/reconcile',
+              { method: 'POST', body: JSON.stringify({}) });
+            if (result.action) location.href = '/factory/actions/' + result.action.id;
+            else await render();
+          } catch (error) { fail(panel, error); }
+        };
+      });
     } else if (current === 'Repositories') {
       const { repositories } = await api('/v1/projects/' + projectId + '/repositories');
       panel.innerHTML = '<form id="add"><input name="owner" placeholder="owner" required>'
@@ -403,12 +436,20 @@ async function render() {
     document.querySelector('#intent').textContent = action.intent;
     const authority = action.authority || {};
     const verification = action.verification || [];
+    const drift = action.drift;
     detail.innerHTML =
-      '<h2>Plan</h2><ol class="plan">' + (action.plan || []).map((step) =>
+      (drift ? '<h2>Why</h2><div class="banner drift">'
+        + drift.explanation.map((line) => '<p>' + esc(line) + '</p>').join('')
+        + '<p class="muted">Observed ' + esc(drift.observedAt) + '</p></div>' : '')
+      + '<h2>Plan</h2><ol class="plan">' + (action.plan || []).map((step) =>
         '<li>' + esc(step.summary) + (step.detail ? ' <span class="muted">— ' + esc(step.detail) + '</span>' : '')
         + (step.basis ? '<div class="basis">from ' + esc(step.basis) + '</div>' : '') + '</li>').join('')
       + '</ol>'
       + '<h2>Authority</h2><div class="grid">'
+        + '<div class="card"><h3>Autonomous execution</h3><p>'
+          + statusPill(action.autonomy ? (action.autonomy.allowed ? 'ready' : 'awaiting-approval') : 'unknown')
+          + '</p><p class="muted">' + esc(action.autonomy?.reason || 'not asked') + '</p></div>'
+        + (action.approvedBy ? '<div class="card"><h3>Approved by</h3><p>' + esc(action.approvedBy) + '</p></div>' : '')
         + '<div class="card"><h3>Principal</h3><p>' + esc(authority.principal || '—') + '</p></div>'
         + '<div class="card"><h3>Application</h3><p>' + esc(authority.application || '—') + '</p></div>'
         + '<div class="card"><h3>Delegation</h3><p>' + esc(authority.delegation || '—') + '</p></div>'

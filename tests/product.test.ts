@@ -8,7 +8,14 @@ import { factoryAssociation } from '../src/association.js';
 import { loadFactoryFlow } from '../src/felt.js';
 import { associationDelegationId } from '../src/provisioning.js';
 import type { AuthBoundryAgent, AuthBoundryControlPlane, AuthBoundryDelegation } from '../src/provisioning.js';
-import type { Authenticator } from '../src/auth.js';
+import type { Authenticator, CapabilityProbe } from '../src/auth.js';
+import { AUTONOMOUS_EXECUTION_CAPABILITY } from '../src/association.js';
+
+/** AuthBoundry granting autonomous execution, so planning tests test planning. */
+const autonomyGranted: CapabilityProbe = async (capability) => ({
+  allowed: capability === AUTONOMOUS_EXECUTION_CAPABILITY,
+  reason: `AuthBoundry authorized ${capability}`,
+});
 import type { ActionRecord, RunRecord, StructuredEvidence } from '../src/types.js';
 
 const TENANT = 'tenant-a';
@@ -167,8 +174,10 @@ test('an Action is planned from repository reality and stays separate from desir
     sourceRepositoryId: repository.id, deploymentEnabled: false, healthRequirement: 'tests pass',
   });
 
-  const action = await instance.createAction(await context(instance), project.id, { type: 'repo-echo' });
-  assert.equal(action.status, 'planned');
+  const action = await instance.createAction(
+    await context(instance), project.id, { type: 'repo-echo' }, autonomyGranted);
+  assert.equal(action.status, 'planned', 'an authority that grants autonomy needs no approval step');
+  assert.equal(action.autonomy?.allowed, true);
   assert.equal(action.operation, 'repo-echo');
   assert.equal(action.executionProvider, 'native');
   assert.ok(action.plan.length > 1, 'a plan has steps');
@@ -235,7 +244,7 @@ test('an authorized Action executes, records a Run, and proves it with FeltDB ev
   assert.equal(evidence?.authorizedApplication?.principalId, PRINCIPAL);
 });
 
-test('an Action that would deploy waits for a person before it runs', async () => {
+test('a deploying desired state produces a deployment step, and autonomy is asked of the authority', async () => {
   const instance = await service();
   const domain = instance.projects();
   const project = await domain.createProject({ tenantId: TENANT, name: 'Deploys' });
@@ -244,20 +253,28 @@ test('an Action that would deploy waits for a person before it runs', async () =
     sourceRepositoryId: repository.id, deploymentEnabled: true, targetProvider: 'fly',
   });
 
-  const action = await instance.createAction(await context(instance), project.id, { type: 'repo-echo' });
-  assert.equal(action.status, 'awaiting-approval');
-  assert.ok(action.plan.some((step) => /Deploy to fly/.test(step.summary)));
+  // The plan follows desired state; whether it waits for a person does not.
+  const granted = await instance.createAction(
+    await context(instance), project.id, { type: 'repo-echo' }, autonomyGranted);
+  assert.ok(granted.plan.some((step) => /Deploy to fly/.test(step.summary)));
+  assert.equal(granted.status, 'planned');
 
-  // It surfaces as needing a human, and it does not run on its own.
+  // Factory could not ask, so the safe answer stands and a person is asked.
+  const ungated = await instance.createAction(await context(instance), project.id, { type: 'repo-echo' });
+  assert.equal(ungated.status, 'awaiting-approval');
+  assert.equal(ungated.autonomy?.allowed, false);
+
   const overview = await instance.overview(await context(instance));
-  assert.deepEqual((overview.attentionRequired as { id: string }[]).map((entry) => entry.id), [action.id]);
-  const approver = await context(instance);
-  await assert.rejects(() => instance.runAction(approver, action.id, false), /awaiting approval/);
-  assert.equal((await domain.getAction(TENANT, action.id))?.status, 'awaiting-approval');
+  assert.ok((overview.attentionRequired as { id: string }[]).some((entry) => entry.id === ungated.id));
 
-  // Approving it runs it through the same path as any other Action.
-  const ran = await instance.runAction(await context(instance), action.id);
+  const approver = await context(instance);
+  await assert.rejects(
+    () => instance.runAction(approver, ungated.id, { autonomous: true }),
+    /may not execute autonomously/,
+  );
+  const ran = await instance.runAction(approver, ungated.id);
   assert.equal(ran.status, 'succeeded', JSON.stringify(ran.verification));
+  assert.equal(ran.approvedBy, PRINCIPAL);
 });
 
 test('an unassociated Factory principal fails closed instead of executing', async () => {

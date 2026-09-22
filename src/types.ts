@@ -197,6 +197,23 @@ export interface RepositoryRecord {
   __version?: number;
 }
 
+/**
+ * What an environment actually looks like, as Factory last observed it.
+ *
+ * This is written by reconciliation from durable run evidence, never copied
+ * from desired state.
+ */
+export interface EnvironmentCurrentState {
+  observedAt: string;
+  sourceCommit?: string;
+  sourceBranch?: string;
+  provider?: string;
+  deployment?: 'enabled' | 'disabled';
+  health?: 'healthy' | 'unhealthy' | 'unknown';
+  reconciledRunId?: string;
+  reconciledEvidenceId?: string;
+}
+
 export interface EnvironmentRecord {
   id: string;
   projectId: string;
@@ -204,7 +221,7 @@ export interface EnvironmentRecord {
   name: string;
   provider?: string;
   configuration?: Record<string, unknown>;
-  currentState?: Record<string, unknown>;
+  currentState?: EnvironmentCurrentState;
   desiredState?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -251,6 +268,8 @@ export interface RepositoryDiscovery {
     packageManager?: string;
     scripts?: string[];
     containerized?: boolean;
+    /** The commit the repository is actually at, when it is a git checkout. */
+    headCommit?: string;
     flyConfigured?: boolean;
     vercelConfigured?: boolean;
     githubWorkflows?: string[];
@@ -274,6 +293,18 @@ export interface VerificationCheck {
   detail?: string;
 }
 
+/**
+ * Whether AuthBoundry allows this Action to execute without a person, and why.
+ *
+ * `allowed: false` is not an error. It is the authority saying a human has to
+ * decide, which is what puts the Action in front of one.
+ */
+export interface AutonomyDecision {
+  capability: string;
+  allowed: boolean;
+  reason: string;
+}
+
 export interface ActionRecord {
   id: string;
   projectId: string;
@@ -289,6 +320,16 @@ export interface ActionRecord {
   runId?: string;
   verification?: VerificationCheck[];
   authority?: AuthorityContextRecord;
+  autonomy?: AutonomyDecision;
+  /** The drift this Action exists to close, when reconciliation planned it. */
+  drift?: {
+    status: string;
+    observedAt: string;
+    explanation: string[];
+    fields: { field: string; label: string; desired: string | null; current: string | null }[];
+  };
+  /** The person who approved an Action the authority would not run on its own. */
+  approvedBy?: string;
   createdBy?: string;
   createdAt: string;
   updatedAt: string;

@@ -14,6 +14,7 @@ import {
   AuthBoundryAuthorizationError,
   type AuthenticatedContext,
   type Authenticator,
+  type CapabilityProbe,
 } from './auth.js';
 import { BrowserAdapterError, type BrowserRedirectResult } from '@authboundry/core/server';
 import { createAppPortAdapter, type FactoryAppPortAdapter } from './appport.js';
@@ -34,9 +35,11 @@ import {
 } from './product-ui.js';
 import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
+import { compareReality, observeEnvironment, reconciledState, type DriftReport } from './reality.js';
 import {
   assertFactoryAssociation,
   authorizedApplicationContext,
+  AUTONOMOUS_EXECUTION_CAPABILITY,
   factoryAssociation,
   FactoryAssociationError,
   type FactoryAssociation,
@@ -65,6 +68,7 @@ import {
 import type {
   ActionRecord,
   AuthorityContextRecord,
+  AutonomyDecision,
   EnvironmentRecord,
   ExecutionContractRecord,
   ExecutionRequestRecord,
@@ -118,6 +122,14 @@ function validateRunRequest(request: RunRequest): void {
   if (githubUnexpected.length > 0) {
     throw new Error(`GitHub execution fields are not accepted in a run request: ${githubUnexpected.join(', ')}`);
   }
+}
+
+async function readBody(request: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8').trim();
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {
@@ -332,6 +344,127 @@ export class FactoryService {
   }
 
   /**
+   * Observe what an environment actually looks like and compare it with what
+   * desired state says it should.
+   *
+   * Nothing here changes anything. Reality is read from the repository and from
+   * the durable evidence of the runs that reconciled this environment, so the
+   * same answer is available to anyone reading FeltDB.
+   */
+  async observeReality(context: AuthenticatedContext, projectId: string): Promise<DriftReport[]> {
+    const tenantId = context.tenant;
+    const project = await this.domain.getProject(tenantId, projectId);
+    if (!project) throw new DomainValidationError(`project ${projectId} was not found`);
+
+    const [environments, repositories, desiredState] = await Promise.all([
+      this.domain.listEnvironments(tenantId, projectId),
+      this.domain.listRepositories(tenantId, projectId),
+      this.domain.getDesiredState(tenantId, projectId),
+    ]);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId)
+      ?? repositories[0] ?? null;
+    const discovery = this.config.repositoryRoot
+      ? await discoverRepository(this.config.repositoryRoot, repository ?? undefined)
+      : null;
+
+    return environments.map((environment) => compareReality({
+      project,
+      environment,
+      desiredState,
+      repository,
+      discovery,
+      current: observeEnvironment(environment),
+    }));
+  }
+
+  /**
+   * Turn observed drift into an Action that explains itself.
+   *
+   * The Action's intent is the drift, in the words the comparison produced, so
+   * a reviewer reads why Factory wants to act before reading what it will do.
+   * An environment that already matches produces no Action: reconciliation is
+   * the absence of work, not a run that confirms nothing changed.
+   */
+  async planReconciliation(
+    context: AuthenticatedContext,
+    projectId: string,
+    environmentId: string,
+    options: { operation?: string; probe?: CapabilityProbe } = {},
+  ): Promise<{ drift: DriftReport; action: ActionRecord | null }> {
+    const reports = await this.observeReality(context, projectId);
+    const drift = reports.find((report) => report.environmentId === environmentId);
+    if (!drift) throw new DomainValidationError(`environment ${environmentId} was not found`);
+    if (drift.status !== 'drifted' || !drift.proposal) {
+      return { drift, action: null };
+    }
+
+    const action = await this.createAction(context, projectId, {
+      type: options.operation ?? 'repo-echo',
+      intent: drift.proposal.intent,
+      environmentId,
+      ...(options.operation ? { operation: options.operation } : {}),
+    }, options.probe);
+
+    const explained = await this.domain.patchAction(context.tenant, action.id, {
+      drift: {
+        status: drift.status,
+        observedAt: drift.observedAt,
+        explanation: drift.explanation,
+        fields: drift.fields.filter((field) => field.drifted),
+      },
+    });
+    return { drift, action: explained ?? action };
+  }
+
+  /**
+   * Record what a run made true, so the next observation reads reality.
+   *
+   * Current state is written from the run's durable evidence and never copied
+   * from desired state: an environment that reports what was wanted rather than
+   * what happened could never drift again.
+   */
+  private async reconcileEnvironment(
+    tenantId: string,
+    projectId: string,
+    environmentId: string,
+    runId: string,
+  ): Promise<void> {
+    const environment = await this.domain.getEnvironment(tenantId, projectId, environmentId);
+    const run = await this.domain.getRun(tenantId, runId);
+    if (!environment || !run || run.status !== 'completed') return;
+    const evidence = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
+    await this.domain.setEnvironmentState(tenantId, projectId, environmentId, reconciledState({
+      environment,
+      run,
+      evidence: evidence ?? null,
+      desiredState: await this.domain.getDesiredState(tenantId, projectId),
+    }));
+  }
+
+  /**
+   * Ask AuthBoundry whether an Action may execute without a person.
+   *
+   * Factory does not decide this. It asks, with the caller's own credentials,
+   * and takes the answer: a denial means a human has to approve, which is the
+   * default whenever nobody has granted autonomy.
+   */
+  async autonomyDecision(probe?: CapabilityProbe): Promise<AutonomyDecision> {
+    if (!probe) {
+      return {
+        capability: AUTONOMOUS_EXECUTION_CAPABILITY,
+        allowed: false,
+        reason: 'no AuthBoundry session was available to ask',
+      };
+    }
+    const decision = await probe(AUTONOMOUS_EXECUTION_CAPABILITY);
+    return {
+      capability: AUTONOMOUS_EXECUTION_CAPABILITY,
+      allowed: decision.allowed,
+      reason: decision.reason,
+    };
+  }
+
+  /**
    * Plan an Action against a project's desired state.
    *
    * The plan is derived from what the repository actually contains, so an
@@ -344,7 +477,7 @@ export class FactoryService {
     environmentId?: string;
     repositoryId?: string;
     operation?: string;
-  }): Promise<ActionRecord> {
+  }, probe?: CapabilityProbe): Promise<ActionRecord> {
     const tenantId = context.tenant;
     const project = await this.domain.getProject(tenantId, projectId);
     if (!project) throw new DomainValidationError(`project ${projectId} was not found`);
@@ -380,6 +513,7 @@ export class FactoryService {
       ...(environment ? { environmentName: environment.name } : {}),
     });
 
+    const autonomy = await this.autonomyDecision(probe);
     const timestamp = new Date().toISOString();
     const action: ActionRecord = {
       id: `act_${randomUUID()}`,
@@ -396,14 +530,12 @@ export class FactoryService {
         ? { executionProvider: providerForOperation(this.flowSpec, operation)! }
         : {}),
       /*
-       * A plan that would change a running environment waits for a person.
-       *
-       * This is the only thing that puts an Action in front of a human, so it
-       * is deliberately narrow: deployment is enabled in desired state, which
-       * is the operator's own statement that this project deploys. Everything
-       * else is planned and can be run when someone chooses to.
+       * Whether this waits for a person is the authority's answer, not a rule
+       * Factory holds. An Action nobody is allowed to run autonomously is the
+       * one a human is asked about.
        */
-      status: desiredState?.deploymentEnabled ? 'awaiting-approval' : 'planned',
+      status: autonomy.allowed ? 'planned' : 'awaiting-approval',
+      autonomy,
       createdBy: context.principal,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -422,17 +554,33 @@ export class FactoryService {
   async runAction(
     context: AuthenticatedContext,
     actionId: string,
-    approved = true,
+    options: { probe?: CapabilityProbe; autonomous?: boolean } = {},
   ): Promise<ActionRecord> {
     const tenantId = context.tenant;
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
     if (action.status === 'running') return action;
-    // Running an Action is the approval: a caller authorized for `factory.run`
-    // is the human the awaiting-approval state was waiting for.
-    if (action.status === 'awaiting-approval' && !approved) {
-      throw new DomainValidationError(`action ${actionId} is awaiting approval`);
+
+    /*
+     * The authority is asked again here rather than trusting the answer stored
+     * when the Action was planned: a grant can be given or revoked in between,
+     * and the question that matters is whether this may run now.
+     *
+     * Factory acting on its own needs that answer to be yes. A person driving
+     * the Action is the human judgement the authority asked for, and their
+     * approval is recorded on the Action.
+     */
+    const autonomy = await this.autonomyDecision(options.probe);
+    if (options.autonomous && !autonomy.allowed) {
+      await this.domain.patchAction(tenantId, actionId, { status: 'awaiting-approval', autonomy });
+      throw new DomainValidationError(
+        `action ${actionId} may not execute autonomously: ${autonomy.reason}`,
+      );
     }
+    await this.domain.patchAction(tenantId, actionId, {
+      autonomy,
+      ...(options.autonomous ? {} : { approvedBy: context.principal }),
+    });
 
     const authority = this.authorityContext(context);
     if (!authority) {
@@ -482,6 +630,10 @@ export class FactoryService {
     const verification = await this.verifyRun(settled?.id ?? run.id, desiredState?.healthRequirement);
     const succeeded = settled?.status === 'completed'
       && verification.every((check) => check.status !== 'failed');
+
+    if (succeeded && action.environmentId) {
+      await this.reconcileEnvironment(tenantId, action.projectId, action.environmentId, run.id);
+    }
 
     return await this.domain.patchAction(tenantId, actionId, {
       status: succeeded ? 'succeeded' : 'failed',
@@ -1242,12 +1394,17 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
       if (matchProductRoute(request.method ?? 'GET', url.pathname)) {
         let body: unknown;
         if (request.method === 'POST' || request.method === 'PATCH' || request.method === 'PUT') {
-          try {
-            body = await readJson<unknown>(request);
-          } catch {
-            writeJson(response, 400, { error: 'A JSON body is required', code: 'INVALID_REQUEST' });
-            return;
+          const raw = await readBody(request);
+          if (raw.length > 0) {
+            try {
+              body = JSON.parse(raw) as unknown;
+            } catch {
+              writeJson(response, 400, { error: 'A JSON body must be valid JSON', code: 'INVALID_REQUEST' });
+              return;
+            }
           }
+          // An absent body is not an error: some actions take no input, and a
+          // route that needs one says so itself.
         }
         try {
           await handleProductRoute({ service, authenticator: getAuthenticator, request, response, url, body });
