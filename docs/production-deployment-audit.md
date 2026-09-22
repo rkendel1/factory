@@ -148,6 +148,20 @@ deployed the verified semantics and passed its Fly health check. Production
 structured `401 UNAUTHENTICATED` without a session. Authenticated 200/403
 verification remains gated on the durable AuthBoundry delegation above.
 
+## PAX commit-pinned binary update
+
+On 2026-09-22 Factory replaced the earlier `v0.1.0` archive with the Linux
+x86-64 artifact built from PAX commit
+`295cacfd338ab03e0beffb897fe1047427858c31` and published as release
+`build-295cacf`. Docker and GitHub Actions both verify archive SHA-256
+`dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb`
+before extracting or executing it.
+
+Fly image `deployment-01M34R41ADKER4Q1VH1NGETBTJ` deployed on machine version
+26. The Debian image build passed its checksum verification and executed
+`pax --version`; the running container and public `/health` endpoint both
+reported `pax 0.1.0`, and the Fly health check passed.
+
 ## Verification commands
 
 Local and artifact verification:
