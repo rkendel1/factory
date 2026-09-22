@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { StateFirstDB } from '@feltdb/core';
 import { COLLECTIONS } from './felt.js';
 import type {
+  ActionGraphRecord,
   ActionRecord,
   ActionStatus,
   DesiredStateRecord,
@@ -403,6 +404,39 @@ export class FactoryDomain {
     const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running'];
     const actions = await this.actionRecords().find({ tenantId, reconciliationFingerprint: fingerprint });
     return actions.find((action) => open.includes(action.status)) ?? null;
+  }
+
+  // -- Action graphs -------------------------------------------------------
+
+  private graphs() { return this.db.collection<ActionGraphRecord>(COLLECTIONS.actionGraphs); }
+
+  async listGraphs(tenantId: string, projectId?: string): Promise<ActionGraphRecord[]> {
+    const graphs = await this.graphs().find(projectId ? { tenantId, projectId } : { tenantId });
+    return graphs.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async getGraph(tenantId: string, id: string): Promise<ActionGraphRecord | null> {
+    const graph = await this.graphs().get(id);
+    return graph && graph.tenantId === tenantId ? graph : null;
+  }
+
+  async createGraph(record: ActionGraphRecord): Promise<ActionGraphRecord> {
+    await this.graphs().insert(record, record.id);
+    return record;
+  }
+
+  async patchGraph(tenantId: string, id: string, patch: Partial<ActionGraphRecord>): Promise<ActionGraphRecord | null> {
+    const current = await this.getGraph(tenantId, id);
+    if (!current) return null;
+    const next: ActionGraphRecord = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await this.graphs().put(next, next.id);
+    return next;
+  }
+
+  /** The graph's nodes, in a stable order, read from FeltDB every time. */
+  async graphActions(tenantId: string, graphId: string): Promise<ActionRecord[]> {
+    const actions = await this.actionRecords().find({ tenantId, graphId });
+    return actions.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || left.id.localeCompare(right.id));
   }
 
   // -- Runs ----------------------------------------------------------------

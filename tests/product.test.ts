@@ -7,6 +7,8 @@ import { createHttpServer, FactoryService } from '../src/server.js';
 import {
   actionPage,
   actionsPage,
+  graphPage,
+  graphsPage,
   overviewPage,
   projectPage,
   projectsPage,
@@ -483,6 +485,8 @@ test('every product page script parses as an ES module', async () => {
     ['run', runPage('run_example')],
     ['providers', providersPage()],
     ['settings', settingsPage()],
+    ['graphs', graphsPage()],
+    ['graph', graphPage('graph_example')],
   ];
   for (const [name, html] of pages) {
     const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];

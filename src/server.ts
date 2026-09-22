@@ -27,6 +27,8 @@ import { handleProductRoute, matchProductRoute } from './product-api.js';
 import {
   actionPage,
   actionsPage,
+  graphPage,
+  graphsPage,
   overviewPage,
   projectPage,
   projectsPage,
@@ -38,6 +40,15 @@ import {
 import { discoverRepository, planFromDiscovery } from './discovery.js';
 import { executionProviders, providerForOperation, type ExecutionProvider } from './providers.js';
 import { createReconciliationScheduler, type SchedulerHandle } from './scheduler.js';
+import {
+  blockingDependencies,
+  graphStatus,
+  GraphValidationError,
+  nodeStatus,
+  orderPlan,
+  runnableActions,
+  type PlannedAction,
+} from './graph.js';
 import { compareReality, observeEnvironment, reconciledState, type DriftReport } from './reality.js';
 import {
   describeSchedule,
@@ -78,6 +89,9 @@ import {
   validateDeploymentConfig,
 } from './bootstrap.js';
 import type {
+  ActionGraphOrigin,
+  ActionGraphRecord,
+  ActionOutcome,
   ActionRecord,
   AuthorityContextRecord,
   AutonomyDecision,
@@ -179,6 +193,10 @@ function writeAuthError(response: ServerResponse, error: unknown): void {
 function writeBrowserRedirect(response: ServerResponse, result: BrowserRedirectResult): void {
   response.writeHead(302, { location: result.redirectTo, 'set-cookie': result.setCookies });
   response.end();
+}
+
+function isAuthorityUnavailable(reason: string | undefined): boolean {
+  return /unavailable|unreachable|could not|no AuthBoundry session/i.test(reason ?? '');
 }
 
 /**
@@ -547,15 +565,41 @@ export class FactoryService {
       explanation.push(`Action ${existing.id} is already open for this drift.`);
       return finish(
         existing.status === 'awaiting-approval' ? 'awaiting-approval' : 'duplicate-suppressed',
-        { ...revisions, fingerprint, actionId: existing.id, ...(existing.autonomy ? { autonomy: existing.autonomy } : {}) },
+        {
+          ...revisions,
+          fingerprint,
+          actionId: existing.id,
+          ...(existing.graphId ? { graphId: existing.graphId } : {}),
+          ...(existing.autonomy ? { autonomy: existing.autonomy } : {}),
+        },
       );
     }
+
+    /*
+     * Reconciliation plans a one-node graph. It behaves exactly as the lone
+     * Action did, and gives drift a path into multi-step coordination later
+     * without changing what reconciliation means now.
+     */
+    const graphTimestamp = new Date().toISOString();
+    const graph = await this.domain.createGraph({
+      id: `graph_${randomUUID()}`,
+      tenantId,
+      projectId,
+      environmentId,
+      origin: { kind: 'continuous-reconciliation' },
+      status: 'planned',
+      requestedBy: context.principal,
+      reconciliationFingerprint: fingerprint,
+      createdAt: graphTimestamp,
+      updatedAt: graphTimestamp,
+    });
 
     const planned = await this.createAction(context, projectId, {
       type: actionType,
       intent: drift.proposal?.intent ?? `Reconcile ${environment.name}`,
       environmentId,
       ...(options.operation ? { operation: options.operation } : {}),
+      graph: { id: graph.id, dependsOn: [], sequence: 0 },
     }, options.probe);
 
     const action = await this.domain.patchAction(tenantId, planned.id, {
@@ -584,19 +628,23 @@ export class FactoryService {
       explanation.push(unreachable
         ? 'AuthBoundry could not be reached, so Factory did not act.'
         : 'AuthBoundry denied autonomous execution, so this waits for a person.');
+      await this.domain.patchGraph(tenantId, graph.id, { status: 'blocked' });
       return finish(unreachable ? 'authority-unavailable' : 'autonomy-denied', {
         ...revisions,
         fingerprint,
         actionId: action.id,
+        graphId: graph.id,
         ...(autonomy ? { autonomy } : {}),
       });
     }
 
     explanation.push('AuthBoundry authorized autonomous execution.');
-    const executed = await this.runAction(context, action.id, {
+    // Through the graph coordinator, which calls the same runAction path.
+    await this.coordinateGraph(context, graph.id, {
       ...(options.probe ? { probe: options.probe } : {}),
       autonomous: true,
     });
+    const executed = (await this.domain.getAction(tenantId, action.id)) ?? action;
 
     const failedVerification = executed.verification?.some((check) => check.status === 'failed') ?? false;
     const run = executed.runId ? await this.domain.getRun(tenantId, executed.runId) : null;
@@ -608,6 +656,7 @@ export class FactoryService {
       ...revisions,
       fingerprint,
       actionId: executed.id,
+      graphId: graph.id,
       ...(executed.runId ? { runId: executed.runId } : {}),
       ...(executed.autonomy ? { autonomy: executed.autonomy } : {}),
       ...(executed.authority ? { authority: executed.authority } : {}),
@@ -718,6 +767,7 @@ export class FactoryService {
         lastError: record.lastError || null,
         result: record.lastOutcome?.result ?? null,
         explanation: record.lastOutcome?.explanation ?? [],
+        graphId: record.lastOutcome?.graphId ?? null,
         currentState: environment?.currentState ?? null,
         action: action
           ? {
@@ -784,6 +834,237 @@ export class FactoryService {
   }
 
   /**
+   * Create a durable Action Graph from a typed plan.
+   *
+   * Every action is validated against `.flow` as it is planned, and every
+   * dependency must name an action in the same request with no cycle. The
+   * graph is durable state only: nothing here authorizes or executes.
+   */
+  async createActionGraph(context: AuthenticatedContext, input: {
+    projectId: string;
+    environmentId?: string;
+    origin?: Partial<ActionGraphOrigin>;
+    actions: PlannedAction[];
+  }, probe?: CapabilityProbe): Promise<{ graph: ActionGraphRecord; actions: ActionRecord[] }> {
+    const tenantId = context.tenant;
+    if (!await this.domain.getProject(tenantId, input.projectId)) {
+      throw new DomainValidationError(`project ${input.projectId} was not found`);
+    }
+    if (input.environmentId && !await this.domain.getEnvironment(tenantId, input.projectId, input.environmentId)) {
+      throw new DomainValidationError(`environment ${input.environmentId} was not found`);
+    }
+    const ordered = orderPlan(input.actions);
+    const authorities = getOperationAuthorities(this.flowSpec);
+    for (const entry of ordered) {
+      const operation = entry.action.operation ?? entry.action.type;
+      if (!authorities.has(operation)) {
+        throw new GraphValidationError(
+          `action ${entry.key}: no .flow operation named ${operation}; declared operations are ${[...authorities.keys()].sort().join(', ')}`,
+        );
+      }
+    }
+
+    const timestamp = new Date().toISOString();
+    const graph = await this.domain.createGraph({
+      id: `graph_${randomUUID()}`,
+      tenantId,
+      projectId: input.projectId,
+      ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+      origin: { kind: 'manual', ...input.origin } as ActionGraphOrigin,
+      status: 'planned',
+      requestedBy: context.principal,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const ids = new Map<string, string>();
+    const actions: ActionRecord[] = [];
+    for (const [sequence, entry] of ordered.entries()) {
+      const action = await this.createAction(context, input.projectId, {
+        type: entry.action.type,
+        ...(entry.action.intent ? { intent: entry.action.intent } : {}),
+        ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+        ...(entry.action.operation ? { operation: entry.action.operation } : {}),
+        ...(entry.action.parameters ? { parameters: entry.action.parameters } : {}),
+        graph: {
+          id: graph.id,
+          dependsOn: entry.dependsOn.map((key) => ids.get(key)!),
+          sequence,
+        },
+      }, probe);
+      ids.set(entry.key, action.id);
+      actions.push(action);
+    }
+
+    const status = graphStatus(graph, actions);
+    return { graph: (await this.domain.patchGraph(tenantId, graph.id, { status })) ?? graph, actions };
+  }
+
+  /**
+   * Coordinate a graph: run what is ready, block what cannot proceed, and
+   * write back what happened.
+   *
+   * This is coordination, not execution. Every node still goes through
+   * `runAction` — the same authority question, the same Run, the same Evidence
+   * as an Action planned alone — and each is authorized separately, because a
+   * grant that holds for one node need not hold for the next.
+   *
+   * It is safe to call repeatedly: completed nodes are never re-run, running
+   * nodes are never duplicated, blocked nodes stay blocked, and failed nodes
+   * stay failed until someone explicitly retries them.
+   */
+  async coordinateGraph(
+    context: AuthenticatedContext,
+    graphId: string,
+    options: { probe?: CapabilityProbe; autonomous?: boolean } = {},
+  ): Promise<{ graph: ActionGraphRecord; actions: ActionRecord[] }> {
+    const tenantId = context.tenant;
+    let graph = await this.domain.getGraph(tenantId, graphId);
+    if (!graph) throw new DomainValidationError(`action graph ${graphId} was not found`);
+    if (graph.status === 'cancelled') {
+      return { graph, actions: await this.domain.graphActions(tenantId, graphId) };
+    }
+    if (!graph.startedAt) {
+      graph = (await this.domain.patchGraph(tenantId, graphId, { startedAt: new Date().toISOString() })) ?? graph;
+    }
+
+    // Each node runs against a fresh read of the graph, so a node that just
+    // finished unlocks its dependents within the same pass. A node the
+    // authority declines is asked once per pass, not forever.
+    const attempted = new Set<string>();
+    for (;;) {
+      const actions = await this.domain.graphActions(tenantId, graphId);
+      const byId = new Map(actions.map((action) => [action.id, action]));
+
+      // Persist why a node cannot run, so a restart still knows.
+      for (const action of actions) {
+        const blocking = blockingDependencies(action, byId);
+        const recorded = action.blockedBy ?? [];
+        if (blocking.join() !== recorded.join() && action.status !== 'succeeded') {
+          await this.domain.patchAction(tenantId, action.id, { blockedBy: blocking });
+        }
+      }
+
+      const next = runnableActions(actions).find((action) => !attempted.has(action.id));
+      if (!next) break;
+      attempted.add(next.id);
+
+      try {
+        await this.runAction(context, next.id, {
+          ...(options.probe ? { probe: options.probe } : {}),
+          ...(options.autonomous ? { autonomous: true } : {}),
+        });
+      } catch (error) {
+        // A refusal to run autonomously is recorded on the Action by runAction;
+        // it leaves the node awaiting a person and the pass moves on.
+        if (!(error instanceof DomainValidationError)) throw error;
+        const refused = await this.domain.getAction(tenantId, next.id);
+        if (refused?.status !== 'awaiting-approval') throw error;
+      }
+    }
+
+    const actions = await this.domain.graphActions(tenantId, graphId);
+    const byId = new Map(actions.map((action) => [action.id, action]));
+    const status = graphStatus(graph, actions);
+    const failed = actions.find((action) => nodeStatus(action, byId) === 'failed');
+    graph = (await this.domain.patchGraph(tenantId, graphId, {
+      status,
+      ...(status === 'completed' || status === 'failed' ? { completedAt: new Date().toISOString() } : {}),
+      ...(failed ? {
+        failure: {
+          actionId: failed.id,
+          outcome: failed.outcome ?? 'execution-failed',
+          reason: failed.verification?.find((check) => check.status === 'failed')?.detail
+            ?? `${failed.type} ${failed.outcome ?? 'failed'}`,
+        },
+      } : {}),
+    })) ?? graph;
+    return { graph, actions };
+  }
+
+  /** Stop coordinating. Nodes that never ran are cancelled; history is kept. */
+  async cancelActionGraph(context: AuthenticatedContext, graphId: string): Promise<ActionGraphRecord> {
+    const tenantId = context.tenant;
+    const graph = await this.domain.getGraph(tenantId, graphId);
+    if (!graph) throw new DomainValidationError(`action graph ${graphId} was not found`);
+    for (const action of await this.domain.graphActions(tenantId, graphId)) {
+      if (action.status === 'planned' || action.status === 'awaiting-approval') {
+        await this.domain.patchAction(tenantId, action.id, { outcome: 'cancelled' });
+      }
+    }
+    return (await this.domain.patchGraph(tenantId, graphId, {
+      status: 'cancelled',
+      completedAt: new Date().toISOString(),
+    })) ?? graph;
+  }
+
+  /**
+   * Retry a failed Action explicitly.
+   *
+   * The Action is returned to planned and its next run is admitted as a new
+   * Run; the earlier Run and its Evidence are kept untouched and listed on the
+   * Action. Nothing retries on its own.
+   */
+  async retryAction(context: AuthenticatedContext, actionId: string): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const action = await this.domain.getAction(tenantId, actionId);
+    if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
+    if (action.status !== 'failed') {
+      throw new DomainValidationError(`action ${actionId} is ${action.status}, and only a failed action can be retried`);
+    }
+    const retried = await this.domain.patchAction(tenantId, actionId, {
+      status: 'planned',
+      retries: (action.retries ?? 0) + 1,
+      previousRunIds: [...(action.previousRunIds ?? []), ...(action.runId ? [action.runId] : [])],
+      runId: undefined,
+      verification: undefined,
+      outcome: undefined,
+      blockedBy: [],
+    });
+    if (retried?.graphId) {
+      const graph = await this.domain.getGraph(tenantId, retried.graphId);
+      if (graph && graph.status !== 'cancelled') {
+        await this.domain.patchGraph(tenantId, graph.id, {
+          status: graphStatus({ ...graph, status: 'planned' }, await this.domain.graphActions(tenantId, graph.id)),
+          failure: undefined,
+          completedAt: undefined,
+        });
+      }
+    }
+    return retried ?? action;
+  }
+
+  /** A graph with its nodes and their derived statuses, for the API and UI. */
+  async graphView(context: AuthenticatedContext, graphId: string): Promise<Record<string, unknown> | null> {
+    const tenantId = context.tenant;
+    const graph = await this.domain.getGraph(tenantId, graphId);
+    if (!graph) return null;
+    const actions = await this.domain.graphActions(tenantId, graphId);
+    const byId = new Map(actions.map((action) => [action.id, action]));
+    return {
+      ...graph,
+      status: graphStatus(graph, actions),
+      nodes: actions.map((action) => ({
+        actionId: action.id,
+        type: action.type,
+        intent: action.intent,
+        status: nodeStatus(action, byId),
+        actionStatus: action.status,
+        outcome: action.outcome ?? null,
+        dependsOn: action.dependsOn ?? [],
+        blockedBy: action.blockedBy ?? [],
+        sequence: action.sequence ?? 0,
+        autonomy: action.autonomy ?? null,
+        authority: action.authority ?? null,
+        runId: action.runId ?? null,
+        previousRunIds: action.previousRunIds ?? [],
+        verification: action.verification ?? [],
+        executionProvider: action.executionProvider ?? null,
+      })),
+    };
+  }
+
+  /**
    * Ask AuthBoundry whether an Action may execute without a person.
    *
    * Factory does not decide this. It asks, with the caller's own credentials,
@@ -819,6 +1100,8 @@ export class FactoryService {
     environmentId?: string;
     repositoryId?: string;
     operation?: string;
+    parameters?: Record<string, unknown>;
+    graph?: { id: string; dependsOn: string[]; sequence: number };
   }, probe?: CapabilityProbe): Promise<ActionRecord> {
     const tenantId = context.tenant;
     const project = await this.domain.getProject(tenantId, projectId);
@@ -878,6 +1161,13 @@ export class FactoryService {
        */
       status: autonomy.allowed ? 'planned' : 'awaiting-approval',
       autonomy,
+      ...(input.parameters ? { parameters: input.parameters } : {}),
+      ...(input.graph ? {
+        graphId: input.graph.id,
+        dependsOn: input.graph.dependsOn,
+        sequence: input.graph.sequence,
+        relationships: input.graph.dependsOn.map((actionId) => ({ kind: 'depends_on' as const, actionId })),
+      } : {}),
       createdBy: context.principal,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -914,7 +1204,11 @@ export class FactoryService {
      */
     const autonomy = await this.autonomyDecision(options.probe);
     if (options.autonomous && !autonomy.allowed) {
-      await this.domain.patchAction(tenantId, actionId, { status: 'awaiting-approval', autonomy });
+      await this.domain.patchAction(tenantId, actionId, {
+        status: 'awaiting-approval',
+        autonomy,
+        outcome: isAuthorityUnavailable(autonomy.reason) ? 'authority-unavailable' : 'autonomy-denied',
+      });
       throw new DomainValidationError(
         `action ${actionId} may not execute autonomously: ${autonomy.reason}`,
       );
@@ -957,6 +1251,8 @@ export class FactoryService {
         ref: desiredState?.sourceBranch ?? repository.defaultBranch,
       },
       operation: action.operation ?? action.type,
+      // A retried Action is admitted as a new Run; the earlier Run is history.
+      ...(action.retries ? { idempotencyKey: `${action.id}:retry:${action.retries}` } : {}),
     }, context);
 
     await this.patchRun(run.id, {
@@ -977,8 +1273,13 @@ export class FactoryService {
       await this.recordReconciledState(tenantId, action.projectId, action.environmentId, run.id);
     }
 
+    const outcome: ActionOutcome = succeeded
+      ? 'succeeded'
+      : settled?.status === 'completed' ? 'verification-failed' : 'execution-failed';
+
     return await this.domain.patchAction(tenantId, actionId, {
       status: succeeded ? 'succeeded' : 'failed',
+      outcome,
       runId: run.id,
       authority: {
         ...authority,
@@ -1645,6 +1946,9 @@ function productSurface(pathname: string): string | null {
   if (pathname === '/factory/runs') return runsPage();
   if (pathname === '/factory/providers') return providersPage();
   if (pathname === '/factory/settings') return settingsPage();
+  if (pathname === '/factory/graphs') return graphsPage();
+  const graph = pathname.match(/^\/factory\/graphs\/([A-Za-z0-9._:-]{1,128})$/);
+  if (graph) return graphPage(graph[1]!);
   const project = pathname.match(/^\/factory\/projects\/([A-Za-z0-9._:-]{1,128})$/);
   if (project) return projectPage(project[1]!);
   const action = pathname.match(/^\/factory\/actions\/([A-Za-z0-9._:-]{1,128})$/);
@@ -1800,7 +2104,8 @@ export async function createHttpServer(config: FactoryServiceConfig): Promise<{ 
         try {
           await handleProductRoute({ service, authenticator: getAuthenticator, request, response, url, body });
         } catch (error) {
-          if (error instanceof DomainValidationError || error instanceof IntervalError) {
+          if (error instanceof DomainValidationError || error instanceof IntervalError
+            || error instanceof GraphValidationError) {
             writeJson(response, 400, { error: error.message, code: 'INVALID_REQUEST' });
             return;
           }

@@ -242,6 +242,15 @@ app software_factory {
     desiredStateRevision: text?
     observedStateRevision: text?
     reconciliationFingerprint: text?
+    graphId: ref ActionGraph?
+    dependsOn: json?
+    relationships: json?
+    sequence: integer?
+    blockedBy: json?
+    outcome: text?
+    parameters: json?
+    retries: integer?
+    previousRunIds: json?
     operation: text?
     executionProvider: text?
     status: text
@@ -277,6 +286,27 @@ app software_factory {
     nextDueAt: datetime?
     leaseOwner: text?
     leaseExpiresAt: datetime?
+    createdAt: datetime?
+    updatedAt: datetime?
+    created_at: datetime
+    updated_at: datetime
+    index project_id using hash(project_id)
+    index projectId using hash(projectId)
+    index status using hash(status)
+  }
+
+  collection ActionGraph {
+    project_id: text
+    projectId: ref Project?
+    environmentId: ref Environment?
+    tenantId: text?
+    origin: json?
+    status: text
+    requestedBy: text?
+    failure: json?
+    reconciliationFingerprint: text?
+    startedAt: datetime?
+    completedAt: datetime?
     createdAt: datetime?
     updatedAt: datetime?
     created_at: datetime
@@ -359,6 +389,11 @@ app software_factory {
     appport_service github
     appport_capability github.pull_request.merge
     jev bounded
+  }
+
+  policy ActionGraph {
+    read: authenticated
+    write: none
   }
 
   policy Reconciliation {

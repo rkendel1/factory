@@ -18,6 +18,7 @@ export const COLLECTIONS = {
   desiredState: 'DesiredState',
   actions: 'Action',
   reconciliations: 'Reconciliation',
+  actionGraphs: 'ActionGraph',
 } as const;
 
 const DEFAULT_NAMESPACE = 'software-factory';
