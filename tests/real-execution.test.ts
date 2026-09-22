@@ -585,7 +585,7 @@ test('continuous reconciliation reaches reality: drift, real deployment, real pr
   }
 });
 
-test('a restart during execution leaves the Action failed as interrupted, never running or succeeded', async () => {
+test('a restart during execution leaves the Action unknown, never running, failed or succeeded, until reality resolves it', async () => {
   const root = await createTempWorkspace('real-restart');
   const repository = await gitRepository(root);
   const { service, context, domain, project, environment, workingDirectory } = await scenario(repository.path);
@@ -602,12 +602,23 @@ test('a restart during execution leaves the Action failed as interrupted, never 
 
   const restarted = await factory(repository.path, { workingDirectory });
   const recovered = (await restarted.service.projects().getAction(TENANT, action.id))!;
-  assert.equal(recovered.status, 'failed');
-  assert.equal(recovered.outcome, 'execution-failed');
-  assert.equal(recovered.failure?.phase, 'interrupted');
-  assert.equal((await restarted.service.getRun('run_interrupted'))?.status, 'failed');
+  // The provider had been invoked when the process stopped: Factory does not
+  // know what it did, and says so rather than calling it failed.
+  assert.equal(recovered.status, 'unknown');
+  assert.equal(recovered.outcome, 'unknown');
+  assert.equal(recovered.failure?.phase, 'unknown');
+  const run = (await restarted.service.getRun('run_interrupted'))!;
+  assert.equal(run.status, 'unknown');
+  assert.equal(run.uncertainty?.invocationMayHaveOccurred, true);
   // It does not run again on its own.
-  assert.equal((await restarted.service.runAction(context, action.id, { probe: grants, autonomous: true })).status, 'failed');
+  assert.equal((await restarted.service.runAction(context, action.id, { probe: grants, autonomous: true })).status, 'unknown');
+  // Reality resolves it: a read-only inspection is safe to repeat, so it returns to planned and runs as a new attempt.
+  const resolved = await restarted.service.resolveUncertainAction(context, action.id);
+  assert.equal(resolved.status, 'planned');
+  assert.deepEqual(resolved.previousRunIds, ['run_interrupted']);
+  const rerun = await restarted.service.runAction(context, action.id, { probe: grants, autonomous: true });
+  assert.equal(rerun.status, 'succeeded');
+  assert.notEqual(rerun.runId, 'run_interrupted');
   await restarted.service.shutdown();
 });
 

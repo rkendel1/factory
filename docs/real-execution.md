@@ -145,6 +145,79 @@ from a probe that ran; `unknown` when nothing probed). Only a fresh comparison
 that finds no drift lets the pass report `executed`; otherwise it reports
 `drift-detected` with the re-observation's explanation.
 
+## Durable execution ownership and uncertain outcomes
+
+Every Run has one durable execution history and one authoritative attempt at
+a time. Ownership lives on the Run record, never in process memory:
+
+| Field | Meaning |
+| --- | --- |
+| `executionOwner` | the worker that holds the Run |
+| `leaseExpiresAt` | when that ownership lapses without a heartbeat |
+| `attempt` | advanced each time ownership is acquired or reclaimed |
+| `heartbeatAt` | last renewal by the owning worker |
+| `finishedAt` | when execution ended, whatever the outcome |
+| `providerOperationId` | the provider's own reference, when it gave one; never manufactured |
+| `uncertainty` | present while, or since, the external outcome could not be determined |
+
+Ownership is acquired by compare-and-swap on the Run. A lease another worker
+still holds refuses the acquisition; an expired lease is reclaimed with the
+attempt advanced. Reclaiming decides nothing about the external operation:
+what the new owner may do follows from the Run's status and the provider's
+idempotency, never from the lease.
+
+**Unknown is its own state.** When the provider may have been invoked and
+Factory did not see the result — the process stopped in flight, the result
+could not be persisted, contact was lost — the Run is `unknown`, the Action
+is `unknown` with outcome `unknown`, evidence records the verdict `UNKNOWN`,
+and the graph or operational work containing it is `unresolved`. None of this
+is failure. `execution-failed` is written only when Factory knows the
+operation did not complete.
+
+**Reality resolves unknown; retries never do so blindly.** Resolution asks the
+provider adapter to observe, never to repeat:
+
+| Observation | Result |
+| --- | --- |
+| `established` (for a deployment: the environment is serving and healthy) | the Run completes, the Action succeeds with the observation as its verification, reality is recorded |
+| `absent` | the Run and Action fail, with the observation as the reason |
+| `retry-safe` (read-only or ephemeral operations) | the Action returns to planned for a new attempt; the unknown Run stays as history |
+| `undetermined` | everything stays unknown; the observation is recorded on the Run |
+
+A retry of an unknown Action is refused unless the provider's semantics make
+a repeat safe. Reconciliation treats an unknown Action as open and adopts it
+rather than planning a duplicate.
+
+**Restart recovery** loads every non-terminal Run, leaves those whose lease
+another worker still holds alone, and settles the rest from what they had
+reached: before invocation they are failed and known (`interrupted`), in
+flight they are unknown, and past persistence their verification resumes
+from the durable evidence. No successful or failed Run is replayed, no
+unknown operation is repeated, and nothing is fabricated. The same rules apply
+to Action Graphs: a completed node is never executed again, an unknown node
+blocks its dependents until reality resolves it, and a restarted coordinator
+resumes from durable node state.
+
+**Cancellation records what it cancelled.** The Action's `cancellation` names
+the stage — `before-invocation`, `native-execution`,
+`after-external-submission`, `during-verification`, `after-completion` — and
+the effect: `not-started`, `stopped` (a local process), `submitted` (an
+external operation that may stand), or `none`. Cancelling never claims an
+external effect was reversed.
+
+**The evidence chain.** Each attempt's evidence carries `chain`:
+operational work → graph → Action → authorization decision → Run → execution
+owner and attempt → provider, capability, resource and provider resource →
+idempotency identity and provider operation id → verification → observed
+reality. It holds identifiers and names only.
+
+Tests inject process failure through `executionHooks` checkpoints
+(`before-authorization`, `after-authorization`, `after-run-created`,
+`after-ownership`, `before-invocation`, `after-invocation`,
+`after-result-before-persistence`, `after-persistence-before-verification`,
+`after-verification-before-completion`, `after-evidence`). Production
+configures no hooks, and no behaviour depends on them.
+
 ## Runtime configuration
 
 Four kinds of configuration are kept apart. None of them is a credential value
@@ -158,6 +231,7 @@ authorized:
 | `AUTHBOUNDRY_URL` | the authority Factory asks, per Action |
 | `AUTHBOUNDRY_OPERATOR_CREDENTIAL` | provisioning and association verification only |
 | `FACTORY_SERVICE_CREDENTIAL` | the continuous reconciliation worker's own credential; without it no autonomous loop runs |
+| `executionLeaseMs`, `workerId` (service configuration) | how long a worker's Run ownership lasts without a heartbeat (default 60 s), and the worker's durable identity (default per process) |
 | `FELTDB_URL`, `FELTDB_TOKEN` | the durable state and evidence store |
 
 **Provider credentials** — resolved by name at the execution boundary and never

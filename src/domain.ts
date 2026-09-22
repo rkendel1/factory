@@ -405,7 +405,9 @@ export class FactoryDomain {
     tenantId: string,
     fingerprint: string,
   ): Promise<ActionRecord | null> {
-    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running', 'executed', 'verifying'];
+    // Unknown is open: an Action whose outcome reality has not resolved is
+    // adopted, never duplicated, by a later pass over the same drift.
+    const open: ActionStatus[] = ['planned', 'awaiting-approval', 'authorized', 'running', 'executed', 'verifying', 'unknown'];
     const actions = await this.actionRecords().find({ tenantId, reconciliationFingerprint: fingerprint });
     return actions.find((action) => open.includes(action.status)) ?? null;
   }
@@ -448,6 +450,11 @@ export class FactoryDomain {
   async listOperationalWork(tenantId: string, projectId?: string): Promise<OperationalWorkRecord[]> {
     const records = await this.operationalWork().find(projectId ? { tenantId, projectId } : { tenantId });
     return records.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async findOperationalWorkByGraph(tenantId: string, graphId: string): Promise<OperationalWorkRecord | null> {
+    const records = await this.operationalWork().find({ tenantId, graphId });
+    return records[0] ?? null;
   }
 
   async getOperationalWork(tenantId: string, id: string): Promise<OperationalWorkRecord | null> {

@@ -438,6 +438,7 @@ export function operationalWorkStatus(work: OperationalWorkRecord, graph: Action
     case 'cancelled': return 'cancelled';
     case 'running': return 'running';
     case 'blocked': return 'blocked';
+    case 'unresolved': return 'unresolved';
     default: return 'ready';
   }
 }
@@ -452,6 +453,7 @@ export function operationalWorkOutcome(status: OperationalWorkStatus, graph: Act
       const waiting = actions.find((action) => nodeStatus(action, byId) === 'awaiting-approval');
       return waiting?.outcome ?? 'awaiting-approval';
     }
+    case 'unresolved': return 'unknown';
     default: return null;
   }
 }
@@ -460,6 +462,7 @@ export const OPERATIONAL_WORK_TERMINAL_EVENTS: Partial<Record<OperationalWorkSta
   completed: 'OperationalWorkCompleted',
   failed: 'OperationalWorkFailed',
   blocked: 'OperationalWorkBlocked',
+  unresolved: 'OperationalWorkUnresolved',
   cancelled: 'OperationalWorkCancelled',
 };
 
@@ -518,10 +521,11 @@ export function operationalWorkResult(input: {
  * ---------------------------------------------------------------------- */
 
 const primitive = s.union([s.string(), s.number(), s.boolean()]);
-const NODE_STATUSES = ['ready', 'blocked', 'awaiting-approval', 'running', 'completed', 'failed', 'cancelled'] as const;
+const NODE_STATUSES = ['ready', 'blocked', 'awaiting-approval', 'running', 'completed', 'failed', 'cancelled', 'unknown'] as const;
 const ACTION_OUTCOMES = [
-  'succeeded', 'capability-unavailable', 'provider-unavailable', 'autonomy-denied', 'authority-unavailable',
-  'awaiting-approval', 'execution-failed', 'verification-failed', 'cancelled',
+  'succeeded', 'capability-unavailable', 'provider-unavailable', 'resource-unavailable', 'credential-unavailable',
+  'autonomy-denied', 'authority-unavailable', 'awaiting-approval', 'execution-failed', 'verification-failed',
+  'verification-unavailable', 'unknown', 'cancelled',
 ] as const;
 
 export const operationalWorkInputSchema = s.object({
@@ -542,7 +546,7 @@ export const operationalWorkOutputSchema = s.object({
   contract: s.literal(OPERATIONAL_WORK_CONTRACT),
   workId: s.string(),
   origin: s.object({ system: s.string(), type: s.string(), id: s.string() }),
-  status: s.enum(['accepted', 'planning', 'ready', 'running', 'blocked', 'completed', 'failed', 'cancelled']),
+  status: s.enum(['accepted', 'planning', 'ready', 'running', 'blocked', 'unresolved', 'completed', 'failed', 'cancelled']),
   outcome: s.nullable(s.string()),
   graphId: s.nullable(s.string()),
   intent: s.nullable(s.string()),

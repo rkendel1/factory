@@ -6,7 +6,7 @@ import type { ExecutionContract, InvariantEvidence, JevEvaluation, StructuredEvi
  * termination as observed — and nothing is filled in from the plan.
  */
 export interface RawExecutionResult {
-  status: 'completed' | 'failed' | 'cancelled';
+  status: 'completed' | 'failed' | 'cancelled' | 'unknown';
   exitCode: number | null;
   startedAt: string;
   completedAt: string;
@@ -61,17 +61,23 @@ export function buildEvidence(
   repositoryCommit?: string,
 ): StructuredEvidence {
   const invariant = parseInvariantEvidence(result.stdout, result.stderr);
-  const deterministicResult = result.status === 'cancelled'
-    ? 'CANCELLED'
-    : result.exitCode === 0
-      ? 'PASS'
-      : 'FAIL';
+  // Unknown is its own verdict: Factory could not observe the process end,
+  // so neither PASS nor FAIL would be true.
+  const deterministicResult = result.status === 'unknown'
+    ? 'UNKNOWN'
+    : result.status === 'cancelled'
+      ? 'CANCELLED'
+      : result.exitCode === 0
+        ? 'PASS'
+        : 'FAIL';
   const jev = parseJevEvaluation(result.stdout, result.stderr);
   const finalResult = deterministicResult === 'FAIL'
     ? 'FAIL'
     : deterministicResult === 'CANCELLED'
       ? 'CANCELLED'
-      : 'PASS';
+      : deterministicResult === 'UNKNOWN'
+        ? 'UNKNOWN'
+        : 'PASS';
 
   return {
     id: contract.runId,
@@ -172,7 +178,7 @@ export function buildFailureEvidence(
   error: Error,
   startedAt: string,
   completedAt: string,
-  status: 'failed' | 'cancelled' = 'failed',
+  status: 'failed' | 'cancelled' | 'unknown' = 'failed',
   terminationReason: TerminationReason = status === 'cancelled' ? 'cancelled' : 'spawn-failed',
 ): StructuredEvidence {
   return buildEvidence(

@@ -62,6 +62,18 @@ export type ResourceBinding =
   | { ok: true; id: string; detail: string; parameters: Record<string, string> }
   | { ok: false; reason: string };
 
+export interface Observation {
+  outcome: 'established' | 'absent' | 'undetermined' | 'retry-safe';
+  detail: string;
+  checks: VerificationCheck[];
+  observed: ProviderExecutionResult['observed'];
+}
+
+/** Read-only and ephemeral operations leave nothing behind, so repeating them is safe. */
+async function retrySafe(capability: OperationalCapability, why: string): Promise<Observation> {
+  return { outcome: 'retry-safe', detail: `${capability} ${why}; repeating it is safe`, checks: [], observed: {} };
+}
+
 export interface ProviderAdapter {
   readonly id: string;
   readonly displayName: string;
@@ -77,6 +89,14 @@ export interface ProviderAdapter {
   interpret(capability: OperationalCapability, evidence: StructuredEvidence, context: ProviderContext): ProviderExecutionResult;
   /** Check reality after the operation. May reach the provider or the environment. */
   verify(capability: OperationalCapability, evidence: StructuredEvidence, context: ProviderContext): Promise<VerificationCheck[]>;
+  /**
+   * Resolve an unknown outcome by looking at reality, never by repeating the
+   * operation. `established`: the intended effect is observably in place;
+   * `absent`: it observably did not happen; `retry-safe`: the operation has no
+   * external effect or is exactly-once, so a repeat is safe; `undetermined`:
+   * reality cannot say yet.
+   */
+  observe(capability: OperationalCapability, context: ProviderContext): Promise<Observation>;
   /** What the operation is expected to change, for planning and review. */
   effects(capability: OperationalCapability, context: ProviderContext): string[];
   /** Whether the provider makes an operation exactly-once under our key. */
@@ -182,6 +202,7 @@ export const gitAdapter: ProviderAdapter = {
     }
     return checks;
   },
+  observe(capability) { return retrySafe(capability, 'is read-only'); },
   effects() { return ['reads the repository; changes nothing outside the ephemeral workspace']; },
   idempotency() { return { exactlyOnce: true, note: 'read-only' }; },
 };
@@ -238,6 +259,7 @@ export const localAdapter: ProviderAdapter = {
         : lastLine(evidence.stderr) || `exited ${evidence.exitCode}`,
     }];
   },
+  observe(capability) { return retrySafe(capability, 'ran in an ephemeral workspace with no external effect'); },
   effects(capability) {
     return capability === 'build.run'
       ? ['runs the repository build script in an ephemeral workspace']
@@ -394,6 +416,26 @@ export const flyAdapter: ProviderAdapter = {
       return checks;
     }
     return [{ name: `${capability} completed`, status: evidence.exitCode === 0 ? 'passed' : 'failed', detail: lastLine(evidence.exitCode === 0 ? evidence.stdout : evidence.stderr) }];
+  },
+  async observe(capability, context) {
+    if (capability !== 'deployment.create') return retrySafe(capability, 'is read-only');
+    // A deployment whose result was lost is established only when the
+    // environment is observably serving and healthy. Anything else stays
+    // uncertain: an unhealthy or unreachable app does not prove the deploy
+    // never happened, and a repeat would be a second deployment.
+    const url = flyHealthUrl(context);
+    if (!url) {
+      return { outcome: 'undetermined', detail: 'no health URL is configured, so the deployment cannot be observed', checks: [], observed: {} };
+    }
+    const probe = await probeHealth(url);
+    const check: VerificationCheck = {
+      name: 'environment responds healthy',
+      status: probe.ok ? 'passed' : 'failed',
+      detail: probe.ok ? `${url} returned HTTP ${probe.status}` : probe.error ?? `${url} returned HTTP ${probe.status}`,
+    };
+    return probe.ok
+      ? { outcome: 'established', detail: `the environment is serving and healthy at ${url}`, checks: [check], observed: { health: 'healthy', healthStatus: probe.status!, healthUrl: url } }
+      : { outcome: 'undetermined', detail: `the environment is not healthy (${check.detail}); whether the deployment happened cannot be determined`, checks: [check], observed: { health: 'unhealthy', healthUrl: url, ...(probe.status !== undefined ? { healthStatus: probe.status } : {}) } };
   },
   effects(capability, context) {
     const app = flyApp(context) ?? 'the Fly app';

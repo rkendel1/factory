@@ -119,9 +119,11 @@ import {
   validateDeploymentConfig,
 } from './bootstrap.js';
 import type {
+  ActionCancellation,
   ActionFailurePhase,
   ActionGraphOrigin,
   ActionGraphRecord,
+  ExecutionCheckpoint,
   OperationalWorkRecord,
   OperationalWorkStatus,
   ActionOutcome,
@@ -162,11 +164,13 @@ const validTransitions: Record<RunRecord['status'], RunRecord['status'][]> = {
   authorized: ['allocated', 'failed', 'cancelled'],
   allocated: ['preparing', 'failed', 'cancelled'],
   preparing: ['executing', 'failed', 'cancelled'],
-  executing: ['verifying', 'completed', 'failed', 'cancelled'],
-  verifying: ['completed', 'failed', 'cancelled'],
+  executing: ['verifying', 'completed', 'failed', 'cancelled', 'unknown'],
+  verifying: ['completed', 'failed', 'cancelled', 'unknown'],
   completed: [],
   failed: [],
   cancelled: [],
+  // Reality resolves an unknown run; a retry resolves it by superseding it.
+  unknown: ['completed', 'failed', 'cancelled'],
 };
 
 function validateRunRequest(request: RunRequest): void {
@@ -274,6 +278,9 @@ export class FactoryService {
   private readonly registry: ProviderRegistry;
   /** Resolves credential values by name, inside the execution boundary only. */
   private readonly credentialResolver: CredentialResolver;
+  /** This worker's durable identity in Run ownership. */
+  private readonly workerId: string;
+  private readonly leaseMs: number;
   private readonly controlPlane: AuthBoundryControlPlane | null;
   /**
    * The AppPort runtime for capabilities other systems call on Factory. Attn
@@ -325,6 +332,8 @@ export class FactoryService {
     });
     this.registry = new ProviderRegistry(this.flowSpec, config.providerAdapters);
     this.credentialResolver = config.credentialResolver ?? processCredentialResolver;
+    this.workerId = config.workerId ?? `worker_${process.pid}_${randomUUID().slice(0, 8)}`;
+    this.leaseMs = Math.max(1000, config.executionLeaseMs ?? 60_000);
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
         && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
@@ -1041,6 +1050,14 @@ export class FactoryService {
         }
       }
 
+      // An unknown node is asked of reality once per pass, never re-run.
+      const uncertain = actions.find((action) => action.status === 'unknown' && !attempted.has(action.id));
+      if (uncertain) {
+        attempted.add(uncertain.id);
+        await this.resolveUncertainAction(context, uncertain.id);
+        continue;
+      }
+
       const next = runnableActions(actions).find((action) => !attempted.has(action.id));
       if (!next) break;
       attempted.add(next.id);
@@ -1105,7 +1122,14 @@ export class FactoryService {
     const tenantId = context.tenant;
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
-    if (action.status !== 'failed') {
+    if (action.status === 'unknown') {
+      const run = action.runId ? await this.domain.getRun(tenantId, action.runId) : null;
+      if (!run?.uncertainty?.retrySafe) {
+        throw new DomainValidationError(
+          `action ${actionId} has an unknown outcome and repeating it is not known to be safe; resolve it through observation first`,
+        );
+      }
+    } else if (action.status !== 'failed') {
       throw new DomainValidationError(`action ${actionId} is ${action.status}, and only a failed action can be retried`);
     }
     const retried = await this.domain.patchAction(tenantId, actionId, {
@@ -1115,6 +1139,8 @@ export class FactoryService {
       runId: undefined,
       verification: undefined,
       outcome: undefined,
+      failure: undefined,
+      execution: undefined,
       blockedBy: [],
     });
     if (retried?.graphId) {
@@ -1165,6 +1191,8 @@ export class FactoryService {
               const dependency = byId.get(id);
               return `${dependency?.type ?? id} — ${dependency?.outcome ?? 'failed'}`;
             }).join('; ')
+          : action.status === 'unknown'
+            ? 'outcome uncertain — Factory is verifying external state before retrying'
           : action.outcome && action.outcome !== 'succeeded'
             ? `${action.outcome}${action.verification?.find((check) => check.status === 'failed')?.detail
                 ? ': ' + action.verification.find((check) => check.status === 'failed')!.detail : ''}`
@@ -1723,6 +1751,9 @@ export class FactoryService {
       || action.status === 'executed' || action.status === 'verifying') return action;
     if (action.status === 'succeeded' || action.status === 'failed') return action;
     if (action.outcome === 'cancelled') return action;
+    // An unknown outcome is never re-run blindly: reality resolves it first,
+    // and only a resolution that finds a repeat safe returns it to planned.
+    if (action.status === 'unknown') return action;
 
     /*
      * The authority is asked again here rather than trusting the answer stored
@@ -1851,9 +1882,17 @@ export class FactoryService {
       // A retried Action is admitted as a new Run; the earlier Run is history.
       ...(action.retries ? { idempotencyKey } : {}),
     }, context, execution, {
+      actionId,
       // The Run is on the Action as soon as it exists, so a cancel request
       // made while the provider is working finds the process to stop.
       onAdmitted: async (admitted) => {
+        // Both records point at each other from the first moment, so a
+        // recovery on another worker can settle the Action from the Run.
+        await this.patchRun(admitted.id, {
+          actionId: action.id,
+          projectId: action.projectId,
+          ...(action.environmentId ? { environmentId: action.environmentId } : {}),
+        });
         await this.domain.patchAction(tenantId, actionId, { status: 'running', runId: admitted.id });
       },
     });
@@ -1867,10 +1906,27 @@ export class FactoryService {
       ...(action.executionProvider ? { executionProvider: action.executionProvider } : {}),
     });
 
-    const settled = await this.getRun(run.id, context);
+    return this.settleAction(tenantId, action, run.id, authority, requestedAt, providerContext);
+  }
+
+  /**
+   * Read what the Run and its evidence say, verify against reality, and write
+   * the Action's final state. This runs after execution and again after a
+   * restart that interrupted verification: everything it needs is durable.
+   */
+  private async settleAction(
+    tenantId: string,
+    action: ActionRecord,
+    runId: string,
+    authority: AuthorityContextRecord,
+    requestedAt: string,
+    providerContext: ProviderContext,
+  ): Promise<ActionRecord> {
+    const actionId = action.id;
+    const settled = await this.getRun(runId);
     const current = (await this.domain.getAction(tenantId, actionId)) ?? action;
     const cancelRequestedAt = current.execution?.cancelRequestedAt;
-    let evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(run.id);
+    let evidenceRecord = await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).get(runId);
 
     // Authorization refused: nothing ran, and the Run says why.
     if (settled?.status === 'failed' && !evidenceRecord) {
@@ -1879,14 +1935,40 @@ export class FactoryService {
         status: 'failed',
         outcome: 'execution-failed',
         failure: { phase: 'authorization', outcome: 'execution-failed', reason },
-        runId: run.id,
+        runId,
         authority: { ...authority, ...(settled.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}) },
         verification: [{ name: 'authorization', status: 'failed', detail: reason }],
         execution: { requestedAt, ...(cancelRequestedAt ? { cancelRequestedAt } : {}) },
       })) ?? action;
     }
 
-    if (settled?.status === 'completed') {
+    // Another worker owns the Run; this worker records nothing about it.
+    if (settled && !isTerminal(settled.status) && settled.status !== 'unknown') {
+      return current;
+    }
+
+    /*
+     * The outcome is unknown: the provider may have acted and Factory did not
+     * see the result. The Action says so — not failed — and waits for reality.
+     */
+    if (settled?.status === 'unknown') {
+      const reason = settled.uncertainty?.reason ?? 'the external outcome could not be determined';
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'unknown',
+        outcome: 'unknown',
+        failure: { phase: 'unknown', outcome: 'unknown', reason },
+        runId,
+        authority: { ...authority, ...(settled.authorizationDecisionId ? { authorizationDecisionId: settled.authorizationDecisionId } : {}) },
+        verification: [{ name: 'outcome', status: 'skipped', detail: 'uncertain: Factory is verifying external state before retrying' }],
+        execution: {
+          requestedAt,
+          ...(evidenceRecord ? { startedAt: evidenceRecord.startedAt, completedAt: evidenceRecord.completedAt, durationMs: evidenceRecord.durationMs } : {}),
+          ...(cancelRequestedAt ? { cancelRequestedAt } : {}),
+        },
+      })) ?? action;
+    }
+
+    if (settled?.status === 'completed' && current.status !== 'executed' && current.status !== 'verifying') {
       await this.domain.patchAction(tenantId, actionId, { status: 'executed' });
     }
 
@@ -1901,23 +1983,28 @@ export class FactoryService {
       if (providerResult) {
         evidenceRecord = { ...evidenceRecord, providerResult };
         await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidenceRecord, evidenceRecord.id);
+        // The provider's own reference for the attempt lives on the Run too.
+        await this.patchRun(runId, { providerOperationId: providerResult.providerOperationId });
       }
     }
     await this.domain.patchAction(tenantId, actionId, { status: 'verifying' });
     const operationChecks = evidenceRecord && settled?.status === 'completed'
       ? await verifyOperation(this.registry, action, evidenceRecord, providerContext)
       : [];
-    const verification = await this.verifyRun(run.id, desiredState?.healthRequirement, operationChecks);
+    const verification = await this.verifyRun(runId, providerContext.desiredState?.healthRequirement, operationChecks);
     verification.push(...operationChecks);
+    await this.checkpoint('after-verification-before-completion', { runId, actionId });
 
-    const persisted = await this.getRun(run.id, context);
+    const persisted = await this.getRun(runId);
     const cancelled = persisted?.status === 'cancelled' || evidenceRecord?.status === 'cancelled' || Boolean(cancelRequestedAt && persisted?.status !== 'completed');
     const failedChecks = verification.filter((check) => check.status === 'failed');
     const unverified = operationChecks.filter((check) => check.status === 'skipped');
     const succeeded = !cancelled && persisted?.status === 'completed' && failedChecks.length === 0 && unverified.length === 0;
 
+    let observedReality: EnvironmentRecord['currentState'] | undefined;
     if (succeeded && action.environmentId) {
-      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, run.id, verification);
+      await this.recordReconciledState(tenantId, action.projectId, action.environmentId, runId, verification);
+      observedReality = (await this.domain.getEnvironment(tenantId, action.projectId, action.environmentId))?.currentState;
     }
 
     let outcome: ActionOutcome;
@@ -1944,11 +2031,37 @@ export class FactoryService {
       failure = { phase: 'execution', outcome, reason: reason.split('\n').pop()!.slice(0, 500) };
     }
 
+    // The chain, on the evidence, so it can be reconstructed from there alone.
+    if (evidenceRecord && persisted) {
+      const work = action.graphId ? await this.domain.findOperationalWorkByGraph(tenantId, action.graphId) : null;
+      evidenceRecord = {
+        ...evidenceRecord,
+        chain: {
+          ...(work ? { operationalWorkId: work.id } : {}),
+          ...(action.graphId ? { graphId: action.graphId } : {}),
+          actionId,
+          runId,
+          attempt: persisted.attempt ?? 1,
+          ...(persisted.executionOwner ? { executionOwner: persisted.executionOwner } : {}),
+          authorizationDecisionId: persisted.authorizationDecisionId ?? evidenceRecord.authorizationDecisionId,
+          ...(action.provider ? { provider: action.provider } : {}),
+          ...(action.capability ? { capability: action.capability } : {}),
+          ...(action.resource ? { resource: action.resource } : {}),
+          ...(evidenceRecord.provider?.providerResource ? { providerResource: evidenceRecord.provider.providerResource } : {}),
+          idempotencyKey: evidenceRecord.provider?.idempotency.key ?? persisted.idempotencyKey,
+          providerOperationId: providerResult?.providerOperationId ?? null,
+          verification,
+          ...(observedReality ? { observedReality } : {}),
+        },
+      };
+      await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidenceRecord, evidenceRecord.id);
+    }
+
     return (await this.domain.patchAction(tenantId, actionId, {
       status: succeeded ? 'succeeded' : 'failed',
       outcome,
       ...(failure ? { failure } : {}),
-      runId: run.id,
+      runId,
       authority: {
         ...authority,
         ...(persisted?.authorizationDecisionId ? { authorizationDecisionId: persisted.authorizationDecisionId } : {}),
@@ -1974,6 +2087,212 @@ export class FactoryService {
   }
 
   /**
+   * Resolve an Action whose outcome is unknown by observing reality.
+   *
+   * The provider is asked what is, never to do it again. An effect that is
+   * observably in place makes the Action succeeded, with the observation as
+   * its verification; an effect that observably did not happen makes it
+   * failed; an operation with no external effect is returned to planned for
+   * an explicit retry; and anything reality cannot settle stays unknown, with
+   * the observation recorded.
+   */
+  async resolveUncertainAction(context: AuthenticatedContext, actionId: string): Promise<ActionRecord> {
+    const tenantId = context.tenant;
+    const action = await this.domain.getAction(tenantId, actionId);
+    if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
+    if (action.status !== 'unknown' || !action.runId) return action;
+    const run = await this.domain.getRun(tenantId, action.runId);
+    if (!run || run.status !== 'unknown') return action;
+
+    const repositories = await this.domain.listRepositories(tenantId, action.projectId);
+    const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState, run.idempotencyKey);
+    const adapter = action.provider ? this.registry.adapter(action.provider) : null;
+    const observation = adapter && isOperationalCapability(action.capability)
+      ? await adapter.observe(action.capability, providerContext)
+      : run.uncertainty?.retrySafe
+        ? { outcome: 'retry-safe' as const, detail: 'the operation has no external effect', checks: [], observed: {} }
+        : { outcome: 'undetermined' as const, detail: 'no adapter can observe this operation', checks: [], observed: {} };
+    const at = new Date().toISOString();
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const observations = [...(run.uncertainty?.observations ?? []), { at, outcome: observation.outcome, detail: observation.detail }];
+    const evidence = this.db.collection<StructuredEvidence>(COLLECTIONS.evidence);
+    const record = await evidence.get(run.id);
+
+    if (observation.outcome === 'established') {
+      const resolved = await this.patchRun(run.id, {
+        status: 'completed',
+        completedAt: run.completedAt ?? at,
+        finishedAt: at,
+        error: undefined,
+        result: { resolvedByObservation: true },
+        uncertainty: { ...run.uncertainty!, observations, resolvedAt: at, resolvedBy: 'observation', resolution: 'succeeded' },
+      });
+      const verification: VerificationCheck[] = [
+        { name: 'outcome resolved by observation', status: 'passed', detail: observation.detail },
+        ...observation.checks,
+      ];
+      if (record) {
+        await evidence.put({
+          ...record,
+          providerResult: {
+            status: 'succeeded', providerOperationId: record.providerResult?.providerOperationId ?? null,
+            startedAt: record.startedAt, completedAt: at, durationMs: record.durationMs,
+            metadata: { resolvedByObservation: true }, observed: observation.observed, summary: observation.detail,
+          },
+          resolution: { resolvedAt: at, resolvedBy: 'observation', resolution: 'succeeded', checks: verification },
+        }, record.id);
+      }
+      if (action.environmentId) {
+        await this.recordReconciledState(tenantId, action.projectId, action.environmentId, resolved.id, verification);
+      }
+      await this.appendEvent(run.id, 'completed', `resolved by observation: ${observation.detail}`);
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'succeeded', outcome: 'succeeded', failure: undefined, verification,
+        execution: { ...(action.execution ?? { requestedAt: at }), completedAt: at, providerStatus: 'succeeded' },
+      })) ?? action;
+    }
+
+    if (observation.outcome === 'absent') {
+      await this.patchRun(run.id, {
+        status: 'failed', completedAt: at, finishedAt: at, error: observation.detail,
+        uncertainty: { ...run.uncertainty!, observations, resolvedAt: at, resolvedBy: 'observation', resolution: 'failed' },
+      });
+      if (record) await evidence.put({ ...record, resolution: { resolvedAt: at, resolvedBy: 'observation', resolution: 'failed', checks: observation.checks } }, record.id);
+      await this.appendEvent(run.id, 'failed', `resolved by observation: ${observation.detail}`);
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'failed', outcome: 'execution-failed',
+        failure: { phase: 'execution', outcome: 'execution-failed', reason: observation.detail },
+        verification: [{ name: 'outcome resolved by observation', status: 'failed', detail: observation.detail }, ...observation.checks],
+      })) ?? action;
+    }
+
+    if (observation.outcome === 'retry-safe') {
+      // Superseded by an explicit new attempt; the unknown Run stays as history.
+      await runs.put({ ...run, uncertainty: { ...run.uncertainty!, observations, resolvedAt: at, resolvedBy: 'retry', resolution: 'retried' }, updatedAt: at }, run.id);
+      await this.appendEvent(run.id, 'unknown', `resolved: ${observation.detail}; a new attempt is admitted`);
+      return (await this.domain.patchAction(tenantId, actionId, {
+        status: 'planned',
+        retries: (action.retries ?? 0) + 1,
+        previousRunIds: [...(action.previousRunIds ?? []), run.id],
+        runId: undefined, verification: undefined, outcome: undefined, failure: undefined, blockedBy: [],
+        execution: undefined,
+      })) ?? action;
+    }
+
+    await runs.put({ ...run, uncertainty: { ...run.uncertainty!, observations }, updatedAt: at }, run.id);
+    return (await this.domain.patchAction(tenantId, actionId, {
+      verification: [
+        { name: 'outcome', status: 'skipped', detail: 'uncertain: Factory is verifying external state before retrying' },
+        ...observation.checks,
+      ],
+      failure: { phase: 'unknown', outcome: 'unknown', reason: observation.detail },
+    })) ?? action;
+  }
+
+  /**
+   * Recover execution state after this process (or another worker) stopped.
+   *
+   * Durable Runs decide everything. A Run whose lease another worker still
+   * holds is left alone. An expired or unowned non-terminal Run is settled
+   * from what it had reached: before invocation it is failed and known; in
+   * flight it is unknown, never failed; past persistence its verification is
+   * resumed. Nothing is replayed, and nothing is fabricated.
+   */
+  async recoverExecution(now = Date.now()): Promise<void> {
+    const runs = await this.db.collection<RunRecord>(COLLECTIONS.runs).all();
+    for (const run of runs) {
+      if (isTerminal(run.status) || run.status === 'unknown') continue;
+      if (run.leaseExpiresAt && Date.parse(run.leaseExpiresAt) > now && run.executionOwner !== this.workerId) continue;
+      if (this.activeExecutions.has(run.id)) continue;
+      const action = run.actionId ? await this.db.collection<ActionRecord>(COLLECTIONS.actions).get(run.actionId) : null;
+      const reason = 'Factory restarted before execution reached a terminal state';
+
+      if (run.status === 'verifying' || (run.status === 'executing' && run.evidenceId)) {
+        // The provider's answer is on record; only verification was interrupted.
+        const persisted = await this.patchRun(run.id, { status: 'completed', completedAt: run.completedAt ?? new Date(now).toISOString(), finishedAt: new Date(now).toISOString() });
+        await this.appendEvent(run.id, 'completed', 'recovered: evidence was persisted before the interruption; verification resumes');
+        if (action) await this.resumeSettlement(action, persisted);
+        continue;
+      }
+      if (run.status === 'executing') {
+        const contract = (await this.db.collection<ExecutionContractRecord>(COLLECTIONS.executionContracts).get(run.id))?.contract;
+        const retrySafe = contract?.provider ? Boolean(contract.provider.idempotency.exactlyOnce) : contract?.execution.mode !== 'integration';
+        await this.markRunUnknown(run.id, `${reason}; the provider had been invoked`, true, retrySafe, contract);
+        if (action) await this.markActionUnknown(action, run.id, `${reason}; the provider had been invoked`, now);
+        continue;
+      }
+
+      // accepted, authorized, allocated, preparing: nothing reached a provider.
+      const stamp = new Date(now).toISOString();
+      await this.patchRun(run.id, { status: 'failed', completedAt: stamp, finishedAt: stamp, error: reason });
+      await this.appendEvent(run.id, 'failed', 'Recovered interrupted non-terminal run from durable FeltDB state');
+      try {
+        const transition = await this.db.transitionOperation({ operationId: run.operationId, expectedVersion: run.operationVersion, to: 'failed', error: reason });
+        await this.patchRun(run.id, { operationVersion: transition.operation.version });
+      } catch {
+        // Durable run state is authoritative for recovery even if the operation was already terminal.
+      }
+      if (action) {
+        await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+          ...action,
+          status: 'failed',
+          outcome: 'execution-failed',
+          runId: run.id,
+          failure: { phase: 'interrupted', outcome: 'execution-failed', reason },
+          verification: [...(action.verification ?? []), { name: 'execution', status: 'failed', detail: reason }],
+          updatedAt: stamp,
+        }, action.id);
+      }
+    }
+
+    // Actions that never got a Run, or whose Run is gone, cannot be running.
+    for (const action of await this.db.collection<ActionRecord>(COLLECTIONS.actions).all()) {
+      if (!['authorized', 'running', 'executed', 'verifying'].includes(action.status)) continue;
+      const run = action.runId ? await this.db.collection<RunRecord>(COLLECTIONS.runs).get(action.runId) : null;
+      if (run && !isTerminal(run.status) && run.status !== 'unknown') continue; // live elsewhere
+      if (run && run.status === 'completed') { await this.resumeSettlement(action, run); continue; }
+      if (run && run.status === 'unknown') {
+        await this.markActionUnknown(action, run.id, run.uncertainty?.reason ?? 'the external outcome could not be determined', now);
+        continue;
+      }
+      const reason = 'Factory restarted before execution reached a terminal state';
+      await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+        ...action,
+        status: 'failed',
+        outcome: run?.status === 'cancelled' ? 'cancelled' : 'execution-failed',
+        failure: { phase: 'interrupted', outcome: run?.status === 'cancelled' ? 'cancelled' : 'execution-failed', reason },
+        verification: [...(action.verification ?? []), { name: 'execution', status: 'failed', detail: reason }],
+        updatedAt: new Date(now).toISOString(),
+      }, action.id);
+    }
+  }
+
+  private async markActionUnknown(action: ActionRecord, runId: string, reason: string, now = Date.now()): Promise<void> {
+    await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
+      ...action,
+      status: 'unknown',
+      outcome: 'unknown',
+      runId,
+      failure: { phase: 'unknown', outcome: 'unknown', reason },
+      verification: [{ name: 'outcome', status: 'skipped', detail: 'uncertain: Factory is verifying external state before retrying' }],
+      authority: action.authority ?? {},
+      updatedAt: new Date(now).toISOString(),
+    }, action.id);
+  }
+
+  /** Verification interrupted by a restart resumes from the durable evidence. */
+  private async resumeSettlement(action: ActionRecord, run: RunRecord): Promise<void> {
+    const tenantId = action.tenantId;
+    const repositories = await this.domain.listRepositories(tenantId, action.projectId);
+    const desiredState = await this.domain.getDesiredState(tenantId, action.projectId);
+    const repository = repositories.find((candidate) => candidate.id === desiredState?.sourceRepositoryId) ?? repositories[0] ?? null;
+    const providerContext = await this.providerContext(tenantId, action, repository, desiredState, run.idempotencyKey);
+    await this.settleAction(tenantId, action, run.id, action.authority ?? {}, action.execution?.requestedAt ?? run.createdAt, providerContext);
+  }
+
+  /**
    * Stop an Action.
    *
    * A planned Action is marked cancelled and never runs. A running one has its
@@ -1984,40 +2303,55 @@ export class FactoryService {
     const tenantId = context.tenant;
     const action = await this.domain.getAction(tenantId, actionId);
     if (!action) throw new DomainValidationError(`action ${actionId} was not found`);
-    if (action.status === 'succeeded' || action.status === 'failed' || action.outcome === 'cancelled') return action;
-    if (action.status === 'planned' || action.status === 'awaiting-approval') {
+    const requestedAt = new Date().toISOString();
+    const record = (stage: ActionCancellation['stage'], effect: ActionCancellation['effect'], detail: string): ActionCancellation =>
+      ({ requestedAt, requestedBy: context.principal, stage, effect, detail });
+
+    if (action.status === 'succeeded' || action.status === 'failed' || action.outcome === 'cancelled') {
+      if (action.cancellation) return action;
+      // Nothing to stop. Recording the request keeps the history honest.
       return (await this.domain.patchAction(tenantId, actionId, {
-        outcome: 'cancelled',
-        failure: { phase: 'preflight', outcome: 'cancelled', reason: `cancelled by ${context.principal} before it ran` },
+        cancellation: record('after-completion', 'none', `the Action had already ended as ${action.outcome ?? action.status}; nothing was cancelled and no effect was reversed`),
       })) ?? action;
     }
-    const requestedAt = new Date().toISOString();
+    if (action.status === 'planned' || action.status === 'awaiting-approval' || action.status === 'unknown') {
+      const detail = action.status === 'unknown'
+        ? `cancelled by ${context.principal} while the outcome was unknown; the provider may already have acted and nothing was reversed`
+        : `cancelled by ${context.principal} before it ran; nothing reached a provider`;
+      if (action.status === 'unknown' && action.runId) {
+        const run = await this.domain.getRun(tenantId, action.runId);
+        if (run?.uncertainty) {
+          await this.db.collection<RunRecord>(COLLECTIONS.runs).put({
+            ...run, uncertainty: { ...run.uncertainty, resolvedAt: requestedAt, resolvedBy: 'cancellation', resolution: 'cancelled' }, updatedAt: requestedAt,
+          }, run.id);
+        }
+      }
+      return (await this.domain.patchAction(tenantId, actionId, {
+        outcome: 'cancelled',
+        ...(action.status === 'unknown' ? { status: 'failed' } : {}),
+        failure: { phase: action.status === 'unknown' ? 'unknown' : 'preflight', outcome: 'cancelled', reason: detail },
+        cancellation: record('before-invocation', action.status === 'unknown' ? 'submitted' : 'not-started', detail),
+      })) ?? action;
+    }
+
+    const run = action.runId ? await this.domain.getRun(tenantId, action.runId) : null;
+    const external = action.provider ? !(this.registry.adapter(action.provider)?.idempotency(action.capability as never).exactlyOnce ?? true) : false;
+    let cancellation: ActionCancellation;
+    if (!run || ['accepted', 'authorized', 'allocated', 'preparing'].includes(run.status)) {
+      cancellation = record('before-invocation', 'not-started', 'cancelled before the provider was invoked; nothing reached it');
+    } else if (run.status === 'executing') {
+      cancellation = external
+        ? record('after-external-submission', 'submitted', `the ${action.provider} operation had been submitted; Factory stopped waiting for it and did not reverse it`)
+        : record('native-execution', 'stopped', 'the local process was stopped; it had no external effect');
+    } else {
+      cancellation = record('during-verification', external ? 'submitted' : 'stopped', 'the operation had completed; only verification was still running, and the recorded outcome is the verified one');
+    }
     const patched = (await this.domain.patchAction(tenantId, actionId, {
       execution: { requestedAt: action.execution?.requestedAt ?? requestedAt, ...action.execution, cancelRequestedAt: requestedAt },
+      cancellation,
     })) ?? action;
-    if (action.runId) await this.cancelRunAs(action.runId);
+    if (action.runId && cancellation.stage !== 'during-verification') await this.cancelRunAs(action.runId);
     return patched;
-  }
-
-  /**
-   * Actions that were executing when this process last stopped. Their Runs
-   * were already recovered as failed; the Action must say the same, and say
-   * why, rather than stay "running" forever.
-   */
-  async recoverInterruptedActions(): Promise<void> {
-    const actions = await this.db.collection<ActionRecord>(COLLECTIONS.actions).all();
-    for (const action of actions) {
-      if (!['authorized', 'running', 'executed', 'verifying'].includes(action.status)) continue;
-      const reason = 'Factory restarted before execution reached a terminal state';
-      await this.db.collection<ActionRecord>(COLLECTIONS.actions).put({
-        ...action,
-        status: 'failed',
-        outcome: 'execution-failed',
-        failure: { phase: 'interrupted', outcome: 'execution-failed', reason },
-        verification: [...(action.verification ?? []), { name: 'execution', status: 'failed', detail: reason }],
-        updatedAt: new Date().toISOString(),
-      }, action.id);
-    }
   }
 
   /**
@@ -2172,8 +2506,7 @@ export class FactoryService {
     const db = await createFactoryDB(config);
     const service = new FactoryService(config, db);
     await service.provisionAuthority();
-    await service.recoverInterruptedRuns();
-    await service.recoverInterruptedActions();
+    await service.recoverExecution();
     return service;
   }
 
@@ -2224,6 +2557,9 @@ export class FactoryService {
   }
 
   async shutdown(): Promise<void> {
+    // A stopped worker stops heartbeating; its leases lapse and another
+    // worker may reclaim them. Nothing here touches the Runs themselves.
+    for (const stop of [...this.heartbeats]) stop();
     this.shuttingDown = true;
     this.scheduler?.stop();
     for (const execution of this.activeExecutions.values()) {
@@ -2367,39 +2703,115 @@ export class FactoryService {
     return cancelledRun;
   }
 
+  /** Kept for callers of the earlier name; recovery is one procedure. */
   async recoverInterruptedRuns(): Promise<void> {
-    const runs = await this.db.collection<RunRecord>(COLLECTIONS.runs).all();
-    for (const run of runs) {
-      if (isTerminal(run.status)) {
-        continue;
-      }
+    await this.recoverExecution();
+  }
 
-      await this.patchRun(run.id, {
-        status: 'failed',
-        completedAt: new Date().toISOString(),
-        error: 'Runner restarted before execution reached a terminal state',
-      });
-      await this.appendEvent(run.id, 'failed', 'Recovered interrupted non-terminal run from durable FeltDB state');
+  /** Test-only failure injection. Production configures no hooks, so this is a no-op. */
+  private async checkpoint(point: ExecutionCheckpoint, detail: { runId: string; actionId?: string }): Promise<void> {
+    await this.config.executionHooks?.checkpoint(point, detail);
+  }
 
-      try {
-        const transition = await this.db.transitionOperation({
-          operationId: run.operationId,
-          expectedVersion: run.operationVersion,
-          to: 'failed',
-          error: 'Runner restarted before execution reached a terminal state',
-        });
-        await this.patchRun(run.id, { operationVersion: transition.operation.version });
-      } catch {
-        // Durable run state is authoritative for recovery even if the operation was already terminal.
+  workerIdentity(): string {
+    return this.workerId;
+  }
+
+  /**
+   * Acquire durable ownership of a Run by compare-and-swap.
+   *
+   * Exactly one live worker owns a Run. A lease still held by another worker
+   * refuses the acquisition; an expired one is reclaimed with the attempt
+   * count advanced, and the record — not the reclaim — decides what the new
+   * owner may do with it.
+   */
+  async acquireRunOwnership(runId: string, now = Date.now()): Promise<RunRecord | null> {
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const current = await runs.get(runId);
+    if (!current || isTerminal(current.status) || current.status === 'unknown') return null;
+    const live = current.leaseExpiresAt && Date.parse(current.leaseExpiresAt) > now && current.executionOwner !== this.workerId;
+    if (live) return null;
+    const result = await runs.updateIfVersion(runId, current.__version ?? 1, {
+      executionOwner: this.workerId,
+      leaseExpiresAt: new Date(now + this.leaseMs).toISOString(),
+      heartbeatAt: new Date(now).toISOString(),
+      attempt: (current.attempt ?? 0) + 1,
+      updatedAt: new Date(now).toISOString(),
+    });
+    return result.updated ? (result.item ?? (await runs.get(runId))) : null;
+  }
+
+  private readonly heartbeats = new Set<() => void>();
+
+  private startHeartbeat(runId: string): () => void {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      void this.patchRun(runId, {
+        heartbeatAt: new Date(now).toISOString(),
+        leaseExpiresAt: new Date(now + this.leaseMs).toISOString(),
+      }).catch(() => { /* the lease simply lapses */ });
+    }, Math.max(250, Math.floor(this.leaseMs / 3)));
+    timer.unref?.();
+    const stop = () => { clearInterval(timer); this.heartbeats.delete(stop); };
+    this.heartbeats.add(stop);
+    return stop;
+  }
+
+  private async releaseRunOwnership(runId: string): Promise<void> {
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const current = await runs.get(runId);
+    if (!current || current.executionOwner !== this.workerId) return;
+    const released: RunRecord = { ...current, finishedAt: current.finishedAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() };
+    delete released.leaseExpiresAt;
+    await runs.put(released, runId);
+  }
+
+  /**
+   * The Run's outcome cannot be determined. This is not a failure and is
+   * never written as one: it is recorded with why, whether the provider may
+   * already have acted, and whether the provider's own semantics make a
+   * repeat safe. Reality, not a retry, resolves it.
+   */
+  private async markRunUnknown(
+    runId: string,
+    reason: string,
+    invocationMayHaveOccurred: boolean,
+    retrySafe: boolean,
+    contract?: ExecutionContractRecord['contract'],
+  ): Promise<RunRecord | null> {
+    const runs = this.db.collection<RunRecord>(COLLECTIONS.runs);
+    const current = await runs.get(runId);
+    if (!current || isTerminal(current.status) || current.status === 'unknown') return current;
+    const since = new Date().toISOString();
+    const evidence = this.db.collection<StructuredEvidence>(COLLECTIONS.evidence);
+    if (!(await evidence.get(runId))) {
+      const stored = contract ?? (await this.db.collection<ExecutionContractRecord>(COLLECTIONS.executionContracts).get(runId))?.contract;
+      if (stored) {
+        const unknown = buildFailureEvidence(stored, new Error(reason), current.startedAt ?? since, since, 'unknown', 'not-started');
+        await evidence.put(unknown, unknown.id);
       }
     }
+    const marked: RunRecord = {
+      ...current,
+      status: 'unknown',
+      error: reason,
+      uncertainty: { reason, since, invocationMayHaveOccurred, retrySafe, observations: [] },
+      updatedAt: since,
+    };
+    delete marked.leaseExpiresAt;
+    await runs.put(marked, runId);
+    await this.appendEvent(runId, 'unknown', reason);
+    try {
+      await this.db.transitionOperation({ operationId: current.operationId, expectedVersion: current.operationVersion, to: 'failed', error: `unknown: ${reason}` });
+    } catch { /* the durable run record is authoritative for uncertainty */ }
+    return marked;
   }
 
   async startRun(
     request: RunRequest,
     principalOrContext: string | AuthenticatedContext,
     execution?: ProviderExecution,
-    options: { onAdmitted?: (run: RunRecord) => Promise<void> } = {},
+    options: { onAdmitted?: (run: RunRecord) => Promise<void>; actionId?: string; retrySafe?: boolean } = {},
   ): Promise<RunRecord> {
     if (this.shuttingDown) {
       throw new Error('Factory service is shutting down');
@@ -2460,9 +2872,12 @@ export class FactoryService {
       return run;
     }
     await options.onAdmitted?.(run);
+    const detail = { runId: run.id, ...(options.actionId ? { actionId: options.actionId } : {}) };
+    await this.checkpoint('after-run-created', detail);
 
     await this.recordRequest(run.id, request, principal, context.tenant);
 
+    await this.checkpoint('before-authorization', detail);
     const authorization = await authorizeExecution(this.db, this.flowSpec, context, request, run.id, {
       association: this.association,
       authorized: authorizedApplicationContext(
@@ -2482,125 +2897,171 @@ export class FactoryService {
       return run;
     }
 
-    await this.recordContract(authorization.contract);
-    this.appPort.bindContract(authorization.contract);
+    const contract = authorization.contract;
+    await this.recordContract(contract);
+    this.appPort.bindContract(contract);
     run = await this.patchRun(run.id, {
       status: 'authorized',
       contractId: run.id,
     });
     await this.appendEvent(run.id, 'authorized', authorization.reason);
+    await this.checkpoint('after-authorization', detail);
 
-    const startedAt = new Date().toISOString();
-    const operation = await this.db.transitionOperation({
-      operationId: run.operationId,
-      expectedVersion: run.operationVersion,
-      to: 'executing',
-    });
-    run = await this.patchRun(run.id, {
-      status: 'allocated',
-      operationVersion: operation.operation.version,
-    });
-    await this.appendEvent(run.id, 'allocated', 'Allocated ephemeral runner workspace');
-    run = await this.patchRun(run.id, { status: 'preparing' });
-    await this.appendEvent(run.id, 'preparing', 'Preparing repository workspace');
-    run = await this.patchRun(run.id, {
-      status: 'executing',
-      startedAt,
-    });
+    // Durable ownership before anything is allocated. Another worker's live
+    // lease means this worker does nothing with the Run.
+    const owned = await this.acquireRunOwnership(run.id);
+    if (!owned) return (await this.getRun(run.id)) ?? run;
+    run = owned;
+    await this.appendEvent(run.id, 'authorized', `execution owned by ${this.workerId}, attempt ${run.attempt ?? 1}`);
+    await this.checkpoint('after-ownership', detail);
+    const stopHeartbeat = this.startHeartbeat(run.id);
+    const retrySafe = options.retrySafe ?? (execution ? execution.idempotency.exactlyOnce : contract.execution.mode !== 'integration');
     const activeRunId = run.id;
-    const executionDetail = authorization.contract.execution.mode === 'pax'
-      ? ['pax', '--json', authorization.contract.execution.operation, authorization.contract.execution.target, ...authorization.contract.execution.args].join(' ')
-      : authorization.contract.command?.join(' ') ?? 'native execution';
-    await this.appendEvent(activeRunId, 'executing', executionDetail);
+    // Set once the provider process exists. From then on a lost result is
+    // unknown, not failed — unless the process was cancelled, which is known.
+    let invoked = false;
+    let executedStatus: StructuredEvidence['status'] | undefined;
 
     try {
-      // A cancel that landed between admission and here stops the run before
-      // any process exists. Nothing is spawned for a cancelled run.
-      const beforeSpawn = await this.getRun(activeRunId);
-      if (beforeSpawn?.status === 'cancelled') return beforeSpawn;
+      const startedAt = new Date().toISOString();
+      const operation = await this.db.transitionOperation({
+        operationId: run.operationId,
+        expectedVersion: run.operationVersion,
+        to: 'executing',
+      });
+      run = await this.patchRun(run.id, {
+        status: 'allocated',
+        operationVersion: operation.operation.version,
+      });
+      await this.appendEvent(run.id, 'allocated', 'Allocated ephemeral runner workspace');
+      run = await this.patchRun(run.id, { status: 'preparing' });
+      await this.appendEvent(run.id, 'preparing', 'Preparing repository workspace');
+      await this.checkpoint('before-invocation', detail);
+      run = await this.patchRun(run.id, {
+        status: 'executing',
+        startedAt,
+      });
+      const executionDetail = contract.execution.mode === 'pax'
+        ? ['pax', '--json', contract.execution.operation, contract.execution.target, ...contract.execution.args].join(' ')
+        : contract.command?.join(' ') ?? 'native execution';
+      await this.appendEvent(activeRunId, 'executing', executionDetail);
 
-      const executed = authorization.contract.execution.mode === 'integration'
-        ? await this.github.execute(authorization.contract)
-        : await executeContract(authorization.contract, {
-          repositoryRoot: this.config.repositoryRoot,
-          workspaceRoot: this.config.workspaceRoot,
-          onHandle: (handle) => {
-            this.activeExecutions.set(activeRunId, handle);
-          },
-          paxExecutable: this.config.paxExecutable,
-          credentialResolver: this.credentialResolver,
-        });
+      try {
+        // A cancel that landed between admission and here stops the run before
+        // any process exists. Nothing is spawned for a cancelled run.
+        const beforeSpawn = await this.getRun(activeRunId);
+        if (beforeSpawn?.status === 'cancelled') return beforeSpawn;
 
-      this.activeExecutions.delete(activeRunId);
-      // A late provider result never un-cancels a run: what was cancelled
-      // stays cancelled, and the evidence says so.
-      const persistedAfter = await this.getRun(activeRunId);
-      const outcome = persistedAfter?.status === 'cancelled' && executed.evidence.status !== 'cancelled'
-        ? { ...executed, evidence: { ...executed.evidence, status: 'cancelled' as const, deterministicResult: 'CANCELLED' as const, finalResult: 'CANCELLED' as const } }
-        : executed;
-      if (outcome.evidence.status !== 'cancelled') {
-        run = await this.patchRun(activeRunId, { status: 'verifying' });
-        await this.appendEvent(activeRunId, 'verifying', 'Persisting structured evidence');
-      } else {
-        run = await this.getRun(activeRunId) ?? run;
-      }
-      await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(outcome.evidence, outcome.evidence.id);
+        // The GitHub integration answers or throws: a thrown error is the
+        // provider's own refusal, known and final. Only a result that arrives
+        // and then cannot be recorded is uncertain.
+        const executed = contract.execution.mode === 'integration'
+          ? await (async () => { const result = await this.github.execute(contract); invoked = true; return result; })()
+          : await executeContract(contract, {
+            repositoryRoot: this.config.repositoryRoot,
+            workspaceRoot: this.config.workspaceRoot,
+            onHandle: (handle) => {
+              this.activeExecutions.set(activeRunId, handle);
+            },
+            paxExecutable: this.config.paxExecutable,
+            credentialResolver: this.credentialResolver,
+            onSpawned: async () => {
+              invoked = true;
+              await this.checkpoint('after-invocation', detail);
+            },
+          });
 
-      const terminalStatus = outcome.evidence.status === 'completed' ? 'completed' : outcome.evidence.status;
-      const transition = terminalStatus === 'cancelled' && run.status === 'cancelled'
-        ? null
-        : await this.db.transitionOperation({
-          operationId: run.operationId,
-          expectedVersion: run.operationVersion,
-          to: terminalStatus === 'completed' ? 'completed' : terminalStatus,
-          resultSnapshot: outcome.evidence,
+        this.activeExecutions.delete(activeRunId);
+        executedStatus = executed.evidence.status;
+        await this.checkpoint('after-result-before-persistence', detail);
+        // A late provider result never un-cancels a run: what was cancelled
+        // stays cancelled, and the evidence says so.
+        const persistedAfter = await this.getRun(activeRunId);
+        const outcome = persistedAfter?.status === 'cancelled' && executed.evidence.status !== 'cancelled'
+          ? { ...executed, evidence: { ...executed.evidence, status: 'cancelled' as const, deterministicResult: 'CANCELLED' as const, finalResult: 'CANCELLED' as const } }
+          : executed;
+        executedStatus = outcome.evidence.status;
+        if (outcome.evidence.status !== 'cancelled') {
+          run = await this.patchRun(activeRunId, { status: 'verifying' });
+          await this.appendEvent(activeRunId, 'verifying', 'Persisting structured evidence');
+        } else {
+          run = await this.getRun(activeRunId) ?? run;
+        }
+        await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(outcome.evidence, outcome.evidence.id);
+        await this.checkpoint('after-persistence-before-verification', detail);
+
+        const terminalStatus = outcome.evidence.status === 'completed' ? 'completed' : outcome.evidence.status;
+        const transition = terminalStatus === 'cancelled' && (run.status === 'cancelled' || persistedAfter?.status === 'cancelled')
+          ? null
+          : await this.db.transitionOperation({
+            operationId: run.operationId,
+            expectedVersion: run.operationVersion,
+            to: terminalStatus === 'completed' ? 'completed' : terminalStatus === 'unknown' ? 'failed' : terminalStatus,
+            resultSnapshot: outcome.evidence,
+            error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
+          });
+
+        run = await this.patchRun(activeRunId, {
+          status: terminalStatus,
+          completedAt: outcome.evidence.completedAt,
+          finishedAt: new Date().toISOString(),
+          operationVersion: transition?.operation.version ?? run.operationVersion,
+          evidenceId: outcome.evidence.id,
+          ...(outcome.evidence.providerResult?.providerOperationId !== undefined ? { providerOperationId: outcome.evidence.providerResult.providerOperationId } : {}),
           error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
         });
-
-      run = await this.patchRun(activeRunId, {
-        status: terminalStatus,
-        completedAt: outcome.evidence.completedAt,
-        operationVersion: transition?.operation.version ?? run.operationVersion,
-        evidenceId: outcome.evidence.id,
-        error: terminalStatus === 'failed' || terminalStatus === 'cancelled' ? outcome.evidence.stderr : undefined,
-      });
-      await this.appendEvent(activeRunId, terminalStatus, `Final deterministic result: ${outcome.evidence.finalResult}`);
-      return run;
-    } catch (error) {
-      this.activeExecutions.delete(activeRunId);
-      const completedAt = new Date().toISOString();
-      const persistedRun = await this.getRun(activeRunId);
-      const terminalStatus = persistedRun?.status === 'cancelled' ? 'cancelled' : 'failed';
-      const evidence = buildFailureEvidence(
-        authorization.contract,
-        error instanceof Error ? error : new Error(String(error)),
-        run.startedAt ?? startedAt,
-        completedAt,
-        terminalStatus,
-        terminalStatus === 'cancelled' ? 'cancelled'
-          : error instanceof SpawnFailedError ? 'spawn-failed'
-          : error instanceof CredentialUnavailableError ? 'not-started'
-          : 'not-started',
-      );
-      await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidence, evidence.id);
-      const transition = terminalStatus === 'cancelled' && persistedRun?.status === 'cancelled'
-        ? null
-        : await this.db.transitionOperation({
-          operationId: run.operationId,
-          expectedVersion: run.operationVersion,
-          to: terminalStatus,
+        await this.appendEvent(activeRunId, terminalStatus, `Final deterministic result: ${outcome.evidence.finalResult}`);
+        await this.checkpoint('after-evidence', detail);
+        return run;
+      } catch (error) {
+        this.activeExecutions.delete(activeRunId);
+        const persistedRun = await this.getRun(activeRunId);
+        if (persistedRun?.status !== 'cancelled' && executedStatus !== 'cancelled' && invoked) {
+          /*
+           * The provider was invoked and the result was lost — a persistence
+           * failure after the process ran, or a boundary error after spawn.
+           * Factory does not know what the provider did, and says exactly that.
+           */
+          const reason = `provider was invoked but its result could not be recorded: ${error instanceof Error ? error.message : String(error)}`;
+          return (await this.markRunUnknown(activeRunId, reason.slice(0, 500), true, retrySafe, contract)) ?? run;
+        }
+        const completedAt = new Date().toISOString();
+        const terminalStatus = persistedRun?.status === 'cancelled' || executedStatus === 'cancelled' ? 'cancelled' : 'failed';
+        const evidence = buildFailureEvidence(
+          contract,
+          error instanceof Error ? error : new Error(String(error)),
+          run.startedAt ?? startedAt,
+          completedAt,
+          terminalStatus,
+          terminalStatus === 'cancelled' ? 'cancelled'
+            : error instanceof SpawnFailedError ? 'spawn-failed'
+            : error instanceof CredentialUnavailableError ? 'not-started'
+            : 'not-started',
+        );
+        await this.db.collection<StructuredEvidence>(COLLECTIONS.evidence).put(evidence, evidence.id);
+        const transition = terminalStatus === 'cancelled' && persistedRun?.status === 'cancelled'
+          ? null
+          : await this.db.transitionOperation({
+            operationId: run.operationId,
+            expectedVersion: run.operationVersion,
+            to: terminalStatus,
+            error: evidence.stderr,
+            resultSnapshot: evidence,
+          });
+        run = await this.patchRun(activeRunId, {
+          status: terminalStatus,
+          completedAt,
+          finishedAt: completedAt,
+          operationVersion: transition?.operation.version ?? run.operationVersion,
+          evidenceId: evidence.id,
           error: evidence.stderr,
-          resultSnapshot: evidence,
         });
-      run = await this.patchRun(activeRunId, {
-        status: terminalStatus,
-        completedAt,
-        operationVersion: transition?.operation.version ?? run.operationVersion,
-        evidenceId: evidence.id,
-        error: evidence.stderr,
-      });
-      await this.appendEvent(activeRunId, terminalStatus, evidence.stderr);
-      return run;
+        await this.appendEvent(activeRunId, terminalStatus, evidence.stderr);
+        return run;
+      }
+    } finally {
+      stopHeartbeat();
+      await this.releaseRunOwnership(activeRunId);
     }
   }
 

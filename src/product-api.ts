@@ -476,6 +476,15 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
   },
   {
     method: 'POST',
+    pattern: /^\/v1\/actions\/([^/]+)\/resolve$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      // Ask reality about an unknown outcome. Never repeats the operation.
+      return json(200, await service.resolveUncertainAction(context, params[0]!));
+    },
+  },
+  {
+    method: 'POST',
     pattern: /^\/v1\/actions\/([^/]+)\/retry$/,
     capability: PRODUCT_CAPABILITIES.execute,
     async handle({ service, context, params }) {

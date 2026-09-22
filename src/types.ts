@@ -7,9 +7,11 @@ export type RunStatus =
   | 'verifying'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  /** Factory cannot determine whether the external operation occurred. Not a failure. */
+  | 'unknown';
 
-export type DeterministicResult = 'PASS' | 'FAIL' | 'CANCELLED';
+export type DeterministicResult = 'PASS' | 'FAIL' | 'CANCELLED' | 'UNKNOWN';
 export type JevStatus = 'DRIFT' | 'ALIGNED' | 'UNAVAILABLE';
 
 export interface RepositoryRef {
@@ -159,9 +161,58 @@ export interface RunRecord {
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  /*
+   * Durable execution ownership. Exactly one live worker owns a Run; the
+   * lease is acquired by compare-and-swap on this record, extended by
+   * heartbeat while the worker is alive, and reclaimable once expired. A
+   * reclaimed Run is not thereby safe to repeat: that is decided from its
+   * status and the provider's idempotency, never from the lease.
+   */
+  executionOwner?: string;
+  leaseExpiresAt?: string;
+  attempt?: number;
+  heartbeatAt?: string;
+  finishedAt?: string;
+  providerOperationId?: string | null;
+  /** Present while, or since, Factory could not determine the external outcome. */
+  uncertainty?: RunUncertainty;
   createdAt: string;
   updatedAt: string;
   __version?: number;
+}
+
+export interface RunUncertainty {
+  reason: string;
+  since: string;
+  /** Whether the provider may already have been invoked when contact was lost. */
+  invocationMayHaveOccurred: boolean;
+  /** Whether the provider's idempotency makes a repeat safe. */
+  retrySafe: boolean;
+  observations: { at: string; outcome: 'established' | 'absent' | 'undetermined' | 'retry-safe'; detail: string }[];
+  resolvedAt?: string;
+  resolvedBy?: 'observation' | 'retry' | 'cancellation';
+  resolution?: 'succeeded' | 'failed' | 'retried' | 'cancelled';
+}
+
+/**
+ * Points in the execution path a process may stop at. Tests inject failure
+ * here through the `executionHooks` configuration; production runs with no
+ * hooks and no behaviour that depends on them.
+ */
+export type ExecutionCheckpoint =
+  | 'before-authorization'
+  | 'after-authorization'
+  | 'after-run-created'
+  | 'after-ownership'
+  | 'before-invocation'
+  | 'after-invocation'
+  | 'after-result-before-persistence'
+  | 'after-persistence-before-verification'
+  | 'after-verification-before-completion'
+  | 'after-evidence';
+
+export interface ExecutionHooks {
+  checkpoint(point: ExecutionCheckpoint, detail: { runId: string; actionId?: string }): Promise<void> | void;
 }
 
 /* -------------------------------------------------------------------------
@@ -254,7 +305,9 @@ export type ActionStatus =
   | 'executed'
   | 'verifying'
   | 'succeeded'
-  | 'failed';
+  | 'failed'
+  /** The external outcome cannot be determined yet. Neither success nor failure. */
+  | 'unknown';
 
 /** Why a process stopped. `spawn-failed` means the provider mechanism could not start; `not-started` means Factory stopped before spawning. */
 export type TerminationReason = 'exit' | 'signal' | 'timeout' | 'cancelled' | 'spawn-failed' | 'not-started';
@@ -270,7 +323,8 @@ export type ActionFailurePhase =
   | 'execution'
   | 'provider'
   | 'verification'
-  | 'interrupted';
+  | 'interrupted'
+  | 'unknown';
 
 /**
  * What actually happened when an Action executed, from the execution
@@ -429,6 +483,7 @@ export interface ActionRecord {
   execution?: ActionExecutionSummary;
   /** Why the Action failed, in which phase. Never a generic message. */
   failure?: { phase: ActionFailurePhase; outcome: ActionOutcome; reason: string };
+  cancellation?: ActionCancellation;
   createdBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -528,6 +583,8 @@ export type ActionGraphStatus =
   | 'ready'
   | 'running'
   | 'blocked'
+  /** A node's external outcome is unknown; nothing proceeds until reality resolves it. */
+  | 'unresolved'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -581,7 +638,18 @@ export type ActionOutcome =
   | 'execution-failed'
   | 'verification-failed'
   | 'verification-unavailable'
+  | 'unknown'
   | 'cancelled';
+
+/** What Factory actually cancelled, so cancelling never implies an effect was reversed. */
+export interface ActionCancellation {
+  requestedAt: string;
+  requestedBy: string;
+  stage: 'before-invocation' | 'native-execution' | 'after-external-submission' | 'during-verification' | 'after-completion';
+  /** `not-started`: nothing reached the provider; `stopped`: a local process was stopped; `submitted`: an external operation may stand. */
+  effect: 'not-started' | 'stopped' | 'submitted' | 'none';
+  detail: string;
+}
 
 /**
  * What a provider adapter hands the execution boundary.
@@ -694,6 +762,34 @@ export interface StructuredEvidence {
   };
   /** Requested against observed. Observed comes only from the operation itself. */
   revision?: { requested?: string; observed?: string };
+  /**
+   * The whole chain this attempt belongs to, so a reader can reconstruct it
+   * from the evidence alone. Identifiers and names only.
+   */
+  chain?: {
+    operationalWorkId?: string;
+    graphId?: string;
+    actionId: string;
+    runId: string;
+    attempt: number;
+    executionOwner?: string;
+    authorizationDecisionId: string;
+    provider?: string;
+    capability?: string;
+    resource?: string;
+    providerResource?: string;
+    idempotencyKey: string;
+    providerOperationId: string | null;
+    verification: VerificationCheck[];
+    observedReality?: EnvironmentCurrentState;
+  };
+  /** How an unknown outcome was later resolved, and by what observation. */
+  resolution?: {
+    resolvedAt: string;
+    resolvedBy: 'observation' | 'retry' | 'cancellation';
+    resolution: 'succeeded' | 'failed' | 'retried' | 'cancelled';
+    checks: VerificationCheck[];
+  };
   principal?: string;
   tenantId?: string;
   operation?: string;
@@ -716,7 +812,7 @@ export interface StructuredEvidence {
   };
   authorizationDecisionId: string;
   authorizationDecision: 'granted' | 'rejected';
-  status: 'completed' | 'failed' | 'cancelled';
+  status: 'completed' | 'failed' | 'cancelled' | 'unknown';
   exitCode: number | null;
   startedAt: string;
   completedAt: string;
@@ -786,6 +882,12 @@ export interface FactoryServiceConfig extends FactoryDBConfig {
    * ever receives a value.
    */
   credentialResolver?: (name: string) => string | undefined;
+  /** Test-only failure injection at execution checkpoints. Production sets none. */
+  executionHooks?: ExecutionHooks;
+  /** How long a worker's execution ownership of a Run lasts without a heartbeat. */
+  executionLeaseMs?: number;
+  /** This worker's durable identity in Run ownership. Defaults to a per-process id. */
+  workerId?: string;
   authBoundryControlPlane?: import('./provisioning.js').AuthBoundryControlPlane;
   appPortServices?: import('@appport/services').AppPortServices;
   githubIntegration?: import('@rkendel1/github-integration').GitHubIntegration;
@@ -806,6 +908,7 @@ export type OperationalWorkStatus =
   | 'ready'
   | 'running'
   | 'blocked'
+  | 'unresolved'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -850,6 +953,7 @@ export type OperationalWorkEventType =
   | 'OperationalWorkCompleted'
   | 'OperationalWorkFailed'
   | 'OperationalWorkBlocked'
+  | 'OperationalWorkUnresolved'
   | 'OperationalWorkCancelled';
 
 /**

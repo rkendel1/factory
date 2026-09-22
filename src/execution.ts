@@ -174,6 +174,8 @@ export async function executeContract(
     onHandle?: (handle: ExecutionHandle) => void;
     paxExecutable?: string;
     credentialResolver?: CredentialResolver;
+    /** Called once the provider process exists, before its result is known. */
+    onSpawned?: () => Promise<void> | void;
   } = {},
 ): Promise<ExecutionOutcome> {
   assertContractIntegrity(contract);
@@ -191,7 +193,7 @@ export async function executeContract(
 
   try {
     ({ commit: repositoryCommit } = await materializeRepository(contract.repository, workspace, options.repositoryRoot));
-    const result = await runBoundedCommand(contract, workspace, credentials, options.onHandle, options.paxExecutable, paxVersion);
+    const result = await runBoundedCommand(contract, workspace, credentials, options.onHandle, options.paxExecutable, paxVersion, options.onSpawned);
     return { evidence: buildEvidence(contract, result, repositoryCommit), repositoryCommit };
   } catch (error) {
     // Anything that names the workspace or a value must be sanitized before it
@@ -210,6 +212,7 @@ async function runBoundedCommand(
   onHandle?: (handle: ExecutionHandle) => void,
   paxExecutable = process.env.PAX_BIN ?? 'pax',
   paxVersion?: string,
+  onSpawned?: () => Promise<void> | void,
 ): Promise<RawExecutionResult> {
   return new Promise((resolve, reject) => {
     const command = contract.execution.mode === 'pax' ? paxExecutable : contract.command?.[0];
@@ -273,6 +276,10 @@ async function runBoundedCommand(
       reject(new Error('Failed to start child process'));
       return;
     }
+
+    // The process exists: from here on, an interruption leaves the outcome
+    // unknown rather than failed.
+    Promise.resolve(onSpawned?.()).catch(reject);
 
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));

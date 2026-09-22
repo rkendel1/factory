@@ -514,7 +514,7 @@ export function actionsPage(): string {
 `, `
 const { api, esc, statusPill, fail } = window.factory;
 const target = document.querySelector('#actions');
-const ORDER = ['planned','awaiting-approval','authorized','running','executed','verifying','succeeded','failed'];
+const ORDER = ['planned','awaiting-approval','authorized','running','executed','verifying','unknown','succeeded','failed'];
 try {
   const { actions } = await api('/v1/actions');
   target.innerHTML = ORDER.map((status) => {
@@ -561,7 +561,7 @@ async function render() {
     const hasRun = Boolean(action.runId && execution.startedAt);
     const bound = (action.preflight?.checks || []).find((check) => check.name === 'resource bound')?.detail || '';
     // Phases are derived from durable status only; nothing here is client state.
-    const reachedIndex = { planned: 0, 'awaiting-approval': 0, authorized: 1, running: 2, executed: 3, verifying: 4, succeeded: 5, failed: hasRun ? (action.outcome === 'verification-failed' || action.outcome === 'verification-unavailable' ? 4 : 2) : action.preflight ? 1 : 0 }[action.status] ?? 0;
+    const reachedIndex = { planned: 0, 'awaiting-approval': 0, authorized: 1, running: 2, executed: 3, verifying: 4, unknown: 2, succeeded: 5, failed: hasRun ? (action.outcome === 'verification-failed' || action.outcome === 'verification-unavailable' ? 4 : 2) : action.preflight ? 1 : 0 }[action.status] ?? 0;
     const PHASES = ['Planned', 'Authorized', 'Executing', 'Executed', 'Verifying', 'Succeeded']
       .map((name, index) => [name, index <= reachedIndex && !(action.status === 'failed' && index === 5), index === reachedIndex && action.status !== 'succeeded' && action.status !== 'failed']);
     detail.innerHTML =
@@ -607,7 +607,12 @@ async function render() {
       + '<div class="phases">' + PHASES.map(([name, reached, current]) =>
           '<div class="phase"><div class="name">' + name + '</div><div>' + statusPill(reached ? (current ? 'running' : 'passed') : 'skipped')
           + '</div><div class="muted">' + (reached ? (current ? 'now' : 'done') : 'not reached') + '</div></div>').join('') + '</div>'
-      + (action.failure ? '<div class="banner drift"><p><strong>' + esc(action.failure.outcome) + '</strong> in ' + esc(action.failure.phase) + '</p><p class="muted">' + esc(action.failure.reason) + '</p></div>' : '')
+      + (action.status === 'unknown'
+          ? '<div class="banner"><p><strong>Outcome uncertain — Factory is verifying external state before retrying.</strong></p>'
+            + '<p class="muted">' + esc(action.failure?.reason || 'The provider may have acted; Factory did not see the result.') + '</p>'
+            + '<p><button id="resolve">Check reality now</button></p></div>'
+          : action.failure ? '<div class="banner drift"><p><strong>' + esc(action.failure.outcome) + '</strong> in ' + esc(action.failure.phase) + '</p><p class="muted">' + esc(action.failure.reason) + '</p></div>' : '')
+      + (action.cancellation ? '<div class="banner"><p><strong>Cancellation</strong> ' + esc(action.cancellation.stage) + ' · effect: ' + esc(action.cancellation.effect) + '</p><p class="muted">' + esc(action.cancellation.detail) + '</p></div>' : '')
       + '<div class="grid">'
         + '<div class="card"><h3>Provider</h3><p>' + esc(action.provider || action.executionProvider || '—') + '</p></div>'
         + '<div class="card"><h3>Operation</h3><p>' + esc(action.operation || '—') + '</p></div>'
@@ -661,7 +666,14 @@ async function render() {
       try { await api('/v1/actions/' + actionId + '/cancel', { method: 'POST' }); await render(); }
       catch (error) { fail(detail, error); }
     };
+    const resolve = detail.querySelector('#resolve');
+    if (resolve) resolve.onclick = async () => {
+      resolve.disabled = true;
+      try { await api('/v1/actions/' + actionId + '/resolve', { method: 'POST' }); await render(); }
+      catch (error) { fail(detail, error); }
+    };
     if (['authorized','running','executed','verifying'].includes(action.status)) setTimeout(render, 3000);
+    if (action.status === 'unknown') setTimeout(render, 10000);
   } catch (error) { fail(detail, error); }
 }
 await render();
@@ -715,12 +727,25 @@ try {
     + phase('Planning', action ? 'succeeded' : 'skipped', action ? esc(action.plan.length) + ' steps' : 'no action')
     + phase('Authorization', run.authorizationDecisionId ? 'passed' : 'failed',
         esc(run.authorizationDecisionId || 'no decision recorded'))
-    + phase('Execution', run.status, esc(run.executionProvider || evidence?.executionMode || '—')
+    + phase('Execution', run.status === 'unknown' ? 'unknown' : run.status, esc(run.executionProvider || evidence?.executionMode || '—')
         + (evidence?.execution ? ' · ' + esc(evidence.execution.terminationReason) + (evidence.exitCode !== null && evidence.exitCode !== undefined ? ' · exit ' + esc(evidence.exitCode) : '') : ''))
     + phase('Verification', (action?.verification || []).some((c) => c.status === 'failed') ? 'failed'
         : action?.verification?.length ? 'passed' : 'skipped',
         esc((action?.verification || []).length) + ' checks')
     + phase('Evidence', evidence ? 'passed' : 'failed', esc(evidence ? evidence.finalResult : 'none'))
+    + '</div>'
+    + (run.status === 'unknown' ? '<div class="banner"><p><strong>Outcome uncertain — Factory is verifying external state before retrying.</strong></p>'
+        + '<p class="muted">' + esc(run.uncertainty?.reason || '') + (run.uncertainty?.invocationMayHaveOccurred ? ' · the provider may have been invoked' : '')
+        + (run.uncertainty?.retrySafe ? ' · repeating is safe' : ' · repeating is not known to be safe') + '</p>'
+        + ((run.uncertainty?.observations || []).length ? '<p class="muted">observations: ' + run.uncertainty.observations.map((o) => esc(o.at) + ' ' + esc(o.outcome) + ' — ' + esc(o.detail)).join('; ') + '</p>' : '') + '</div>' : '')
+    + '<h2>Execution</h2><div class="grid">'
+      + '<div class="card"><h3>Owner</h3><p>' + esc(run.executionOwner || '—') + '</p>'
+        + '<p class="muted">' + (run.leaseExpiresAt ? (Date.parse(run.leaseExpiresAt) > Date.now() ? 'lease live until ' : 'lease expired at ') + esc(run.leaseExpiresAt) : 'no lease held') + '</p></div>'
+      + '<div class="card"><h3>Attempt</h3><p>' + esc(run.attempt || 1) + '</p>' + (run.heartbeatAt ? '<p class="muted">heartbeat ' + esc(run.heartbeatAt) + '</p>' : '') + '</div>'
+      + '<div class="card"><h3>Elapsed</h3><p>' + (run.startedAt ? esc(Math.round(((run.completedAt ? Date.parse(run.completedAt) : Date.now()) - Date.parse(run.startedAt)) / 1000)) + ' s' : '—') + '</p>'
+        + (run.completedAt ? '<p class="muted">completed ' + esc(run.completedAt) + '</p>' : run.startedAt ? '<p class="muted">since ' + esc(run.startedAt) + '</p>' : '') + '</div>'
+      + '<div class="card"><h3>Provider</h3><p>' + esc(action?.provider || run.executionProvider || '—') + '</p><p class="muted">' + esc(action?.capability || run.operation) + (action?.resource ? ' · ' + esc(action.resource) : '') + '</p></div>'
+      + '<div class="card"><h3>Provider reference</h3><p>' + esc(run.providerOperationId || evidence?.providerResult?.providerOperationId || '—') + '</p></div>'
     + '</div>'
     + '<h2>Authority</h2><div class="grid">'
       + '<div class="card"><h3>Principal</h3><p>' + esc(run.principal) + '</p></div>'
@@ -728,6 +753,8 @@ try {
       + '<div class="card"><h3>Delegation</h3><p>' + esc(authorized?.delegationId || run.delegationId || '—') + '</p></div>'
       + '<div class="card"><h3>Tenant</h3><p>' + esc(run.tenantId || '—') + '</p></div>'
     + '</div>'
+    + (evidence?.chain ? '<details><summary>Evidence chain</summary><pre>' + esc(JSON.stringify(evidence.chain, null, 2)) + '</pre></details>' : '')
+    + (evidence?.resolution ? '<p class="muted">Resolved ' + esc(evidence.resolution.resolvedAt) + ' by ' + esc(evidence.resolution.resolvedBy) + ': ' + esc(evidence.resolution.resolution) + '</p>' : '')
     + (evidence?.providerResult ? '<h2>Provider result</h2><div class="grid">'
         + '<div class="card"><h3>Status</h3><p>' + statusPill(evidence.providerResult.status) + '</p><p class="muted">' + esc(evidence.providerResult.summary) + '</p></div>'
         + '<div class="card"><h3>Provider reference</h3><p>' + esc(evidence.providerResult.providerOperationId || '—') + '</p></div>'
@@ -735,6 +762,7 @@ try {
         + '</div>' : '')
     + (evidence ? '<details><summary>Execution output' + (evidence.execution?.truncated?.stdout || evidence.execution?.truncated?.stderr ? ' (truncated)' : '') + '</summary>'
         + '<p class="muted">stdout</p><pre>' + esc(evidence.stdout || '') + '</pre><p class="muted">stderr</p><pre>' + esc(evidence.stderr || '') + '</pre></details>' : '');
+  if (!['completed', 'failed', 'cancelled'].includes(run.status)) setTimeout(() => location.reload(), 5000);
 } catch (error) { fail(detail, error); }
 `);
 }
@@ -810,7 +838,7 @@ try {
 }
 
 const GRAPH_NODE_MARK = `
-  const mark = (status) => ({ completed: '✓', running: '●', failed: '✗', cancelled: '✗', 'awaiting-approval': '◐' })[status] || '○';
+  const mark = (status) => ({ completed: '✓', running: '●', failed: '✗', cancelled: '✗', 'awaiting-approval': '◐', unknown: '?' })[status] || '○';
 `;
 
 export function graphsPage(): string {

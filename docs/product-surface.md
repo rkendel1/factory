@@ -254,7 +254,9 @@ never as database access.
 | `GET /v1/action-graphs/:id` | The graph with its nodes' derived statuses |
 | `POST /v1/action-graphs/:id/run` | Begin coordinating; every node is still authorized on its own |
 | `POST /v1/action-graphs/:id/cancel` | Stop coordinating; history is kept |
-| `POST /v1/actions/:id/retry` | Explicit retry of a failed node |
+| `POST /v1/actions/:id/retry` | Explicit retry of a failed node, or of an unknown one only when a repeat is known to be safe |
+| `POST /v1/actions/:id/resolve` | Ask reality about an unknown outcome; never repeats the operation |
+| `POST /v1/actions/:id/cancel` | Cancel, recording what was actually cancelled and never implying an effect was reversed |
 
 ## Requested work: the Attn ↔ Factory contract
 
@@ -296,8 +298,10 @@ different request is a conflict.
 
 **The result is compact.** `{ workId, origin, status, outcome, graphId,
 actions, completedActions, blockedActions, failedActions, evidence }`, with
-statuses `accepted → planning → ready → running → blocked | completed | failed
-| cancelled` derived from the graph. Outcomes stay distinct — `succeeded`,
+statuses `accepted → planning → ready → running → blocked | unresolved |
+completed | failed | cancelled` derived from the graph. `unresolved` means a
+step's external outcome is unknown and Factory is verifying reality before
+anything is retried; it is never collapsed into failure. Outcomes stay distinct — `succeeded`,
 `autonomy-denied`, `authority-unavailable`, `execution-failed`,
 `verification-failed`, `provider-unavailable`, `cancelled`. Each step points at
 Factory's Run and Evidence; nothing is duplicated into the work record.
