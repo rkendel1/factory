@@ -13,6 +13,7 @@ export const PRODUCT_NAV = [
   { id: 'projects', label: 'Projects', href: '/factory/projects' },
   { id: 'actions', label: 'Actions', href: '/factory/actions' },
   { id: 'runs', label: 'Runs', href: '/factory/runs' },
+  { id: 'graphs', label: 'Operations', href: '/factory/graphs' },
   { id: 'providers', label: 'Providers', href: '/factory/providers' },
   { id: 'services', label: 'AppPort Services', href: '/services' },
   { id: 'settings', label: 'Settings', href: '/factory/settings' },
@@ -67,6 +68,12 @@ tr.drift td,tr.drift th{background:color-mix(in srgb,var(--warn) 12%,transparent
 .banner p{margin:.25rem 0}
 .banner.drift{border-left-color:var(--warn)}
 .recon{margin-top:.75rem;border:1px solid var(--line);border-radius:8px;padding:.75rem;background:var(--panel)}
+.nodes{display:flex;flex-direction:column;align-items:stretch;gap:0;margin:.75rem 0}
+.node{border:1px solid var(--line);border-radius:8px;padding:.7rem;background:var(--panel)}
+.node.completed{border-left:3px solid var(--ok)}.node.running{border-left:3px solid var(--accent)}
+.node.failed{border-left:3px solid var(--bad)}.node.blocked,.node.awaiting-approval{border-left:3px solid var(--warn)}
+.node-head{font-weight:600}.mark{font-family:ui-monospace,monospace}
+.arrow{text-align:center;color:var(--muted);padding:.15rem}
 .recon h3{margin:0 0 .4rem;font-size:.95rem}
 @media (max-width:640px){main{padding:1rem}table{font-size:.86rem}}
 `;
@@ -269,7 +276,7 @@ export function projectPage(projectId: string): string {
 const { api, esc, statusPill, fail } = window.factory;
 const projectId = ${scriptLiteral(projectId)};
 const panel = document.querySelector('#panel');
-const TABS = ['Overview','Reality','Repositories','Environments','Desired State','Actions','Runs'];
+const TABS = ['Overview','Reality','Repositories','Environments','Desired State','Actions','Operations','Runs'];
 let current = location.hash.replace('#','') || 'Overview';
 
 document.querySelector('#tabs').innerHTML = TABS.map((tab) =>
@@ -327,6 +334,7 @@ async function render() {
               + '<br>Last reconciled: ' + esc(record.lastReconciledAt || 'never')
               + '<br>Next due: ' + esc(record.nextDueAt || '—') + '</p>'
               + (record.lastError ? '<p class="muted">' + esc(record.lastError) + '</p>' : '')
+              + (record.graphId ? '<p><a href="/factory/graphs/' + esc(record.graphId) + '">Action graph</a></p>' : '')
               + (record.action
                 ? '<p><strong>Action</strong><br><a href="/factory/actions/' + esc(record.action.id) + '">'
                   + esc(record.action.intent) + '</a> ' + statusPill(record.action.status) + '</p>'
@@ -464,6 +472,21 @@ async function render() {
           method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) });
         await render();
       };
+    } else if (current === 'Operations') {
+      const { graphs } = await api('/v1/action-graphs?projectId=' + encodeURIComponent(projectId));
+      const group = (label, predicate) => {
+        const rows = graphs.filter(predicate);
+        return rows.length ? '<h2>' + label + ' <span class="muted">(' + rows.length + ')</span></h2>'
+          + '<table><thead><tr><th>Graph</th><th>Origin</th><th>Status</th><th>Updated</th></tr></thead><tbody>'
+          + rows.map((graph) => '<tr><td><a href="/factory/graphs/' + esc(graph.id) + '">' + esc(graph.id) + '</a></td>'
+            + '<td class="muted">' + esc(graph.origin?.kind || 'manual') + '</td><td>' + statusPill(graph.status) + '</td>'
+            + '<td class="muted">' + esc(graph.updatedAt) + '</td></tr>').join('') + '</tbody></table>' : '';
+      };
+      panel.innerHTML = (group('Active', (g) => ['ready','running','planned'].includes(g.status))
+        + group('Blocked', (g) => g.status === 'blocked')
+        + group('Failed', (g) => g.status === 'failed')
+        + group('Reconciliation-triggered', (g) => g.origin?.kind === 'continuous-reconciliation')
+        + group('Recently completed', (g) => g.status === 'completed')) || '<div class="empty">No operations yet.</div>';
     } else {
       const { runs } = await api('/v1/projects/' + projectId + '/runs');
       panel.innerHTML = runs.length
@@ -534,7 +557,11 @@ async function render() {
       ? 'Continuous reconciliation' : 'Manual';
     detail.innerHTML =
       '<h2>Origin</h2><div class="grid">'
-        + '<div class="card"><h3>Origin</h3><p>' + esc(origin) + '</p></div>'
+        + '<div class="card"><h3>Origin</h3><p>' + esc(origin)
+          + (action.graphId ? '<br><a href="/factory/graphs/' + esc(action.graphId) + '">Action graph</a>' : '')
+          + ((action.dependsOn || []).length ? '<br><span class="muted">after ' + action.dependsOn.map(esc).join(', ') + '</span>' : '')
+          + ((action.blockedBy || []).length ? '<br><span class="muted">blocked by ' + action.blockedBy.map(esc).join(', ') + '</span>' : '')
+          + (action.outcome ? '<br>' + statusPill(action.outcome) : '') + '</p></div>'
         + '<div class="card"><h3>Desired state revision</h3><p class="muted">'
           + esc(action.desiredStateRevision || '—') + '</p></div>'
         + '<div class="card"><h3>Observed reality revision</h3><p class="muted">'
@@ -698,5 +725,82 @@ try {
     + '<p class="muted">' + esc(connection.reason || '') + '</p>'
     + '<pre>' + esc(JSON.stringify(connection, null, 2)) + '</pre></div>';
 } catch (error) { fail(target, error); }
+`);
+}
+
+const GRAPH_NODE_MARK = `
+  const mark = (status) => ({ completed: '✓', running: '●', failed: '✗', cancelled: '✗', 'awaiting-approval': '◐' })[status] || '○';
+`;
+
+export function graphsPage(): string {
+  return productPage('graphs', 'Operations', `
+<h1>Operations</h1>
+<p class="lede">Coordinated operational changes: what runs, what waits on what, and what stopped.</p>
+<div id="graphs"><p class="muted">Loading…</p></div>
+`, `
+const { api, esc, statusPill, fail } = window.factory;
+const target = document.querySelector('#graphs');
+try {
+  const { graphs } = await api('/v1/action-graphs');
+  target.innerHTML = graphs.length
+    ? '<table><thead><tr><th>Graph</th><th>Project</th><th>Origin</th><th>Status</th><th>Updated</th></tr></thead><tbody>'
+      + graphs.map((graph) =>
+        '<tr><td><a href="/factory/graphs/' + esc(graph.id) + '">' + esc(graph.id) + '</a></td>'
+        + '<td><a href="/factory/projects/' + esc(graph.projectId) + '">' + esc(graph.projectId) + '</a></td>'
+        + '<td class="muted">' + esc(graph.origin?.kind || 'manual')
+          + (graph.origin?.sourceSystem ? ' · ' + esc(graph.origin.sourceSystem) + ':' + esc(graph.origin.sourceType || '') + ' ' + esc(graph.origin.sourceId || '') : '') + '</td>'
+        + '<td>' + statusPill(graph.status) + '</td><td class="muted">' + esc(graph.updatedAt) + '</td></tr>').join('')
+      + '</tbody></table>'
+    : '<div class="empty">No operations yet.</div>';
+} catch (error) { fail(target, error); }
+`);
+}
+
+export function graphPage(graphId: string): string {
+  return productPage('graphs', 'Operation', `
+<h1 id="title">Operational change</h1>
+<p class="lede" id="subtitle"></p>
+<div id="graph"><p class="muted">Loading…</p></div>
+`, `
+const { api, esc, statusPill, fail } = window.factory;
+${GRAPH_NODE_MARK}
+const graphId = ${scriptLiteral(graphId)};
+const target = document.querySelector('#graph');
+async function render() {
+  try {
+    const graph = await api('/v1/action-graphs/' + graphId);
+    document.querySelector('#title').innerHTML = 'Operational change ' + statusPill(graph.status);
+    document.querySelector('#subtitle').textContent = graph.origin.kind
+      + (graph.origin.sourceSystem ? ' · ' + graph.origin.sourceSystem + ':' + (graph.origin.sourceType || '') + ' ' + (graph.origin.sourceId || '') : '')
+      + (graph.requestedBy ? ' · requested by ' + graph.requestedBy : '');
+    const byId = Object.fromEntries(graph.nodes.map((node) => [node.actionId, node]));
+    target.innerHTML = '<div class="nodes">' + graph.nodes.map((node) =>
+      '<div class="node ' + esc(node.status) + '"><div class="node-head"><span class="mark">' + mark(node.status) + '</span> '
+      + '<a href="/factory/actions/' + esc(node.actionId) + '">' + esc(node.type) + '</a> ' + statusPill(node.status)
+      + (node.outcome && node.outcome !== 'succeeded' ? ' ' + statusPill(node.outcome) : '') + '</div>'
+      + '<div class="muted">' + esc(node.intent) + '</div>'
+      + (node.dependsOn.length ? '<div class="muted">after: ' + node.dependsOn.map((id) => esc(byId[id]?.type || id)).join(', ') + '</div>' : '')
+      + (node.blockedBy.length ? '<div class="muted">blocked by: ' + node.blockedBy.map((id) => esc(byId[id]?.type || id)).join(', ') + '</div>' : '')
+      + '<div class="muted">authority: ' + esc(node.autonomy ? (node.autonomy.allowed ? 'autonomous' : 'needs a person') : 'not asked')
+      + (node.authority?.delegation ? ' · ' + esc(node.authority.delegation) : '') + '</div>'
+      + (node.runId ? '<div class="muted">run: <a href="/factory/runs/' + esc(node.runId) + '">' + esc(node.runId) + '</a>'
+          + ' · <a href="/v1/runs/' + esc(node.runId) + '/evidence">evidence</a></div>' : '')
+      + (node.verification.length ? '<div class="muted">verification: '
+          + node.verification.map((check) => esc(check.name) + ' ' + esc(check.status)).join(', ') + '</div>' : '')
+      + (node.status === 'failed' ? '<button data-retry="' + esc(node.actionId) + '">Retry</button>' : '')
+      + '</div>').join('<div class="arrow">↓</div>') + '</div>'
+      + (graph.failure ? '<div class="banner drift"><p><strong>Stopped:</strong> ' + esc(graph.failure.outcome) + '</p><p class="muted">' + esc(graph.failure.reason) + '</p></div>' : '')
+      + '<p>' + (['planned','ready','blocked'].includes(graph.status) ? '<button id="run">Coordinate</button> ' : '')
+      + (!['completed','cancelled'].includes(graph.status) ? '<button id="cancel">Cancel</button>' : '') + '</p>';
+    const run = target.querySelector('#run');
+    if (run) run.onclick = async () => { run.disabled = true; try { await api('/v1/action-graphs/' + graphId + '/run', { method: 'POST', body: JSON.stringify({}) }); await render(); } catch (error) { fail(target, error); } };
+    const cancel = target.querySelector('#cancel');
+    if (cancel) cancel.onclick = async () => { if (!confirm('Cancel this operation?')) return; try { await api('/v1/action-graphs/' + graphId + '/cancel', { method: 'POST', body: JSON.stringify({}) }); await render(); } catch (error) { fail(target, error); } };
+    target.querySelectorAll('[data-retry]').forEach((button) => {
+      button.onclick = async () => { button.disabled = true; try { await api('/v1/actions/' + button.dataset.retry + '/retry', { method: 'POST', body: JSON.stringify({}) }); await render(); } catch (error) { fail(target, error); } };
+    });
+  } catch (error) { fail(target, error); }
+}
+await render();
 `);
 }

@@ -135,6 +135,65 @@ adding the credential later resumes rather than restarts.
 Intervals are clamped between one minute and one day: how often Factory talks to
 a repository, an authority and a provider is not arbitrary caller input.
 
+## Action graphs
+
+Factory is the Actions Coordinator for the product ecosystem. It coordinates
+the operational actions that happen before, after and around development; it
+is not the agent that decides or materializes development.
+
+| System | Owns |
+| --- | --- |
+| Attn | human attention, goals, priorities, development work, requests for operational work |
+| Eve | autonomous development, code changes, commits and PRs |
+| Factory | operational Actions, dependencies, sequencing, provider execution, reconciliation, operational verification and evidence |
+| AuthBoundry | authority, authorization decisions, delegation, policy |
+| FeltDB | durable state and evidence |
+| AppPort | the protocol between independently owned systems |
+
+An `ActionGraph` is durable coordination state. Its nodes are ordinary
+Actions with graph metadata — `graphId`, `dependsOn`, `sequence` — so there is
+no second execution abstraction: a node in a graph runs through `runAction`,
+producing one Run and one Evidence record exactly as a lone Action does. The
+graph only says what must finish before what.
+
+**Every node is authorized on its own.** A graph is never authorized once. A
+grant that holds for one node need not hold for the next, and a grant revoked
+between nodes stops the nodes after it.
+
+**Coordination is derived, never remembered.** Node status — ready, blocked,
+awaiting-approval, running, completed, failed, cancelled — is computed from the
+Actions as FeltDB has them, so two instances, or one before and after a restart,
+derive the same answer. Why a node is blocked is persisted on it as `blockedBy`.
+Coordinating twice re-runs nothing.
+
+**Failure is explicit and stays distinct.** A failed dependency blocks its
+dependents; it does not fail them, because they never ran. `execution-failed`,
+`verification-failed`, `autonomy-denied` and `authority-unavailable` survive
+as the Action's `outcome` and the graph's `failure`, never flattened into
+"failed". Nothing retries on its own: a retry is explicit, returns the Action
+to planned, admits a new Run, and keeps the earlier Run as history.
+
+**Reconciliation plans a one-node graph.** It behaves exactly as the lone
+Action did and gives drift a path into multi-step coordination later. The
+reconciliation fingerprint still makes repeated passes idempotent: unchanged
+drift reuses the open graph.
+
+**Origins reference other systems without reading them.** A graph's origin can
+say `sourceSystem: attn, sourceType: work, sourceId: …` — Factory can say this
+operational graph exists because Attn requested it, while Attn stays the owner
+of its Work state. Eve's commits reach Factory the same way: as a reference,
+never as database access.
+
+### Action graph API
+
+| Route | Purpose |
+| --- | --- |
+| `GET\|POST /v1/action-graphs` | List, or create from a typed plan validated against `.flow` |
+| `GET /v1/action-graphs/:id` | The graph with its nodes' derived statuses |
+| `POST /v1/action-graphs/:id/run` | Begin coordinating; every node is still authorized on its own |
+| `POST /v1/action-graphs/:id/cancel` | Stop coordinating; history is kept |
+| `POST /v1/actions/:id/retry` | Explicit retry of a failed node |
+
 ## What waits for a person
 
 Whether an Action waits for a person is the authority's decision, not a rule

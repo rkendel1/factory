@@ -327,6 +327,18 @@ export interface ActionRecord {
   observedStateRevision?: string;
   /** Deterministic identity of the drift this Action closes. */
   reconciliationFingerprint?: string;
+  /* Graph coordination. The Action stays the unit of work. */
+  graphId?: string;
+  dependsOn?: string[];
+  relationships?: ActionRelationship[];
+  sequence?: number;
+  /** Dependencies that failed or were denied, persisted so a restart still knows. */
+  blockedBy?: string[];
+  outcome?: ActionOutcome;
+  parameters?: Record<string, unknown>;
+  retries?: number;
+  /** Runs of earlier attempts. Historical Runs are never mutated. */
+  previousRunIds?: string[];
   /** The drift this Action exists to close, when reconciliation planned it. */
   drift?: {
     status: string;
@@ -415,11 +427,75 @@ export interface ReconciliationOutcome {
   desiredStateRevision?: string;
   observedStateRevision?: string;
   actionId?: string;
+  graphId?: string;
   runId?: string;
   autonomy?: AutonomyDecision;
   authority?: AuthorityContextRecord;
   evidenceId?: string;
 }
+
+/**
+ * An operational coordination graph.
+ *
+ * The graph coordinates Actions; it does not execute them. An Action in a
+ * graph is the same Action, run through the same path, producing the same Run
+ * and Evidence as one planned alone. The graph only says what must finish
+ * before what.
+ */
+export type ActionGraphStatus =
+  | 'planned'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * Where a graph came from. Attn and Eve are referenced, never read: Factory
+ * can say "this exists because Attn requested it" without touching Attn's
+ * state.
+ */
+export interface ActionGraphOrigin {
+  kind: 'manual' | 'continuous-reconciliation' | 'external';
+  sourceSystem?: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
+export interface ActionGraphRecord {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  environmentId?: string;
+  origin: ActionGraphOrigin;
+  status: ActionGraphStatus;
+  requestedBy?: string;
+  failure?: { actionId: string; outcome: string; reason: string };
+  reconciliationFingerprint?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  __version?: number;
+}
+
+export type ActionRelationshipKind = 'depends_on' | 'produces' | 'verifies' | 'replaces' | 'triggered_by';
+
+export interface ActionRelationship {
+  kind: ActionRelationshipKind;
+  actionId: string;
+}
+
+/** How an Action ended, kept apart so nothing is flattened into "failed". */
+export type ActionOutcome =
+  | 'succeeded'
+  | 'autonomy-denied'
+  | 'authority-unavailable'
+  | 'awaiting-approval'
+  | 'execution-failed'
+  | 'verification-failed'
+  | 'cancelled';
 
 export interface RunEventRecord {
   id: string;

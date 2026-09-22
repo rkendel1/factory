@@ -371,6 +371,87 @@ export const PRODUCT_ROUTES: ProductRoute[] = [
   },
   {
     method: 'GET',
+    pattern: /^\/v1\/action-graphs$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, url }) {
+      const projectId = url.searchParams.get('projectId') ?? undefined;
+      return json(200, { graphs: await service.projects().listGraphs(context.tenant, projectId) });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/action-graphs$/,
+    capability: PRODUCT_CAPABILITIES.write,
+    async handle({ service, context, body, probe }) {
+      const input = asRecord(body);
+      if (!Array.isArray(input.actions)) throw new DomainValidationError('actions must be an array');
+      const actions = input.actions.map((entry, index) => {
+        const record = asRecord(entry);
+        return {
+          ...(record.key === undefined ? {} : { key: text(record.key, `actions[${index}].key`)! }),
+          type: text(record.type, `actions[${index}].type`)!,
+          ...(record.intent === undefined ? {} : { intent: text(record.intent, `actions[${index}].intent`)! }),
+          ...(record.operation === undefined ? {} : { operation: text(record.operation, `actions[${index}].operation`)! }),
+          ...(record.parameters === undefined ? {} : { parameters: asRecord(record.parameters) }),
+          ...(record.dependsOn === undefined ? {} : {
+            dependsOn: (Array.isArray(record.dependsOn) ? record.dependsOn : [record.dependsOn])
+              .map((value, position) => text(value, `actions[${index}].dependsOn[${position}]`)!),
+          }),
+        };
+      });
+      const origin = input.origin === undefined ? {} : asRecord(input.origin);
+      return json(201, await service.createActionGraph(context, {
+        projectId: text(input.projectId, 'projectId')!,
+        ...(input.environmentId === undefined ? {} : { environmentId: text(input.environmentId, 'environmentId')! }),
+        origin: {
+          ...(origin.kind === undefined ? {} : { kind: text(origin.kind, 'origin.kind') as 'manual' }),
+          ...(origin.sourceSystem === undefined ? {} : { sourceSystem: text(origin.sourceSystem, 'origin.sourceSystem')! }),
+          ...(origin.sourceType === undefined ? {} : { sourceType: text(origin.sourceType, 'origin.sourceType')! }),
+          ...(origin.sourceId === undefined ? {} : { sourceId: text(origin.sourceId, 'origin.sourceId')! }),
+        },
+        actions,
+      }, probe));
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/action-graphs\/([^/]+)$/,
+    capability: PRODUCT_CAPABILITIES.read,
+    async handle({ service, context, params }) {
+      const view = await service.graphView(context, params[0]!);
+      return view ? json(200, view) : json(404, { error: 'Action graph not found' });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/action-graphs\/([^/]+)\/run$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params, body, probe }) {
+      const input = body === undefined ? {} : asRecord(body);
+      // Begin coordinating. Every node is still authorized on its own.
+      await service.coordinateGraph(context, params[0]!, { probe, autonomous: input.autonomous === true });
+      return json(202, await service.graphView(context, params[0]!));
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/action-graphs\/([^/]+)\/cancel$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      await service.cancelActionGraph(context, params[0]!);
+      return json(200, await service.graphView(context, params[0]!));
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/actions\/([^/]+)\/retry$/,
+    capability: PRODUCT_CAPABILITIES.execute,
+    async handle({ service, context, params }) {
+      return json(200, await service.retryAction(context, params[0]!));
+    },
+  },
+  {
+    method: 'GET',
     pattern: /^\/v1\/providers$/,
     capability: PRODUCT_CAPABILITIES.read,
     async handle({ service }) {

@@ -11,7 +11,7 @@ export const FACTORY_BROWSER_CALLBACK_PATH = '/api/auth/callback';
 export const FACTORY_BROWSER_RETURN_PATHS = [
   '/', '/configuration', '/api-keys', '/v1/ui', '/runs', '/work',
   '/factory', '/factory/projects', '/factory/actions', '/factory/runs', '/factory/providers',
-  '/factory/settings', '/factory/work',
+  '/factory/graphs', '/factory/settings', '/factory/work',
 ] as const;
 
 /**
@@ -22,7 +22,7 @@ export const FACTORY_BROWSER_RETURN_PATHS = [
  * to the landing surface.
  */
 export function factoryReturnPath(pathname: string): string {
-  const section = pathname.match(/^\/factory(?:\/(projects|actions|runs|providers|settings))?/);
+  const section = pathname.match(/^\/factory(?:\/(projects|actions|runs|providers|graphs|settings))?/);
   return section ? `/factory${section[1] ? `/${section[1]}` : ''}` : '/factory';
 }
 

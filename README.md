@@ -68,6 +68,13 @@ the Action that would close it. Reality is observed from the repository and from
 the durable evidence of the run that last reconciled the environment; a field
 Factory cannot observe is reported as unknown rather than assumed.
 
+Multi-step operational work is an Action Graph: durable coordination over
+ordinary Actions with dependencies. The graph coordinates; it does not execute.
+Each node runs through the one execution path, is authorized on its own, and
+leaves its own Run and Evidence. Factory coordinates operational Actions; Attn
+decides what work matters and Eve materializes development, both referenced by
+origin metadata rather than read.
+
 With continuous reconciliation enabled for an environment, Factory runs that
 loop on a schedule: observe, compare, and act only when desire and reality
 actually disagree. The scheduler triggers a pass; the engine decides whether
@@ -124,6 +131,7 @@ connection because `AUTHBOUNDRY_URL` is set.
 - `POST /v1/projects/:id/environments/:environmentId/reconcile`
 - `GET|POST /v1/projects/:id/actions`, `GET /v1/actions/:id`, `POST /v1/actions/:id/run`
 - `GET /v1/projects/:id/runs`
+- `GET|POST /v1/action-graphs`, `GET /v1/action-graphs/:id`, `POST /v1/action-graphs/:id/run|cancel`, `POST /v1/actions/:id/retry`
 - `GET /v1/reconciliation`
 - `GET|POST|PATCH|DELETE /v1/projects/:id/environments/:environmentId/reconciliation`
 - `POST /v1/projects/:id/environments/:environmentId/reconcile-now`
