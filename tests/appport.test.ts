@@ -5,22 +5,13 @@ import { createCanonicalApplicationContract } from '../src/application-contract.
 import { loadFactoryFlow } from '../src/felt.js';
 import { createService, createRepository, createTempWorkspace, seedWork } from './helpers.js';
 
-test('AppPort SDK is the canonical Factory protocol contract', () => {
+test('AppPort SDK is the canonical Factory protocol contract without duplicating AuthBoundry grants', () => {
   const factoryAppPortApplication = createFactoryAppPortApplication();
   const contract = createCanonicalApplicationContract(loadFactoryFlow());
   const manifest = factoryAppPortApplication.manifest();
   assert.deepEqual(contract.authorization, {
     applicationId: 'factory',
-    capabilities: [
-      'factory.ui.read',
-      'configuration.read',
-      'configuration.write',
-      'configuration.delete',
-      'secret.rotate',
-      'apikeys.read',
-      'apikeys.create',
-      'apikeys.revoke',
-    ],
+    capabilities: [],
   });
   assert.equal(manifest.application.id, 'software_factory');
   // Every .flow operation, provider-backed ones included, is projected as an

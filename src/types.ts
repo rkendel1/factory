@@ -460,6 +460,7 @@ export interface AutonomyDecision {
   capability: string;
   allowed: boolean;
   reason: string;
+  semanticDecisionId?: string;
 }
 
 export interface ActionRecord {

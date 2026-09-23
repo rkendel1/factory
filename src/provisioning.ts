@@ -17,6 +17,11 @@ import type {
  */
 export const AGENT_PATH = '/_authboundry/agents';
 export const DELEGATION_PATH = '/_authboundry/delegations';
+export const PROJECT_PATH = '/_authboundry/projects';
+export const APPLICATION_PATH = '/_authboundry/applications';
+export const POLICY_PATH = '/_authboundry/policies';
+export const CAPABILITY_PATH = '/_authboundry/capabilities';
+export const PROVISIONING_REQUEST_PATH = '/_authboundry/provisioning-requests';
 
 export interface AuthBoundryAgent {
   id: string;
@@ -37,10 +42,90 @@ export interface AuthBoundryDelegation {
   expires_at?: number | null;
 }
 
+/** Canonical AuthBoundry project/application model consumed by Factory. */
+export interface AuthBoundryProject {
+  id: string;
+  name?: string;
+  status?: string;
+}
+
+export interface AuthBoundryApplication {
+  id: string;
+  project_id: string;
+  attached: boolean;
+  manifest_id?: string | null;
+  canonical?: boolean;
+}
+
+export interface AuthBoundryManifestPrincipal {
+  id: string;
+  kind?: string;
+  name?: string;
+}
+
+export interface AuthBoundryManifestPolicy {
+  id: string;
+  capabilities?: string[];
+  principal?: string;
+}
+
+export interface AuthBoundryManifestDelegation {
+  id?: string;
+  delegator: string;
+  delegate: string;
+  capabilities: string[];
+}
+
+export interface AuthBoundryApplicationManifest {
+  id: string;
+  application_id: string;
+  principals: AuthBoundryManifestPrincipal[];
+  policies: AuthBoundryManifestPolicy[];
+  delegations: AuthBoundryManifestDelegation[];
+  capabilities: string[];
+  environment?: string;
+  production_url?: string;
+}
+
+export interface AuthBoundryPolicy {
+  id: string;
+  application: string;
+  principal?: string;
+  capabilities: string[];
+  status?: string;
+}
+
+export interface AuthBoundryCapability {
+  name: string;
+  application: string;
+  status?: string;
+}
+
+export interface AuthBoundryProvisioningRequest {
+  id: string;
+  status: 'requested' | 'pending_approval' | 'approved' | 'denied' | 'applied' | string;
+}
+
+export interface AuthBoundryServiceAuthorizationEvidence {
+  principal: string;
+  tenant: string;
+  delegation?: string | null;
+  capabilities: Record<string, boolean>;
+  evidence: Record<string, unknown>;
+}
+
 export interface AuthBoundryControlPlane {
   listAgents(tenant: string): Promise<AuthBoundryAgent[]>;
   createAgent(tenant: string, agent: { id: string; name: string }): Promise<AuthBoundryAgent>;
   listDelegations(tenant: string, delegate: string): Promise<AuthBoundryDelegation[]>;
+  /** Canonical discovery surfaces. Optional only for compatibility with old injected test doubles. */
+  listProjects?(tenant: string): Promise<AuthBoundryProject[]>;
+  listApplications?(tenant: string, projectId: string): Promise<AuthBoundryApplication[]>;
+  getApplicationManifest?(tenant: string, applicationId: string): Promise<AuthBoundryApplicationManifest | null>;
+  listPolicies?(tenant: string, applicationId: string): Promise<AuthBoundryPolicy[]>;
+  listCapabilities?(tenant: string, applicationId: string): Promise<AuthBoundryCapability[]>;
+  requestProvisioning?(tenant: string, request: Record<string, unknown>): Promise<AuthBoundryProvisioningRequest>;
+  verifyServiceAuthorization?(capabilities: readonly string[]): Promise<AuthBoundryServiceAuthorizationEvidence>;
 }
 
 export class AuthBoundryControlPlaneError extends Error {
@@ -52,15 +137,26 @@ export class AuthBoundryControlPlaneError extends Error {
 
 export function createAuthBoundryControlPlane(options: {
   baseUrl: string;
-  operatorCredential: string;
+  serviceCredential: string;
+  operatorCredential?: string;
   fetch?: typeof fetch;
 }): AuthBoundryControlPlane {
   const origin = options.baseUrl.replace(/\/$/, '');
-  const call = async (path: string, init: RequestInit = {}): Promise<unknown> => {
+  const call = async (path: string, init: RequestInit = {}, privileged = false): Promise<unknown> => {
+    const credential = privileged ? options.operatorCredential : options.serviceCredential;
+    if (!credential) {
+      throw new AuthBoundryControlPlaneError(
+        401,
+        privileged ? 'operator_credential_required' : 'service_credential_required',
+        privileged
+          ? 'AUTHBOUNDRY_OPERATOR_CREDENTIAL is required for authority provisioning requests'
+          : 'FACTORY_SERVICE_CREDENTIAL is required for AuthBoundry discovery',
+      );
+    }
     const response = await (options.fetch ?? fetch)(`${origin}${path}`, {
       ...init,
       headers: {
-        'x-authboundry-session': options.operatorCredential,
+        authorization: `Bearer ${credential}`,
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(init.headers ?? {}),
       },
@@ -93,13 +189,74 @@ export function createAuthBoundryControlPlane(options: {
       return await call(query(AGENT_PATH, { tenant }), {
         method: 'POST',
         body: JSON.stringify({ id: agent.id, name: agent.name }),
-      }) as AuthBoundryAgent;
+      }, true) as AuthBoundryAgent;
     },
     async listDelegations(tenant, delegate) {
       const body = await call(query(DELEGATION_PATH, { tenant, delegate })) as {
         delegations?: AuthBoundryDelegation[];
       };
       return body.delegations ?? [];
+    },
+    async listProjects(tenant) {
+      const body = await call(query(PROJECT_PATH, { tenant })) as { projects?: AuthBoundryProject[] };
+      return body.projects ?? [];
+    },
+    async listApplications(tenant, projectId) {
+      const body = await call(query(APPLICATION_PATH, { tenant, project_id: projectId })) as {
+        applications?: AuthBoundryApplication[];
+      };
+      return body.applications ?? [];
+    },
+    async getApplicationManifest(tenant, applicationId) {
+      const body = await call(
+        query(`${APPLICATION_PATH}/${encodeURIComponent(applicationId)}/manifest`, { tenant }),
+      ) as { manifest?: AuthBoundryApplicationManifest } | AuthBoundryApplicationManifest;
+      if ('manifest' in body) return body.manifest ?? null;
+      return body as AuthBoundryApplicationManifest;
+    },
+    async listPolicies(tenant, applicationId) {
+      const body = await call(query(POLICY_PATH, { tenant, application: applicationId })) as {
+        policies?: AuthBoundryPolicy[];
+      };
+      return body.policies ?? [];
+    },
+    async listCapabilities(tenant, applicationId) {
+      const body = await call(query(CAPABILITY_PATH, { tenant, application: applicationId })) as {
+        capabilities?: AuthBoundryCapability[];
+      };
+      return body.capabilities ?? [];
+    },
+    async requestProvisioning(tenant, request) {
+      return await call(query(PROVISIONING_REQUEST_PATH, { tenant }), {
+        method: 'POST',
+        body: JSON.stringify(request),
+      }, true) as AuthBoundryProvisioningRequest;
+    },
+    async verifyServiceAuthorization(capabilities) {
+      const session = await call('/auth/session') as {
+        principal?: { id?: string };
+        tenant?: { id?: string };
+      };
+      const decisions: Record<string, boolean> = {};
+      let delegation: string | null | undefined;
+      const evidence: Record<string, unknown> = { session, decisions: {} };
+      for (const capability of capabilities) {
+        const decision = await call('/auth/authorize', {
+          method: 'POST',
+          body: JSON.stringify({ capability }),
+        }) as { allowed?: boolean; delegation?: string | null };
+        decisions[capability] = decision.allowed === true;
+        (evidence.decisions as Record<string, unknown>)[capability] = decision;
+        if (delegation === undefined) delegation = decision.delegation;
+        else if (decision.delegation !== undefined && decision.delegation !== delegation) delegation = null;
+      }
+      return {
+        principal: session.principal?.id ?? '',
+        tenant: session.tenant?.id ?? '',
+        delegation,
+        capabilities: decisions,
+        evidence,
+      };
     },
   };
 }

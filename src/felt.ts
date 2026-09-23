@@ -22,6 +22,7 @@ export const COLLECTIONS = {
   operationalWork: 'OperationalWork',
   operationalWorkEvents: 'OperationalWorkEvent',
   reconciliationCycles: 'ReconciliationCycle',
+  authorityReconciliations: 'AuthorityReconciliation',
 } as const;
 
 const DEFAULT_NAMESPACE = 'software-factory';

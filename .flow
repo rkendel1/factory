@@ -374,17 +374,28 @@ app software_factory {
     index reconciliationId using hash(reconciliationId)
   }
 
+  collection AuthorityReconciliation {
+    tenantId: text
+    projectId: text
+    applicationId: text?
+    discovered: json
+    required: json
+    actual: json
+    missing: json
+    request: json?
+    health: json
+    semanticDecision: json?
+    history: json?
+    createdAt: datetime
+    updatedAt: datetime
+    index tenantId using hash(tenantId)
+    index projectId using hash(projectId)
+    index applicationId using hash(applicationId)
+  }
+
   capability FactoryApplicationAccess {
     visibility internal
     application factory
-    grant factory.ui.read
-    grant configuration.read
-    grant configuration.write
-    grant configuration.delete
-    grant secret.rotate
-    grant apikeys.read
-    grant apikeys.create
-    grant apikeys.revoke
   }
 
   capability ArchitectureConformanceExecution {
@@ -577,6 +588,11 @@ app software_factory {
   }
 
   policy ReconciliationCycle {
+    read: authenticated
+    write: none
+  }
+
+  policy AuthorityReconciliation {
     read: authenticated
     write: none
   }

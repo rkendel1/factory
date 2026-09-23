@@ -12,6 +12,8 @@ export interface DeploymentConfig {
   authBoundryBrowserCookieSecret?: string;
   feltDbUrl?: string;
   feltDbToken?: string;
+  authBoundryOperatorCredential?: string;
+  factoryServiceCredential?: string;
 }
 
 /**
@@ -31,6 +33,12 @@ export function readDeploymentConfig(config: FactoryServiceConfig): DeploymentCo
     ),
     feltDbUrl: trim(config.serverUrl ?? process.env.FELTDB_URL),
     feltDbToken: trim(config.serverToken ?? process.env.FELTDB_TOKEN),
+    authBoundryOperatorCredential: trim(
+      config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL,
+    ),
+    factoryServiceCredential: trim(
+      config.factoryServiceCredential ?? process.env.FACTORY_SERVICE_CREDENTIAL,
+    ),
   };
 }
 
@@ -68,5 +76,7 @@ export function formatDeploymentConfigDiagnostics(config: DeploymentConfig): str
     `  AUTHBOUNDRY_URL configured: ${Boolean(config.authBoundryUrl)}`,
     `  AUTHBOUNDRY_BROWSER_COOKIE_SECRET configured: ${Boolean(config.authBoundryBrowserCookieSecret)}`,
     `  FELTDB_TOKEN configured: ${Boolean(config.feltDbToken)}`,
+    `  AUTHBOUNDRY_OPERATOR_CREDENTIAL configured: ${Boolean(config.authBoundryOperatorCredential)}`,
+    `  FACTORY_SERVICE_CREDENTIAL configured: ${Boolean(config.factoryServiceCredential)}`,
   ].join('\n');
 }

@@ -91,6 +91,12 @@ import {
   type AuthBoundryControlPlane,
 } from './provisioning.js';
 import {
+  FACTORY_REQUIRED_CAPABILITIES,
+  reconcileFactoryAuthority,
+  type FactoryAuthorityHealth,
+  type FactoryAuthorityReconciliation,
+} from './authority-reconciliation.js';
+import {
   createFactoryAppPortServices,
   resolveAppPortServicesDeployment,
   type FactoryAppPortServices,
@@ -298,6 +304,7 @@ export class FactoryService {
   private readonly workerId: string;
   private readonly leaseMs: number;
   private readonly controlPlane: AuthBoundryControlPlane | null;
+  private authorityReconciliation: FactoryAuthorityReconciliation | null = null;
   /**
    * The AppPort runtime for capabilities other systems call on Factory. Attn
    * reaches the operational work contract through it, over the same protocol
@@ -352,11 +359,15 @@ export class FactoryService {
     this.leaseMs = Math.max(1000, config.executionLeaseMs ?? 60_000);
     this.controlPlane = config.authBoundryControlPlane
       ?? ((config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)
-        && (config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
+        && (config.factoryServiceCredential ?? process.env.FACTORY_SERVICE_CREDENTIAL)
         ? createAuthBoundryControlPlane({
             baseUrl: (config.authBoundryUrl ?? process.env.AUTHBOUNDRY_URL)!,
-            operatorCredential: (config.authBoundryOperatorCredential
-              ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)!,
+            serviceCredential: (config.factoryServiceCredential
+              ?? process.env.FACTORY_SERVICE_CREDENTIAL)!,
+            ...((config.authBoundryOperatorCredential ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)
+              ? { operatorCredential: (config.authBoundryOperatorCredential
+                  ?? process.env.AUTHBOUNDRY_OPERATOR_CREDENTIAL)! }
+              : {}),
           })
         : null);
     this.appPortServices = createFactoryAppPortServices({
@@ -440,6 +451,33 @@ export class FactoryService {
       return this.connection;
     }
     const tenantId = this.config.authBoundryTenantId ?? this.config.tenantId ?? 'default';
+    if (this.controlPlane.listProjects) {
+      try {
+        this.authorityReconciliation = await reconcileFactoryAuthority({
+          controlPlane: this.controlPlane,
+          db: this.db,
+          tenantId,
+          serviceCredentialPresent: Boolean(
+            this.config.factoryServiceCredential ?? process.env.FACTORY_SERVICE_CREDENTIAL,
+          ),
+          semanticDecisions: this.config.mode === 'remote',
+        });
+        this.connection = this.authorityReconciliation.association
+          && this.authorityReconciliation.health.reconciliation.healthy
+          ? { status: 'associated', association: this.authorityReconciliation.association }
+          : {
+              status: this.authorityReconciliation.health.authBoundry.reachable ? 'unassociated' : 'unverified',
+              reason: this.authorityReconciliation.health.reconciliation.reason
+                ?? 'Factory authority reconciliation is incomplete',
+            };
+      } catch (error) {
+        this.connection = {
+          status: 'unverified',
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+      return this.connection;
+    }
     const request = { controlPlane: this.controlPlane, association: this.association, tenantId };
     try {
       const resolved = register
@@ -1789,6 +1827,51 @@ export class FactoryService {
       };
     }
     const decision = await probe(AUTONOMOUS_EXECUTION_CAPABILITY);
+    if (this.config.mode === 'remote') {
+      try {
+        const semantic = await this.db.semanticDecisions.execute({
+          definition: { kind: 'binary', predicate: AUTONOMOUS_EXECUTION_CAPABILITY },
+          context: {
+            authBoundryAllowed: decision.allowed,
+            authBoundryReason: decision.reason,
+            authorityReconciliationHealthy: this.authorityReconciliation?.health.reconciliation.healthy === true,
+          },
+          options: {
+            application_id: this.authorityReconciliation?.health.application.id ?? this.applicationId,
+            schema_version: 'factory-action-autonomy/1',
+          },
+          runtime: {
+            kind: 'recording',
+            metadata: {
+              runtime: 'factory-autonomy-projection',
+              model_revision: 'authboundry-projection/1',
+              decision_schema_revision: 'factory-action-autonomy/1',
+              execution_method: 'structured',
+            },
+            result: {
+              kind: 'binary',
+              decision: decision.allowed,
+              option_mass: 1,
+              supporting_fields: ['authBoundryAllowed', 'authBoundryReason', 'authorityReconciliationHealthy'],
+            },
+          },
+        });
+        return {
+          capability: AUTONOMOUS_EXECUTION_CAPABILITY,
+          allowed: decision.allowed,
+          reason: decision.reason,
+          ...(semantic.evaluation.evidence[0]?.decision_id
+            ? { semanticDecisionId: semantic.evaluation.evidence[0].decision_id }
+            : {}),
+        };
+      } catch (error) {
+        return {
+          capability: AUTONOMOUS_EXECUTION_CAPABILITY,
+          allowed: false,
+          reason: `FeltDB semantic decision unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
     return {
       capability: AUTONOMOUS_EXECUTION_CAPABILITY,
       allowed: decision.allowed,
@@ -2670,6 +2753,17 @@ export class FactoryService {
       action.status === 'running' || action.status === 'authorized');
     const attention = actions.filter((action) =>
       action.status === 'awaiting-approval' || action.status === 'failed');
+    const authorityRequest = this.authorityReconciliation?.record.request;
+    const authorityAttention = authorityRequest?.status === 'pending_approval'
+      ? [{
+          id: authorityRequest.id,
+          projectId: this.authorityReconciliation!.record.projectId,
+          status: 'awaiting-approval',
+          intent: this.authorityReconciliation!.health.reconciliation.reason
+            ?? 'AuthBoundry authority provisioning requires operator approval',
+          type: 'authority-reconciliation',
+        }]
+      : [];
 
     return {
       projects: projects.map((project) => ({
@@ -2702,26 +2796,44 @@ export class FactoryService {
         evidenceId: run.evidenceId ?? null,
         completedAt: run.completedAt ?? null,
       })),
-      attentionRequired: attention.map((action) => ({
-        id: action.id,
-        projectId: action.projectId,
-        status: action.status,
-        intent: action.intent,
-      })),
+      attentionRequired: [
+        ...authorityAttention,
+        ...attention.map((action) => ({
+          id: action.id,
+          projectId: action.projectId,
+          status: action.status,
+          intent: action.intent,
+        })),
+      ],
       authority: {
-        application: this.association.applicationId,
-        principals: this.association.agents.map((agent) => agent.principalId),
+        application: this.authorityReconciliation?.health.application.id ?? this.association.applicationId,
+        principals: this.authorityReconciliation
+          ? [this.authorityReconciliation.health.principal.id]
+          : this.association.agents.map((agent) => agent.principalId),
         // The association state, never "connected because a URL exists".
         state: this.connection.status,
         ...(this.connection.status === 'associated'
           ? { tenant: this.connection.association.tenantId, resource: this.connection.association.resource }
           : { reason: this.connection.reason }),
+        ...(this.authorityReconciliation ? {
+          health: this.authorityReconciliation.health,
+          request: this.authorityReconciliation.record.request ?? null,
+        } : {}),
       },
     };
   }
 
   connectionState(): FactoryConnectionState {
     return this.connection;
+  }
+
+  authorityState(): FactoryAuthorityReconciliation | null {
+    return this.authorityReconciliation;
+  }
+
+  autonomousReady(): boolean {
+    return this.connection.status === 'associated'
+      && (this.authorityReconciliation?.health.reconciliation.healthy ?? true);
   }
 
   declaredAssociation(): FactoryAssociation {
@@ -2798,8 +2910,9 @@ export class FactoryService {
 
   async health(): Promise<Record<string, unknown>> {
     const runtime = this.db.runtime();
+    const canonical = this.authorityReconciliation?.health;
     return {
-      ok: true,
+      ok: this.config.mode === 'remote' ? canonical?.reconciliation.healthy === true : true,
       service: 'factory-runner',
       pax: this.paxVersion ? { version: this.paxVersion } : { configured: false },
       appport: {
@@ -2821,11 +2934,65 @@ export class FactoryService {
         appPort: 'initialized',
         appPortServices: 'initialized',
       },
+      ...(canonical ?? this.legacyAuthorityHealth()),
+    };
+  }
+
+  private legacyAuthorityHealth(): FactoryAuthorityHealth {
+    const associated = this.connection.status === 'associated';
+    const associatedApplicationId = this.connection.status === 'associated'
+      ? this.connection.association.applicationId
+      : undefined;
+    const serviceCredential = Boolean(
+      this.config.factoryServiceCredential ?? process.env.FACTORY_SERVICE_CREDENTIAL,
+    );
+    const capabilities = new Set<string>();
+    if (this.connection.status === 'associated') {
+      for (const agent of this.connection.association.agents) {
+        for (const capability of agent.capabilities) capabilities.add(capability);
+      }
+    }
+    return {
+      authBoundry: { reachable: this.connection.status !== 'unverified' },
+      project: { discovered: false, expected: false },
+      application: {
+        discovered: associated,
+        attached: false,
+        ...(associatedApplicationId ? { project: 'unknown', id: associatedApplicationId } : {}),
+      },
+      manifest: { available: false },
+      principal: {
+        canonical: this.association.agents.some((agent) => agent.principalId === 'agent:factory-service'),
+        present: associated,
+        id: 'agent:factory-service',
+      },
+      policy: { complete: false, missing: [] },
+      delegation: { complete: associated, missing: associated ? [] : ['factory-service'] },
+      credentials: { service: serviceCredential },
+      capabilities: {
+        'factory.run': capabilities.has(FACTORY_REQUIRED_CAPABILITIES[0]),
+        'factory.action.autonomous': capabilities.has(FACTORY_REQUIRED_CAPABILITIES[1]),
+      },
+      reconciliation: {
+        healthy: false,
+        reason: 'AuthBoundry canonical application discovery is unavailable',
+      },
     };
   }
 
   /** The connection document: what AuthBoundry holds for this application. */
   connectionDocument(): Record<string, unknown> {
+    if (this.authorityReconciliation) {
+      return {
+        status: this.connection.status,
+        ...this.authorityReconciliation.health,
+        discoveredManifest: this.authorityReconciliation.manifest,
+        request: this.authorityReconciliation.record.request ?? null,
+        ...(this.connection.status === 'associated'
+          ? { authority: this.connection.association }
+          : { reason: this.connection.reason }),
+      };
+    }
     const declared = {
       application: this.association.applicationId,
       capabilities: [...this.association.capabilities],
@@ -3709,17 +3876,29 @@ if (import.meta.url === `file://${process.argv[1]}`) {
    * to prevent. Configuration and history stay durable either way, so enabling
    * the credential later resumes rather than restarts.
    */
-  if (config.factoryServiceCredential) {
+  if (config.factoryServiceCredential && service.autonomousReady()) {
     const session = createServiceSession(service.authenticator(), config.factoryServiceCredential);
-    service.startReconciliation({
-      context: session.context,
-      probe: session.probe,
-      ...(config.reconciliationTickMs ? { tickMs: config.reconciliationTickMs } : {}),
-    });
-    process.stdout.write('Continuous reconciliation worker started\n');
+    try {
+      // Validate the service credential and its factory.run authorization before
+      // admitting any autonomous work. The worker never falls back to the
+      // operator credential.
+      await session.context();
+      service.startReconciliation({
+        context: session.context,
+        probe: session.probe,
+        ...(config.reconciliationTickMs ? { tickMs: config.reconciliationTickMs } : {}),
+      });
+      process.stdout.write('Continuous reconciliation worker started\n');
+    } catch (error) {
+      process.stderr.write(
+        `Continuous reconciliation is blocked: invalid Factory service authorization evidence: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
   } else {
     process.stdout.write(
-      'Continuous reconciliation is idle: FACTORY_SERVICE_CREDENTIAL is not configured\n',
+      `Continuous reconciliation is idle: ${config.factoryServiceCredential
+        ? 'Factory authority reconciliation is incomplete'
+        : 'FACTORY_SERVICE_CREDENTIAL is not configured'}\n`,
     );
   }
 

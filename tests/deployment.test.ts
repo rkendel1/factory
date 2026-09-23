@@ -49,6 +49,8 @@ test('production deployment uses remote authority boundaries', async () => {
   assert.equal(packageJson.overrides['@appport/services'], '$@appport/services');
   assert.equal(packageJson.dependencies['@authboundry/core'], '^1.15.3');
   assert.equal(packageJson.overrides['@authboundry/core'], '$@authboundry/core');
+  assert.equal(packageJson.dependencies['@feltdb/core'], '0.11.6');
+  assert.equal(packageJson.overrides['@feltdb/core'], '$@feltdb/core');
 });
 
 test('remote bootstrap accepts topology and infrastructure credentials only', () => {

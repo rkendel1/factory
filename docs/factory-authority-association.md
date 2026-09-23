@@ -8,34 +8,30 @@ what Factory does when it is absent.
 
 | Element | Value | Owner |
 | --- | --- | --- |
-| Application | `factory` (resource `application:factory`) | `.flow` declares it; AuthBoundry authorizes it |
-| Agent principal | `agent:factory-service`, from each `.flow` `principal` statement | Factory registers it |
-| Delegation | `factory-application-<tenant>-delegation`, delegator `system`, no expiry | AuthBoundry creates and maintains it |
-| Capabilities | the eight `FactoryApplicationAccess` grants in `.flow` | shared vocabulary; no aliases |
+| Project | `factory` | AuthBoundry |
+| Application | `factory` (resource `application:factory`) | AuthBoundry |
+| Attachment and manifest | the discovered canonical application | AuthBoundry |
+| Agent principal | `agent:factory-service` | AuthBoundry manifest; Factory may request provisioning |
+| Policies and delegations | the manifest requirements and actual grants | AuthBoundry |
+| Autonomous capabilities | `factory.run`, `factory.action.autonomous` | AuthBoundry manifest and grants |
 
-AuthBoundry's bootstrap re-asserts the delegation on every start, which is what
-makes the association survive a restart or a redeployment. It refuses to assign
-that authority to a principal that does not exist, so registering the agent
-principal is Factory's step and must happen first.
+Factory does not reconstruct this association from `.flow`, environment names,
+the repository, or deployment metadata. `.flow` remains the data/execution
+contract; it is not an AuthBoundry policy manifest.
 
 ## What Factory does
 
-1. **Registers its agent principals** through `POST /_authboundry/agents`, once
-   per principal. Re-running provisioning addresses the same principal instead
-   of adding another.
-2. **Resolves its authority** by reading the association back from
-   `/_authboundry/delegations`. Factory never creates a delegation: an
-   application that could issue itself the authority it is about to check would
-   not be checking anything.
-3. **Derives its connection state** from that answer — `associated`,
-   `unassociated`, or `unverified` — rather than from the fact that an
-   `AUTHBOUNDRY_URL` was configured.
-4. **Fails closed.** A Factory service principal with no resolved application
-   context cannot act, and an authority Factory cannot reach is never mistaken
-   for one that agrees.
-5. **Executes Actions in the authorized application context** and records that
-   context — application, resource, tenant, principal, delegation — in the
-   execution contract and in the FeltDB evidence for the run.
+1. Discover the explicit Factory project, canonical application and attachment.
+2. Read the linked manifest and compare its principals, policies, delegations
+   and capabilities with AuthBoundry's actual state.
+3. Request missing state through AuthBoundry's privileged provisioning surface.
+   Factory never creates a policy or delegation and never treats a request as a
+   grant. `pending_approval` stops autonomous execution.
+4. Verify the service credential produces canonical authorization evidence for
+   both required capabilities.
+5. Persist discovery, differences, requests, outcomes and FeltDB semantic
+   decision evidence in `AuthorityReconciliation`, including prior passes.
+6. Execute only after the complete relationship reconciles successfully.
 
 `.flow`'s application id is a contract identity, not a grant. It names which
 application Factory *is*; it cannot stand in for the authority's answer about
@@ -43,21 +39,26 @@ what Factory may do, and Factory no longer treats it as one.
 
 ## Deployment
 
-Control-plane access needs an operator credential:
+Normal discovery and autonomous operation require the service credential. Only
+provisioning requests use the operator credential:
 
 ```sh
 fly secrets set AUTHBOUNDRY_OPERATOR_CREDENTIAL="..." -a factory-idvhpa
+fly secrets set FACTORY_SERVICE_CREDENTIAL="..." -a factory-idvhpa
 ```
 
-Without it Factory reports `unverified` and its service principals fail closed.
-The association itself is created by AuthBoundry once its own
-`AUTHBOUNDRY_OPERATOR_PRINCIPAL` names the registered Factory principal.
+The credentials are never substituted for each other. Missing service authority
+keeps the autonomous worker idle; missing operator authority leaves missing
+requirements visible without allowing Factory to grant them itself.
 
 ## Surfaces
 
-- `GET /v1/connection` — the association as AuthBoundry reports it. Returns 503
-  while the status is not `associated`.
-- `GET /health` — `authorities.authBoundry` carries the same status.
+- `GET /v1/connection` — discovered project/application/manifest, exact missing
+  authority, provisioning request, and resulting association. Returns 503 until
+  complete.
+- `GET /health` — separate reachability, project, attachment, manifest,
+  principal, policy, delegation, credential, capability and reconciliation
+  states.
 
 ## Product routes
 

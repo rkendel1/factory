@@ -23,9 +23,9 @@ export interface FactoryAgent {
 }
 
 /**
- * The association Factory requires of AuthBoundry: each `.flow` service
- * principal, as an AuthBoundry agent, delegated the declared application
- * capabilities and scoped to the Factory application.
+ * Legacy projection retained for execution-contract compatibility. Canonical
+ * startup authority is discovered from AuthBoundry's application manifest;
+ * `.flow` contributes no policy, delegation, or application grant.
  *
  * This is a statement of what `.flow` declares, not of what AuthBoundry holds.
  * Only `VerifiedAssociation` records what the authority actually answered.
@@ -138,7 +138,7 @@ function declaredServicePrincipals(flowSpec: FlowSpec): string[] {
   return [...principals].sort();
 }
 
-/** Derive the association `.flow` declares. `.flow` remains authoritative. */
+/** Derive only the local application/principal projection used by execution. */
 export function factoryAssociation(flowSpec: FlowSpec): FactoryAssociation {
   const application = createCanonicalApplicationContract(flowSpec);
   const agents = declaredServicePrincipals(flowSpec).map((name) => ({
