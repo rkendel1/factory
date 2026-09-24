@@ -13,10 +13,9 @@ Fly volume is required because both Factory and AppPort Services use remote Felt
 
 - Fly CLI authenticated to the target organization
 - A deployed AuthBoundry service
-- A remote FeltDB service using `@feltdb/core@0.11.6`
-- The commit-pinned PAX Linux x86-64 release `build-295cacf` available to the
-  image build with SHA-256
-  `dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb`
+- A remote FeltDB service using `@feltdb/core@0.11.7`
+- PAX 0.2.0, built with locked dependencies from commit
+  `6a53d3e86b767ea32a77c92bc3b388d8530eddd1`
 
 Create the application once if necessary:
 

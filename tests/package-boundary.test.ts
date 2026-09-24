@@ -33,6 +33,7 @@ test('published @feltdb/core can be consumed from an isolated project', async ()
       '--no-package-lock',
       archive,
       'typescript',
+      '@types/node',
     ], { cwd: consumer });
 
     const source = `
@@ -44,14 +45,21 @@ test('published @feltdb/core can be consumed from an isolated project', async ()
     `;
     const sourcePath = path.join(consumer, 'index.ts');
     await writeFile(sourcePath, source, 'utf8');
-    await execFileAsync(path.join(consumer, 'node_modules', '.bin', 'tsc'), [
-      '--strict',
-      '--target', 'ES2022',
-      '--module', 'NodeNext',
-      '--moduleResolution', 'NodeNext',
-      '--noEmit',
-      sourcePath,
-    ], { cwd: consumer });
+    try {
+      await execFileAsync(path.join(consumer, 'node_modules', '.bin', 'tsc'), [
+        '--ignoreConfig',
+        '--strict',
+        '--target', 'ES2022',
+        '--module', 'NodeNext',
+        '--moduleResolution', 'NodeNext',
+        '--types', 'node',
+        '--noEmit',
+        sourcePath,
+      ], { cwd: consumer });
+    } catch (error) {
+      const output = error as { stdout?: string; stderr?: string };
+      throw new Error(`Isolated TypeScript consumer failed:\n${output.stdout ?? ''}${output.stderr ?? ''}`);
+    }
 
     const packageJson = JSON.parse(await readFile(path.join(consumer, 'node_modules', '@feltdb', 'core', 'package.json'), 'utf8')) as {
       name: string;

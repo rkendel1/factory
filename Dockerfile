@@ -1,3 +1,13 @@
+FROM rust:1.96-bookworm AS pax-build
+
+ARG PAX_COMMIT=6a53d3e86b767ea32a77c92bc3b388d8530eddd1
+RUN cargo install \
+    --git https://github.com/rkendel1/pax.git \
+    --rev "${PAX_COMMIT}" \
+    --locked \
+    --root /opt/pax \
+  && test "$(/opt/pax/bin/pax --version)" = "pax 0.2.0"
+
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
@@ -13,16 +23,8 @@ FROM node:22-bookworm-slim
 RUN apt-get update \
   && apt-get install --no-install-recommends -y ca-certificates curl git \
   && rm -rf /var/lib/apt/lists/*
-ARG PAX_RELEASE=build-295cacf
-ARG PAX_SHA256=dc039e848c763215569823c9fed423ee03c1664a83543203a1f3880bb026f4eb
-RUN curl --fail --location --silent --show-error \
-    "https://github.com/rkendel1/pax/releases/download/${PAX_RELEASE}/pax-x86_64-unknown-linux-gnu.tar.gz" \
-    --output /tmp/pax.tar.gz \
-  && echo "${PAX_SHA256}  /tmp/pax.tar.gz" | sha256sum --check --strict \
-  && tar -xzf /tmp/pax.tar.gz -C /usr/local/bin pax \
-  && rm /tmp/pax.tar.gz \
-  && chmod 0755 /usr/local/bin/pax \
-  && pax --version
+COPY --from=pax-build /opt/pax/bin/pax /usr/local/bin/pax
+RUN test "$(pax --version)" = "pax 0.2.0"
 
 WORKDIR /app
 ENV NODE_ENV=production

@@ -1,5 +1,6 @@
 import express, { type ErrorRequestHandler, type Request, type RequestHandler } from 'express';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   API_KEY_MANAGEMENT_CAPABILITIES,
   ConfigurationAuthorizationError,
@@ -10,6 +11,8 @@ import {
   type AppPortServices,
   type AuthenticatedPrincipal,
   type CreateServicesOptions,
+  type ServiceAuthorizationDecision,
+  type ServiceAuthorizationRequest,
 } from '@appport/services';
 import { UI_PROTOCOL_ID, validateUiContribution, type UiContribution } from '@appport/protocol';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -22,7 +25,7 @@ import type { UiContributor } from './ui.js';
 
 export const appPortServicesUiContribution: UiContribution = validateUiContribution({
   protocol: UI_PROTOCOL_ID,
-  product: { id: 'appport-services', version: '0.4.3' },
+  product: { id: 'appport-services', version: '0.4.5' },
   surfaces: [
     { id: 'configuration', title: 'Configuration', route: '/configuration', capabilities: ['configuration.read'] },
     { id: 'secrets', title: 'Secrets', route: '/secrets', capabilities: ['configuration.read'] },
@@ -59,7 +62,11 @@ function requestedCapability(request: Request): string {
   if (request.path.startsWith('/_appport/api/keys/')) return API_KEY_MANAGEMENT_CAPABILITIES.revoke;
   if (request.path.startsWith('/v1/configuration')) {
     if (request.method === 'GET') return 'configuration.read';
-    if (request.method === 'PUT' && request.path.includes('/secrets/')) return 'secret.rotate';
+    if (request.path.includes('/secrets')) {
+      if (request.method === 'PUT') return 'credential.rotate';
+      if (request.method === 'DELETE') return 'credential.detach';
+      return 'credential.attach';
+    }
     if (request.method === 'DELETE') return 'configuration.delete';
     return 'configuration.write';
   }
@@ -221,9 +228,36 @@ export function createFactoryAppPortServices(options: {
   applicationId: string;
   environment: string;
 }): FactoryAppPortServices {
-  const services = options.services ?? createServices(options.deployment);
+  const requests = new AsyncLocalStorage<Request>();
+  const services = options.services ?? createServices({
+    ...options.deployment,
+    application: options.applicationId,
+    authorizer: {
+      async authorize(
+        request: ServiceAuthorizationRequest,
+        { signal }: { signal: AbortSignal },
+      ): Promise<ServiceAuthorizationDecision> {
+        const inbound = requests.getStore();
+        if (!inbound) throw new Error('AppPort Services authorization has no inbound Factory request');
+        if (signal.aborted) throw signal.reason;
+        const context = await options.authenticator().authenticate(inbound, request.capability);
+        return {
+          decision_id: `factory_${request.request_id}`,
+          allowed: true,
+          capability: request.capability,
+          tenant_id: request.tenant_id,
+          application_id: request.application_id,
+          subject: request.subject,
+          resource: request.resource,
+          ...(context.authority ? { reason: `Authorized by ${context.authority}` } : {}),
+          evaluated_at: Date.now(),
+        };
+      },
+    },
+  });
   const application = express();
   application.use(express.json());
+  application.use((request, _response, next) => requests.run(request, next));
   application.use((async (request, response, next) => {
     const correlationId = requestId(request);
     response.setHeader('x-request-id', correlationId);
@@ -235,8 +269,8 @@ export function createFactoryAppPortServices(options: {
         principalId: context.principal,
         principalType: 'api_key',
         tenantId: context.tenant,
-        scopes: [...new Set([capability, ...(context.authorizedCapabilities ?? [])])],
         credentialId: typeof context.session?.id === 'string' ? context.session.id : 'authboundry',
+        verifiedBy: 'host',
       } satisfies AuthenticatedPrincipal;
       if (request.path.startsWith('/v1/configuration')) {
         request.query.application = options.applicationId;
@@ -268,15 +302,8 @@ export function createFactoryAppPortServices(options: {
   }) as RequestHandler);
   application.use(createManagementRouter({
     services: { apiKeys: services.apiKeys },
+    authority: services.gateway,
     authenticate: (request) => request.auth ?? null,
-    authorize: async (capability, { request }) => {
-      try {
-        await options.authenticator().authenticate(request, capability);
-        return true;
-      } catch {
-        return false;
-      }
-    },
     includeConfiguration: false,
     includeUi: false,
   }));

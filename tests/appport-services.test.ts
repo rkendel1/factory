@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createServices, type AppPortServices } from '@appport/services';
+import {
+  createServices,
+  type AppPortServices,
+  type ServiceAuthorizationRequest,
+  type ServiceAuthorizer,
+} from '@appport/services';
 import type { StateFirstDB } from '@feltdb/core';
 import { resolveAppPortServicesDeployment } from '../src/appport-services.js';
 import { createHttpServer } from '../src/server.js';
@@ -13,6 +18,20 @@ import {
 } from '../src/auth.js';
 
 const secret = 'secret-value-that-must-not-be-returned';
+
+const allowServiceEffects: ServiceAuthorizer = {
+  async authorize(request: ServiceAuthorizationRequest) {
+    return {
+      decision_id: `test_${request.request_id}`,
+      allowed: true,
+      capability: request.capability,
+      tenant_id: request.tenant_id,
+      application_id: request.application_id,
+      subject: request.subject,
+      resource: request.resource,
+    };
+  },
+};
 
 async function withServicesServer(
   authenticator: Authenticator,
@@ -34,7 +53,8 @@ async function withServicesServer(
 }
 
 function authorized(seen: string[], allowed = [
-  'configuration.read', 'configuration.write', 'configuration.delete', 'secret.rotate',
+  'configuration.read', 'configuration.write', 'configuration.delete',
+  'credential.attach', 'credential.rotate', 'credential.detach',
   'apikeys.read', 'apikeys.create', 'apikeys.revoke', 'notifications.read', 'webhooks.read', 'jobs.read',
 ]): Authenticator {
   return {
@@ -51,7 +71,9 @@ function authorized(seen: string[], allowed = [
 
 test('Factory consumes packaged configuration and secrets with AuthBoundry context', async () => {
   const seen: string[] = [];
-  const services = createServices({ memory: true, namespace: 'configuration-consumption' });
+  const services = createServices({
+    memory: true, namespace: 'configuration-consumption', application: 'software_factory', authorizer: allowServiceEffects,
+  });
   await withServicesServer(authorized(seen), async (origin) => {
     const query = '?application=caller_override&environment=production';
     const variable = await fetch(`${origin}/v1/configuration/variables${query}`, {
@@ -74,14 +96,14 @@ test('Factory consumes packaged configuration and secrets with AuthBoundry conte
 
     const createdSecret = await fetch(`${origin}/v1/configuration/secrets${query}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'DEPLOY_TOKEN', value: secret, required: true }),
+      body: JSON.stringify({ name: 'DEPLOY_TOKEN', credentialRef: 'credential-ref:deploy-token', required: true }),
     });
     assert.equal(createdSecret.status, 201);
     assert.doesNotMatch(await createdSecret.text(), new RegExp(secret));
 
     const rotatedSecret = await fetch(`${origin}/v1/configuration/secrets/DEPLOY_TOKEN${query}`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ value: `${secret}-rotated`, required: true }),
+      body: JSON.stringify({ credentialRef: 'credential-ref:deploy-token-rotated', required: true }),
     });
     const rotatedSecretText = await rotatedSecret.text();
     assert.equal(rotatedSecret.status, 200, rotatedSecretText);
@@ -99,8 +121,8 @@ test('Factory consumes packaged configuration and secrets with AuthBoundry conte
     const empty = await fetch(`${origin}/v1/configuration${query}`);
     assert.deepEqual(await empty.json(), { variables: [], secrets: [], declarations: [] });
     assert.deepEqual(seen, [
-      'configuration.write', 'configuration.write', 'configuration.write', 'secret.rotate',
-      'configuration.read', 'configuration.delete', 'configuration.delete', 'configuration.read',
+      'configuration.write', 'configuration.write', 'credential.attach', 'credential.rotate',
+      'configuration.read', 'configuration.delete', 'credential.detach', 'configuration.read',
     ]);
   }, services);
   const db = services['_getDb'] as StateFirstDB;
@@ -127,12 +149,14 @@ test('packaged management screens are mounted rather than recreated by Factory',
 
 test('packaged API-key management routes use explicit AuthBoundry capabilities', async () => {
   const seen: string[] = [];
-  const services = createServices({ memory: true, namespace: `api-key-management-${Date.now()}` });
+  const services = createServices({
+    memory: true, namespace: `api-key-management-${Date.now()}`, application: 'software_factory', authorizer: allowServiceEffects,
+  });
   await withServicesServer(authorized(seen), async (origin) => {
     const createdResponse = await fetch(`${origin}/_appport/api/keys`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'deployment', scopes: ['configuration.read'] }),
+      body: JSON.stringify({ name: 'deployment' }),
     });
     const createdText = await createdResponse.text();
     assert.equal(createdResponse.status, 201, createdText);
@@ -156,7 +180,9 @@ test('packaged API-key management routes use explicit AuthBoundry capabilities',
 });
 
 test('service API defaults to the host application and environment context', async () => {
-  const services = createServices({ memory: true, namespace: `host-context-${Date.now()}` });
+  const services = createServices({
+    memory: true, namespace: `host-context-${Date.now()}`, application: 'software_factory', authorizer: allowServiceEffects,
+  });
   await withServicesServer(authorized([]), async (origin) => {
     const response = await fetch(`${origin}/v1/configuration/variables`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -247,7 +273,9 @@ test('AppPort Services returns 401 when no AuthBoundry session exists', async ()
 
 test('service unavailability returns a sanitized failure without a local fallback', async () => {
   const workingDirectory = await createTempWorkspace('factory-services-unavailable');
-  const services = createServices({ mode: 'local', namespace: 'unavailable', path: workingDirectory });
+  const services = createServices({
+    mode: 'local', namespace: 'unavailable', path: workingDirectory, application: 'software_factory', authorizer: allowServiceEffects,
+  });
   services.configuration.list = async () => { throw new Error(`backend unavailable: ${secret}`); };
   await withServicesServer(authorized([]), async (origin) => {
     const response = await fetch(`${origin}/v1/configuration`);
@@ -265,7 +293,9 @@ test('AppPort Services state stays on the Factory FeltDB surface, not the canoni
   const authority = createServer((request, response) => {
     requested.push(`${request.method} ${request.url}`);
     response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify({ records: [], nextCursor: null }));
+    response.end(JSON.stringify(request.url?.startsWith('/collections/')
+      ? []
+      : { records: [], nextCursor: null }));
   });
   await new Promise<void>((resolve) => authority.listen(0, resolve));
   const address = authority.address();
@@ -281,14 +311,9 @@ test('AppPort Services state stays on the Factory FeltDB surface, not the canoni
   assert.equal(deployment.applicationId, undefined);
 
   try {
-    const listed = await createServices(deployment).configuration.list(
-      { tenantId: 'tenant-a', applicationId: 'software_factory', environment: 'production' },
-      {
-        principalId: 'operator-1', principalType: 'api_key', tenantId: 'tenant-a',
-        scopes: ['configuration.read'], credentialId: 'authboundry',
-      },
-    );
-    assert.deepEqual(listed, { variables: [], secrets: [], declarations: [] });
+    const services = createServices({ ...deployment, application: 'software_factory', authorizer: allowServiceEffects });
+    const db = services['_getDb'] as StateFirstDB;
+    assert.deepEqual(await db.collection<Record<string, unknown>>('ConfigurationVariables').all(), []);
   } finally {
     await new Promise<void>((resolve, reject) => authority.close((error) => error ? reject(error) : resolve()));
   }
@@ -296,12 +321,14 @@ test('AppPort Services state stays on the Factory FeltDB surface, not the canoni
   // The canonical application service resolves an application revision that
   // Factory never registers, and answered every configuration request with 404.
   assert.deepEqual(requested.filter((entry) => entry.includes('/v1/')), []);
-  assert.ok(requested.includes('POST /query'));
+  assert.ok(requested.some((entry) => entry.includes('/collections/ConfigurationVariables')));
 });
 
 test('a durable authority failure is reported as an upstream failure, not a missing resource', async () => {
   const workingDirectory = await createTempWorkspace('factory-services-authority');
-  const services = createServices({ mode: 'local', namespace: 'authority-failure', path: workingDirectory });
+  const services = createServices({
+    mode: 'local', namespace: 'authority-failure', path: workingDirectory, application: 'software_factory', authorizer: allowServiceEffects,
+  });
   services.configuration.list = async () => {
     throw Object.assign(new Error(`application not found: ${secret}`), {
       status: 404, code: 'NOT_FOUND', requestId: 'felt_authority_1',
